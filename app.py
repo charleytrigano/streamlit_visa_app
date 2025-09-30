@@ -7,7 +7,7 @@ from datetime import datetime
 # Clear cache via URL param ?clear=1 (optionnel)
 # =============================
 try:
-    params = st.experimental_get_query_params()
+    params = st.query_params
     if params.get("clear", ["0"])[0] == "1":
         st.cache_data.clear()
         try:
@@ -301,6 +301,3 @@ with st.expander("Aide / Dépannage"):
         - L'export Excel utilise **openpyxl**; si besoin, installez `pip install openpyxl`.
         """
     )
-
-
-
