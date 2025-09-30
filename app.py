@@ -15,12 +15,13 @@ def _pick_sheet(sheet_names, preferred_order=("Visa", "Clients")):
     return sheet_names[0]
 
 @st.cache_data(show_spinner=False)
-def load_data(xlsx_file, preferred_sheet_order=("Visa", "Clients")):
-    """Load a sheet from an Excel file-like object with robust sheet selection.
+def load_data(xlsx_input, preferred_sheet_order=("Visa", "Clients")):
+    """Load a sheet from an Excel *path or file-like* with robust sheet selection.
 
+    xlsx_input can be a str path (e.g., "C:/.../file.xlsx") or an uploaded file.
     Returns (df, used_sheet_name, all_sheet_names)
     """
-    xls = pd.ExcelFile(xlsx_file)
+    xls = pd.ExcelFile(xlsx_input)
     sheet_names = xls.sheet_names
     used_sheet = _pick_sheet(sheet_names, preferred_sheet_order)
     df = pd.read_excel(xls, sheet_name=used_sheet)
@@ -70,9 +71,26 @@ if not up:
     st.stop()
 
 # Chargement robuste
+# Autoriser un chemin local en plus de l'upload
+col_path, col_hint = st.columns([3,2])
+with col_path:
+    data_path = st.text_input("Ou saisissez un chemin local vers le .xlsx (optionnel)", value="", help="Exemple: C:/Users/charl/Desktop/visa_app/data.xlsx")
+with col_hint:
+    st.caption("Si un chemin est fourni, il sera prioritaire sur l'upload.")
+
 preferred = ("Visa", "Clients") if prefer_visa else ("Clients", "Visa")
-df, used_sheet, sheet_names = load_data(up, preferred)
-all_sheets, _ = load_all_sheets(up)
+
+src = data_path if data_path.strip() else up
+if not src:
+    st.info("Chargez un fichier ou renseignez un chemin local pour continuer.")
+    st.stop()
+
+try:
+    df, used_sheet, sheet_names = load_data(src, preferred)
+    all_sheets, _ = load_all_sheets(src)
+except ValueError as e:
+    st.error(f"Erreur lors de la lecture du classeur : {e}")
+    st.stop()
 
 st.success(f"✅ Onglet utilisé : **{used_sheet}** · Onglets trouvés : {', '.join(sheet_names)}")
 
@@ -176,4 +194,5 @@ with st.expander("Aide / Dépannage"):
         - L'export Excel utilise **openpyxl**; si besoin, installez `pip install openpyxl`.
         """
     )
+
 
