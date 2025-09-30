@@ -190,10 +190,13 @@ if "Clients" in all_sheets:
         counts = clients_df[col_type].astype(str).str.strip().value_counts().head(15)
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots()
-        counts.plot(kind="bar", ax=ax)
+        ax.bar(range(len(counts)), counts.values)
+        ax.set_xticks(range(len(counts)))
+        ax.set_xticklabels(list(counts.index), rotation=45, ha="right")
         ax.set_xlabel(col_type)
         ax.set_ylabel("Occurrences")
         ax.set_title("Top valeurs — Type de visa")
+        fig.tight_layout()
         st.pyplot(fig)
     else:
         st.info("Colonne 'Type Visa' non trouvée : le graphique de répartition est masqué.")
@@ -298,5 +301,6 @@ with st.expander("Aide / Dépannage"):
         - L'export Excel utilise **openpyxl**; si besoin, installez `pip install openpyxl`.
         """
     )
+
 
 
