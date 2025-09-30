@@ -1,88 +1,179 @@
 import streamlit as st
 import pandas as pd
-import altair as alt
 import io
+from datetime import datetime
 
-st.set_page_config(page_title="📊 Visas & Règlements", layout="wide")
-st.title("📊 Tableau de bord — Visas & Règlements")
+# =============================
+# Helpers
+# =============================
 
-# ========= Helpers =========
-def _find_col(df: pd.DataFrame, candidates):
-    cols = {c.lower(): c for c in df.columns}
-    for cand in candidates:
-        for low, orig in cols.items():
-            if cand in low:
-                return orig
-    return None
+def _pick_sheet(sheet_names, preferred_order=("Visa", "Clients")):
+    """Return the first sheet that exists from preferred_order, else the first available."""
+    for name in preferred_order:
+        if name in sheet_names:
+            return name
+    return sheet_names[0]
 
-def _coerce_money(s: pd.Series) -> pd.Series:
-    if s is None:
-        return pd.Series([], dtype="float64")
-    s = (
-        s.astype(str)
-         .replace({',':'.', '€':'', 'EUR':'', 'euros':'', 'Euros':'', ' ':''}, regex=True)
-    )
-    return pd.to_numeric(s, errors="coerce")
+@st.cache_data(show_spinner=False)
+def load_data(xlsx_file, preferred_sheet_order=("Visa", "Clients")):
+    """Load a sheet from an Excel file-like object with robust sheet selection.
 
-def normalize_any_excel(xls_file) -> pd.DataFrame:
+    Returns (df, used_sheet_name, all_sheet_names)
     """
-    Accepte : chemin, buffer BytesIO (Streamlit uploader), ou file-like.
-    1) Si l’onglet 'Données normalisées' existe => le lit tel quel.
-    2) Sinon : prend la feuille la plus grande, détecte les colonnes et normalise.
-    """
-    xfile = pd.ExcelFile(xls_file)
-    if "Données normalisées" in xfile.sheet_names:
-        df = pd.read_excel(xls_file, sheet_name="Données normalisées")
-    else:
-        # Choisir la plus grosse feuille
-        sheets = {sh: pd.read_excel(xls_file, sheet_name=sh) for sh in xfile.sheet_names}
-        main_sheet = max(sheets, key=lambda k: len(sheets[k]))
-        df = sheets[main_sheet].copy()
+    xls = pd.ExcelFile(xlsx_file)
+    sheet_names = xls.sheet_names
+    used_sheet = _pick_sheet(sheet_names, preferred_sheet_order)
+    df = pd.read_excel(xls, sheet_name=used_sheet)
+    # Normalize column names: strip spaces/newlines
+    df.columns = [str(c).strip() for c in df.columns]
+    return df, used_sheet, sheet_names
 
-        # Nettoyage
-        df = df.dropna(how="all")
+@st.cache_data(show_spinner=False)
+def load_all_sheets(xlsx_file):
+    """Load all sheets into a dict {sheet_name: DataFrame} with normalized columns."""
+    xls = pd.ExcelFile(xlsx_file)
+    out = {}
+    for name in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=name)
         df.columns = [str(c).strip() for c in df.columns]
+        out[name] = df
+    return out, xls.sheet_names
 
-        # Colonnes clés
-        date_col = "Date" if "Date" in df.columns else _find_col(df, ["date", "délivr", "delivr", "émission", "emission"])
-        visa_col = "Visa" if "Visa" in df.columns else _find_col(df, ["visa", "type de visa", "categorie", "catégorie"])
-        statut_col = "Statut" if "Statut" in df.columns else _find_col(df, ["règl", "regl", "paiement", "payment", "statut", "status"])
-        amount_col = _find_col(df, ["montant", "total", "prix", "tarif"])
-        paid_col   = _find_col(df, ["payé", "paye", "versé", "acompte", "reçu", "encaisse"])
-        due_col    = _find_col(df, ["reste", "solde", "à payer", "a payer", "du"])
+@st.cache_data(show_spinner=False)
+def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Feuille1") -> bytes:
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return buffer.getvalue()
 
-        # Date
-        if date_col:
-            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-        else:
-            # si pas de vraie date, crée une colonne vide pour éviter les crashs
-            date_col = "Date"
-            df[date_col] = pd.NaT
+# =============================
+# UI
+# =============================
+st.set_page_config(
+    page_title="Visa App",
+    page_icon="🛂",
+    layout="wide",
+)
 
-        # Type visa
-        if not visa_col:
-            visa_col = "Visa"
-            df[visa_col] = "Inconnu"
+st.title("🛂 Visa App — Excel → analyse & export")
+st.caption("Sélection automatique de l'onglet **Visa** ou **Clients** si disponible.")
 
-        # Statut règlement
-        if not statut_col:
-            statut_col = "Statut"
-            df[statut_col] = "Inconnu"
+with st.sidebar:
+    st.header("Importer votre Excel")
+    up = st.file_uploader("Fichier .xlsx", type=["xlsx"], help="Choisissez le classeur contenant les onglets 'Visa' et/ou 'Clients'.")
+    prefer_visa = st.toggle("Préférer l'onglet 'Visa' s'il existe", value=True)
+    st.divider()
+    st.markdown("**Astuce** : si le nom de l'onglet change, l'application basculera automatiquement sur le premier onglet disponible.")
 
-        # Montants
-        df["Montant"] = _coerce_money(df[amount_col]) if amount_col else pd.NA
-        df["Payé"]    = _coerce_money(df[paid_col])   if paid_col   else pd.NA
-        if due_col:
-            df["Reste"] = _coerce_money(df[due_col])
-        else:
-            df["Reste"] = df["Montant"] - df["Payé"] if ("Montant" in df and "Payé" in df) else pd.NA
+if not up:
+    st.info("Chargez un fichier Excel (.xlsx) dans la barre latérale pour commencer.")
+    st.stop()
 
-        # Année / Mois
-        df["Année"] = pd.to_datetime(df[date_col], errors="coerce").dt.year
-        df["Mois"]  = pd.to_datetime(df[date_col], errors="coerce").dt.to_period("M").astype(str)
+# Chargement robuste
+preferred = ("Visa", "Clients") if prefer_visa else ("Clients", "Visa")
+df, used_sheet, sheet_names = load_data(up, preferred)
+all_sheets, _ = load_all_sheets(up)
 
-        # Harmonisation des noms finaux
-        if visa_col != "Visa":
-            df = df.rename(columns={visa_col: "Visa"})
-        if statut_col != "Statut":
-            df = df.rename(columns={
+st.success(f"✅ Onglet utilisé : **{used_sheet}** · Onglets trouvés : {', '.join(sheet_names)}")
+
+# =============================
+# Tableau + Filtres
+# =============================
+
+st.subheader("Aperçu & filtres")
+
+# Recherche plein-texte simple
+col_search, col_rows = st.columns([3,1])
+with col_search:
+    q = st.text_input("Recherche (plein-texte sur toutes les colonnes)", placeholder="Tapez un mot-clé…")
+with col_rows:
+    max_rows = st.number_input("Lignes à afficher", min_value=5, max_value=5000, value=100, step=5)
+
+filtered = df.copy()
+if q:
+    mask = pd.Series(False, index=filtered.index)
+    for c in filtered.columns:
+        try:
+            mask = mask | filtered[c].astype(str).str.contains(q, case=False, na=False)
+        except Exception:
+            pass
+    filtered = filtered[mask]
+
+# Filtres par colonne (catégorielles seulement)
+with st.expander("Filtres par colonne (catégories)"):
+    for col in filtered.select_dtypes(include=["object", "category"]).columns:
+        unique_vals = sorted([v for v in filtered[col].dropna().unique() if v != ""], key=lambda x: str(x).lower())
+        if 1 < len(unique_vals) <= 1000:
+            sel = st.multiselect(f"{col}", unique_vals, default=None)
+            if sel:
+                filtered = filtered[filtered[col].isin(sel)]
+
+# Stats rapides
+st.markdown(
+    f"**{len(filtered):,}** lignes affichées (sur **{len(df):,}**), **{len(df.columns)}** colonnes."
+)
+
+st.dataframe(filtered.head(int(max_rows)), use_container_width=True)
+
+# =============================
+# Exports
+# =============================
+
+st.subheader("Exports")
+col1, col2 = st.columns(2)
+filename_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+with col1:
+    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Télécharger CSV (filtré)",
+        data=csv_bytes,
+        file_name=f"{used_sheet}_filtre_{filename_stamp}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with col2:
+    xls_bytes = to_excel_bytes(filtered, sheet_name=used_sheet)
+    st.download_button(
+        "⬇️ Télécharger Excel (filtré)",
+        data=xls_bytes,
+        file_name=f"{used_sheet}_filtre_{filename_stamp}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+# =============================
+# Onglet secondaire : Clients / Visa si présents
+# =============================
+
+st.divider()
+other_tabs = [name for name in ("Visa", "Clients") if name in all_sheets and name != used_sheet]
+if other_tabs:
+    st.subheader("Autre onglet disponible")
+    sel = st.selectbox("Afficher l'autre onglet :", options=other_tabs)
+    df_other = all_sheets[sel]
+    st.caption(f"Aperçu de l'onglet **{sel}**")
+    st.dataframe(df_other.head(200), use_container_width=True)
+    other_csv = df_other.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        f"⬇️ Télécharger CSV — {sel}",
+        data=other_csv,
+        file_name=f"{sel}_{filename_stamp}.csv",
+        mime="text/csv",
+    )
+else:
+    st.caption("Aucun autre onglet à afficher.")
+
+# =============================
+# Notes
+# =============================
+with st.expander("Aide / Dépannage"):
+    st.markdown(
+        """
+        - Si vous voyez une erreur de type **Worksheet not found**, renommez l'onglet ou laissez l'app choisir automatiquement l'onglet disponible.
+        - Cette app normalise simplement les noms de colonnes (suppression d'espaces inutiles). Aucun mapping de colonnes n'est imposé.
+        - Les filtres par colonnes s'appliquent aux colonnes de type texte/catégorie.
+        - L'export Excel utilise **openpyxl**; si besoin, installez `pip install openpyxl`.
+        """
+    )
+
