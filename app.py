@@ -202,7 +202,8 @@ if page == "Visa":
                     if sel:
                         filtered = filtered[filtered[col].isin(sel)]
 
-        st.markdown(f"**{len(filtered):,}** lignes affichées (sur **{len[df]:,}**), **{len(df.columns)}** colonnes.")
+        # ✅ Correction ici : len(df) au lieu de len[df]
+        st.markdown(f"**{len(filtered):,}** lignes affichées (sur **{len(df):,}**), **{len(df.columns)}** colonnes.")
         st.dataframe(filtered.head(int(max_rows)), use_container_width=True)
 
         st.subheader("Exports — Visa")
