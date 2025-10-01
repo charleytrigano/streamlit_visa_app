@@ -1,4 +1,4 @@
-# app.py — Version finale avec contrôle d'index explicite avant ILOC (Corrigé 18)
+# app.py — Version finale avec contrôle de taille de DataFrame (Corrigé 19)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -158,6 +158,7 @@ if page == "Clients":
         empty_row = pd.Series("", index=df.columns)
         empty_row["Paiements"] = [] 
         
+        # Ligne 161 (ajout)
         render_client_form(df, empty_row, action="add")
 
     elif crud_mode == "Lister/Modifier/Supprimer":
@@ -197,7 +198,7 @@ if page == "Clients":
         st.dataframe(filtered.reset_index(drop=True), use_container_width=True)
 
         # Sélection et modification
-        if len(filtered) > 0:
+        if len(filtered) > 0: # <-- Protection critique
             
             # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
             
@@ -218,7 +219,6 @@ if page == "Clients":
             final_safe_index = st.session_state.client_sel_idx
 
             # 2. L'utilisateur choisit l'index affiché (Clé Statique)
-            # Nous revenons à une clé statique pour éviter les problèmes de recréation de widget
             sel_idx_float = st.number_input(
                 "Ouvrir dossier (index affiché)", 
                 min_value=0, 
@@ -234,10 +234,11 @@ if page == "Clients":
                 st.session_state.client_sel_idx = sel_idx
                 st.rerun() 
             
-            # --- VÉRIFICATION CRITIQUE AVANT ACCÈS (Défense contre l'erreur 245) ---
+            # --- VÉRIFICATION CRITIQUE FINALE AVANT ACCÈS ---
             if st.session_state.client_sel_idx < 0 or st.session_state.client_sel_idx > max_idx:
+                 # Dernier filet de sécurité : si le rerun n'a pas eu lieu assez vite.
                  st.session_state.client_sel_idx = 0
-                 st.error("Désynchronisation critique d'index, redémarrage.")
+                 st.warning("Désynchronisation critique d'index, nouvelle tentative de redémarrage.")
                  st.rerun()
                  st.stop()
                  
@@ -247,11 +248,11 @@ if page == "Clients":
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # Ligne de l'appel (ligne 245 environ)
+            # Ligne 251 (mise à jour)
             render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
             
         else:
-            st.info("Aucun dossier client ne correspond aux filtres.")
+            st.info("Aucun dossier client ne correspond aux filtres.") # <-- Cas d'un DataFrame filtré vide
 
 
 elif page == "Visa":
@@ -270,7 +271,7 @@ elif page == "Visa":
         
         st.dataframe(df, use_container_width=True)
         
-        if len(df) > 0:
+        if len(df) > 0: # <-- Protection critique
             max_idx = len(df) - 1
             
             # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
@@ -304,10 +305,10 @@ elif page == "Visa":
                 st.session_state.visa_sel_idx = sel_idx
                 st.rerun()
 
-            # --- VÉRIFICATION CRITIQUE AVANT ACCÈS (Défense contre l'erreur 310) ---
+            # --- VÉRIFICATION CRITIQUE FINALE AVANT ACCÈS ---
             if st.session_state.visa_sel_idx < 0 or st.session_state.visa_sel_idx > max_idx:
                  st.session_state.visa_sel_idx = 0
-                 st.error("Désynchronisation critique d'index, redémarrage.")
+                 st.warning("Désynchronisation critique d'index, nouvelle tentative de redémarrage.")
                  st.rerun()
                  st.stop()
                  
@@ -316,12 +317,12 @@ elif page == "Visa":
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
-            # Ligne de l'appel (ligne 310 environ)
+            # Ligne 320 (mise à jour)
             render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
             
 
         else:
-            st.info("Aucun type de visa à gérer.")
+            st.info("Aucun type de visa à gérer.") # <-- Cas d'un DataFrame Visa vide
         
 # --- 4. DEFINITION DES FORMULAIRES (CRUD) ---
 
