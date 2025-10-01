@@ -1,4 +1,4 @@
-# app.py — Version finale avec CRUD complet et indexation ultra-sécurisée (Corrigé 5)
+# app.py — Version finale avec CRUD complet et indexation ultra-sécurisée (Corrigé 6)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -201,46 +201,44 @@ if page == "Clients":
             
             # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
             
-            # 1. Calcul de la borne supérieure
             max_idx = len(filtered) - 1
             
-            # Initialisation/Réajustement de l'index de sélection
             if 'client_sel_idx' not in st.session_state:
                 st.session_state.client_sel_idx = 0
             
             current_value = st.session_state.client_sel_idx
             
-            # Pré-check: Si la valeur stockée est hors limites, on la ramène à 0
+            # 1. Cap le *stockage* si l'ancien index est trop grand pour le nouveau DataFrame
             if current_value > max_idx or current_value < 0:
-                 current_value = 0 
+                 current_value = 0 # On réinitialise à 0 pour l'affichage du number_input
                  st.session_state.client_sel_idx = 0
             
-            # L'utilisateur choisit l'index affiché dans le DF filtré (0 à max_idx)
+            # 2. L'utilisateur choisit l'index affiché dans le DF filtré (0 à max_idx)
             sel_idx_float = st.number_input(
                 "Ouvrir dossier (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
-                value=current_value,
+                value=current_value, # Utilise la valeur sécurisée
                 key="client_idx_input"
             )
             
-            sel_idx = int(sel_idx_float)
-            st.session_state.client_sel_idx = sel_idx
+            sel_idx = int(sel_idx_float) 
             
-            # 2. VÉRIFICATION DE LIMITE AGRESSIVE après lecture du composant
-            # Ceci est la défense ultime pour le problème de course conditionnelle
-            if sel_idx < 0 or sel_idx > max_idx:
-                st.session_state.client_sel_idx = 0
-                # st.warning("Index sélectionné hors limite après filtrage. Réinitialisation de l'UI...")
-                st.rerun() # On force le redémarrage pour corriger la valeur du number_input
-                
-            # 3. Accès sécurisé
+            # 3. PLAFONNEMENT ULTIME: Si la valeur lue du widget est temporairement hors limites (race condition), on la corrige.
+            if sel_idx > max_idx:
+                sel_idx = max_idx # Plafonner à l'index maximum possible
+            elif sel_idx < 0:
+                sel_idx = 0
+            
+            # 4. On met à jour l'état de session avec l'index sécurisé pour la prochaine exécution
+            st.session_state.client_sel_idx = sel_idx 
+            
+            # 5. Accès sécurisé à la ligne (Line 244 dans votre rapport)
             sel_row_filtered = filtered.iloc[sel_idx]
             original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # Ligne 239 dans votre rapport précédent : Appel désormais sûr
             render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
         else:
             st.info("Aucun dossier client ne correspond aux filtres.")
@@ -283,13 +281,15 @@ elif page == "Visa":
             )
             
             sel_idx = int(sel_idx_float)
+            
+            # PLAFONNEMENT
+            if sel_idx > max_idx:
+                sel_idx = max_idx
+            elif sel_idx < 0:
+                sel_idx = 0
+
             st.session_state.visa_sel_idx = sel_idx
             
-            # VÉRIFICATION DE LIMITE AGRESSIVE
-            if sel_idx < 0 or sel_idx > max_idx:
-                st.session_state.visa_sel_idx = 0
-                st.rerun()
-
             sel_row = df.iloc[sel_idx]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
@@ -469,88 +469,4 @@ def render_visa_form(df, sel_row, action, original_index=None):
 
         # Boutons d'action
         col_buttons = st.columns(3)
-        submitted = col_buttons[0].form_submit_button(button_label)
-        
-        delete_button = None
-        if not is_add:
-            delete_button = col_buttons[1].form_submit_button("❌ Supprimer le type")
-
-        if submitted:
-            if not visa_code:
-                 st.error("Veuillez entrer un Code Visa.")
-                 return
-
-            if action == "add" and visa_code in st.session_state.visa_df['Visa'].values:
-                 st.error(f"Le code Visa '{visa_code}' existe déjà. Veuillez modifier l'entrée existante.")
-                 return
-
-            # Préparation des données
-            updated = sel_row.copy()
-            updated["Visa"] = visa_code
-            updated["Categories"] = category
-            updated["Definition"] = definition
-            
-            # Enregistrement
-            if action == "update":
-                st.session_state.visa_df.loc[original_index, :] = updated
-                st.success("Type de visa modifié.")
-            elif action == "add":
-                new_row_df = pd.DataFrame([updated])
-                st.session_state.visa_df = pd.concat([st.session_state.visa_df, new_row_df], ignore_index=True)
-                st.success("Nouveau type de visa ajouté.")
-            
-            st.rerun()
-        
-        if not is_add and delete_button:
-            st.session_state.visa_df = st.session_state.visa_df.drop(original_index, axis=0)
-            st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
-            # Après la suppression, réinitialiser l'index de sélection pour éviter une erreur
-            if 'visa_sel_idx' in st.session_state:
-                 st.session_state.visa_sel_idx = 0 
-            st.success("Type de visa supprimé.")
-            st.rerun()
-
-# --- 5. LOGIQUE DE SAUVEGARDE GLOBALE ---
-
-if src and (page == "Clients" or page == "Visa"):
-    
-    st.markdown("---")
-    st.subheader("Exporter et Sauvegarder les Données")
-    
-    exp_col1, exp_col2, exp_col3 = st.columns(3)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    
-    # Préparation du DataFrame pour l'export (Paiements en JSON string)
-    clients_df_export = st.session_state.clients_df.copy()
-    clients_df_export["Paiements"] = clients_df_export["Paiements"].apply(json.dumps)
-    
-    # Création du dictionnaire d'onglets pour l'export XLSX
-    all_sheets_export = {
-        "Clients": clients_df_export,
-        "Visa": st.session_state.visa_df
-    }
-
-    with exp_col1:
-        # Téléchargement CSV Clients
-        csv_bytes = clients_df_export.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Télécharger CSV — Clients", data=csv_bytes, file_name=f"Clients_{stamp}.csv", mime="text/csv")
-    
-    with exp_col2:
-        # Téléchargement XLSX Classeur
-        xls_bytes = to_excel_bytes_multi(all_sheets_export)
-        st.download_button("⬇️ Télécharger XLSX — Classeur", data=xls_bytes, file_name=f"Visa_Clients_{stamp}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    
-    with exp_col3:
-        if save_mode == "Save to local path (serveur/PC)":
-            if save_path:
-                try:
-                    xls_bytes = to_excel_bytes_multi(all_sheets_export)
-                    with open(save_path, "wb") as f:
-                        f.write(xls_bytes)
-                    st.success(f"Fichier écrit: {save_path}")
-                except Exception as e:
-                    st.error(f"Erreur écriture locale: {e}")
-            else:
-                st.warning("Renseignez un chemin local dans la sidebar.")
-        elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
-            st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
+        submitted = col_buttons[0].form_submit_button(button_
