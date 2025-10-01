@@ -44,7 +44,7 @@ def load_all_sheets(xlsx_input) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
     xls = pd.ExcelFile(xlsx_input)
     out = {}
     for name in xls.sheet_names:
-        _df = pd.read_excel(xls, sheet_sheet_name=name)
+        _df = pd.read_excel(xls, sheet_name=name)
         _df.columns = _norm_cols(_df.columns)
         out[name] = _df
     return out, xls.sheet_names
@@ -218,3 +218,4 @@ def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
         return False, "Un dossier annulé ne peut pas être marqué Envoyé/Refusé/Approuvé"
     
     return True, ""
+
