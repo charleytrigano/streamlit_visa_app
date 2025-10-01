@@ -1,4 +1,4 @@
-# app.py — Version finale avec CRUD complet et indexation ultra-sécurisée
+# app.py — Version finale avec CRUD complet et indexation ultra-sécurisée (Corrigé 3)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -200,30 +200,38 @@ if page == "Clients":
         if len(filtered) > 0:
             max_idx = len(filtered) - 1
             
-            # --- CORRECTION FINALE DE L'INDEXATION ROBUSTE ---
-            # 1. Gérer la valeur de l'index dans la session pour survivre aux filtres
+            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
+            
+            # Initialisation/Réajustement de l'index de sélection
             if 'client_sel_idx' not in st.session_state:
                 st.session_state.client_sel_idx = 0
             
             current_value = st.session_state.client_sel_idx
-            # Assurer que l'index n'est pas hors bornes après un filtre
+            # Si l'ancienne valeur est hors limites, la ramener à 0
             if current_value > max_idx:
-                 current_value = 0 
+                 current_value = 0
+                 st.session_state.client_sel_idx = 0
             
             # L'utilisateur choisit l'index affiché dans le DF filtré (0 à max_idx)
-            sel_idx = st.number_input("Ouvrir dossier (index affiché)", min_value=0, max_value=max_idx, value=current_value)
+            sel_idx_float = st.number_input(
+                "Ouvrir dossier (index affiché)", 
+                min_value=0, 
+                max_value=max_idx, 
+                value=current_value,
+                key="client_idx_input" # Ajout d'une clé pour stabiliser l'input
+            )
             
-            # Mise à jour de la valeur dans la session
-            st.session_state.client_sel_idx = int(sel_idx)
+            sel_idx = int(sel_idx_float)
+            st.session_state.client_sel_idx = sel_idx
 
-            # 2. RAPPEL: Utiliser .iloc[position] pour obtenir la ligne, puis .name pour l'index original
-            # Cela garantit la fiabilité en cas de changement de filtre
-            sel_row_filtered = filtered.iloc[int(sel_idx)]
+            # 2. Utiliser .iloc[position] pour obtenir la ligne, puis .name pour l'index original
+            # .iloc[sel_idx] accède à la ligne à la position sel_idx dans le DF *filtré*
+            sel_row_filtered = filtered.iloc[sel_idx]
             original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # Ligne 229 de votre rapport précédent : l'appel à la fonction
+            # Ligne 227 (dans votre rapport) : l'appel à la fonction
             render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
         else:
             st.info("Aucun dossier client ne correspond aux filtres.")
@@ -255,16 +263,25 @@ elif page == "Visa":
             current_value = st.session_state.visa_sel_idx
             if current_value > max_idx:
                  current_value = 0
+                 st.session_state.visa_sel_idx = 0
                  
-            sel_idx = st.number_input("Ouvrir visa (index affiché)", min_value=0, max_value=max_idx, value=current_value)
-            st.session_state.visa_sel_idx = int(sel_idx)
+            sel_idx_float = st.number_input(
+                "Ouvrir visa (index affiché)", 
+                min_value=0, 
+                max_value=max_idx, 
+                value=current_value,
+                key="visa_idx_input" # Ajout d'une clé pour stabiliser l'input
+            )
             
-            sel_row = df.iloc[int(sel_idx)]
+            sel_idx = int(sel_idx_float)
+            st.session_state.visa_sel_idx = sel_idx
+            
+            sel_row = df.iloc[sel_idx]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
             # L'index du dataframe est l'index de la série sel_row (pour le DF non filtré)
-            render_visa_form(df, sel_row, action="update", original_index=int(sel_idx)) 
+            render_visa_form(df, sel_row, action="update", original_index=sel_idx) 
         else:
             st.info("Aucun type de visa à gérer.")
         
@@ -315,4 +332,210 @@ def render_client_form(df, sel_row, action, original_index=None):
         st.markdown("---")
         
         payments_list = sel_row.get("Paiements", [])
-        # S'assurer que payments_list est une liste propre
+        # S'assurer que payments_list est une liste propre (au cas où ce serait un string/NaN)
+        if isinstance(payments_list, str):
+            try:
+                payments_list = json.loads(payments_list) if payments_list and pd.notna(payments_list) else []
+            except Exception:
+                payments_list = []
+        elif not isinstance(payments_list, list):
+             payments_list = []
+
+        st.write("Paiements (Total encaissé: " + f"{sel_row.get('TotalAcomptes', 0.0):.2f} €" + ")")
+        
+        for i, p in enumerate(payments_list):
+            p_date = p.get('date', 'N/A')
+            p_amount = p.get('amount', 0)
+            st.markdown(f"**{i+1}. {p_date}** — {p_amount:.2f} €")
+
+        st.markdown("---")
+        st.write("Ajouter un nouveau paiement")
+        col_pay1, col_pay2 = st.columns(2)
+        with col_pay1:
+            new_pay_date = st.date_input("Date du paiement", value=date.today(), key=f"pay_date_{action}")
+        with col_pay2:
+            new_pay_amount = st.number_input("Montant", value=0.0, min_value=0.0, format="%.2f", key=f"pay_amount_{action}")
+
+
+        # Boutons d'action
+        col_buttons = st.columns(3)
+        submitted = col_buttons[0].form_submit_button(button_label)
+        
+        delete_button = None
+        if not is_add:
+            delete_button = col_buttons[1].form_submit_button("❌ Supprimer le dossier")
+
+        if submitted:
+            if not dossier_id and is_add:
+                 st.error("Veuillez entrer un DossierID pour l'ajout.")
+            else:
+                update_client_data(df, sel_row, original_index, {
+                    "DossierID": dossier_id, "Nom": nom, "TypeVisa": typevisa, "Email": email,
+                    "Telephone": telephone, "Honoraires": float(honoraires), "Notes": notes,
+                    "Dossier envoyé": dossier_envoye, "Dossier refusé": dossier_refuse,
+                    "Dossier approuvé": dossier_approuve, "DossierAnnule": dossier_annule,
+                    "RFE": rfe, "DateEnvoi": date_envoi, 
+                    "Paiements_New_Amount": float(new_pay_amount), 
+                    "Paiements_New_Date": new_pay_date
+                }, action)
+        
+        if not is_add and delete_button:
+            update_client_data(df, sel_row, original_index, {}, "delete")
+
+
+def update_client_data(df, sel_row, original_index, form_data, action):
+    """Logique de mise à jour/ajout/suppression pour les clients."""
+    
+    if action == "delete":
+        st.session_state.clients_df = st.session_state.clients_df.drop(original_index, axis=0)
+        st.session_state.clients_df = compute_finances(st.session_state.clients_df)
+        # Après la suppression, réinitialiser l'index de sélection pour éviter une erreur
+        if 'client_sel_idx' in st.session_state:
+             st.session_state.client_sel_idx = 0 
+        st.success("Dossier client supprimé.")
+        st.rerun()
+        return
+
+    # Préparation des données mises à jour
+    updated = sel_row.copy()
+    
+    for key, value in form_data.items():
+        if not key.startswith("Paiements_New"):
+            updated[key] = value
+
+    # Gestion des paiements
+    current_payments_list = updated.get("Paiements", [])
+    if isinstance(current_payments_list, str): 
+        current_payments_list = [] # S'assurer que c'est une liste
+        
+    new_pay_amount = form_data.get("Paiements_New_Amount", 0.0)
+    new_pay_date = form_data.get("Paiements_New_Date", date.today())
+    
+    if new_pay_amount and float(new_pay_amount) > 0:
+        current_payments_list.append({"date": str(new_pay_date), "amount": float(new_pay_amount)})
+
+    updated["Paiements"] = current_payments_list.copy() # Copier la liste pour éviter les références
+    
+    # Validation
+    ok, msg = validate_rfe_row(updated)
+    if not ok:
+        st.error(msg)
+        return
+
+    # Enregistrement
+    if action == "update":
+        # Mise à jour de la ligne existante
+        # Utiliser .loc[index] = Series pour une mise à jour fiable
+        st.session_state.clients_df.loc[original_index, updated.index] = updated.astype(object)
+        st.success("Modifications client enregistrées.")
+    elif action == "add":
+        # Nouvelle ligne, utiliser concat
+        new_row_df = pd.DataFrame([updated])
+        st.session_state.clients_df = pd.concat([st.session_state.clients_df, new_row_df], ignore_index=True)
+        st.success("Nouveau dossier client ajouté.")
+
+    # Recalculer les finances et relancer
+    st.session_state.clients_df = compute_finances(st.session_state.clients_df)
+    st.rerun()
+
+
+def render_visa_form(df, sel_row, action, original_index=None):
+    """Rendu du formulaire d'ajout/modification/suppression pour un type de visa."""
+    
+    is_add = (action == "add")
+    button_label = "Ajouter le type" if is_add else "Enregistrer les modifications"
+
+    with st.form(f"visa_form_{action}"):
+        
+        # Corps du formulaire VISAS
+        visa_code = st.text_input("Code Visa", value=sel_row.get("Visa", ""), disabled=not is_add)
+        category = st.text_input("Catégorie", value=sel_row.get("Categories", ""))
+        definition = st.text_area("Définition", value=sel_row.get("Definition", ""))
+
+        # Boutons d'action
+        col_buttons = st.columns(3)
+        submitted = col_buttons[0].form_submit_button(button_label)
+        
+        delete_button = None
+        if not is_add:
+            delete_button = col_buttons[1].form_submit_button("❌ Supprimer le type")
+
+        if submitted:
+            if not visa_code:
+                 st.error("Veuillez entrer un Code Visa.")
+                 return
+
+            if action == "add" and visa_code in st.session_state.visa_df['Visa'].values:
+                 st.error(f"Le code Visa '{visa_code}' existe déjà. Veuillez modifier l'entrée existante.")
+                 return
+
+            # Préparation des données
+            updated = sel_row.copy()
+            updated["Visa"] = visa_code
+            updated["Categories"] = category
+            updated["Definition"] = definition
+            
+            # Enregistrement
+            if action == "update":
+                st.session_state.visa_df.loc[original_index, :] = updated
+                st.success("Type de visa modifié.")
+            elif action == "add":
+                new_row_df = pd.DataFrame([updated])
+                st.session_state.visa_df = pd.concat([st.session_state.visa_df, new_row_df], ignore_index=True)
+                st.success("Nouveau type de visa ajouté.")
+            
+            st.rerun()
+        
+        if not is_add and delete_button:
+            st.session_state.visa_df = st.session_state.visa_df.drop(original_index, axis=0)
+            st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
+            # Après la suppression, réinitialiser l'index de sélection pour éviter une erreur
+            if 'visa_sel_idx' in st.session_state:
+                 st.session_state.visa_sel_idx = 0 
+            st.success("Type de visa supprimé.")
+            st.rerun()
+
+# --- 5. LOGIQUE DE SAUVEGARDE GLOBALE ---
+
+if src and (page == "Clients" or page == "Visa"):
+    
+    st.markdown("---")
+    st.subheader("Exporter et Sauvegarder les Données")
+    
+    exp_col1, exp_col2, exp_col3 = st.columns(3)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    
+    # Préparation du DataFrame pour l'export (Paiements en JSON string)
+    clients_df_export = st.session_state.clients_df.copy()
+    clients_df_export["Paiements"] = clients_df_export["Paiements"].apply(json.dumps)
+    
+    # Création du dictionnaire d'onglets pour l'export XLSX
+    all_sheets_export = {
+        "Clients": clients_df_export,
+        "Visa": st.session_state.visa_df
+    }
+
+    with exp_col1:
+        # Téléchargement CSV Clients
+        csv_bytes = clients_df_export.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Télécharger CSV — Clients", data=csv_bytes, file_name=f"Clients_{stamp}.csv", mime="text/csv")
+    
+    with exp_col2:
+        # Téléchargement XLSX Classeur
+        xls_bytes = to_excel_bytes_multi(all_sheets_export)
+        st.download_button("⬇️ Télécharger XLSX — Classeur", data=xls_bytes, file_name=f"Visa_Clients_{stamp}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
+    with exp_col3:
+        if save_mode == "Save to local path (serveur/PC)":
+            if save_path:
+                try:
+                    xls_bytes = to_excel_bytes_multi(all_sheets_export)
+                    with open(save_path, "wb") as f:
+                        f.write(xls_bytes)
+                    st.success(f"Fichier écrit: {save_path}")
+                except Exception as e:
+                    st.error(f"Erreur écriture locale: {e}")
+            else:
+                st.warning("Renseignez un chemin local dans la sidebar.")
+        elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
+            st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
