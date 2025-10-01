@@ -1,4 +1,4 @@
-# app.py — Version finale avec arrêt garanti (Corrigé 13)
+# app.py — Version finale avec contrôle d'index avancé (Corrigé 14)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -209,31 +209,34 @@ if page == "Clients":
             
             current_value = st.session_state.client_sel_idx
             
-            # 2. **BLOC DE SÉCURITÉ CRITIQUE : CORRECTION IMPÉRATIVE + RERUN + STOP**
+            # 2. **CONTRÔLE D'INDEX ET CORRECTION**
             # Si l'index stocké est invalide après le filtre/suppression
             if current_value > max_idx or current_value < 0:
-                st.session_state.client_sel_idx = 0
+                # On corrige l'index de session, puis on redémarre
+                st.session_state.client_sel_idx = min(max_idx, max(0, current_value))
                 st.rerun() 
-                st.stop() # Arrêt garanti de l'exécution actuelle.
             
             # Le code continue UNIQUEMENT si l'index est VALIDÉ
             
-            # 3. L'utilisateur choisit l'index affiché 
+            # 3. L'utilisateur choisit l'index affiché (la clé est différente)
             sel_idx_float = st.number_input(
                 "Ouvrir dossier (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
-                value=current_value, # current_value est garanti être dans les limites ici
+                value=st.session_state.client_sel_idx, # Utilisation de l'index garanti valide
                 key="client_idx_input"
             )
             
             sel_idx = int(sel_idx_float) 
             
-            # 4. Mettre à jour la session state avec l'index sélectionné 
-            st.session_state.client_sel_idx = sel_idx
+            # 4. Mettre à jour la session state (si l'utilisateur a changé la valeur)
+            if sel_idx != st.session_state.client_sel_idx:
+                st.session_state.client_sel_idx = sel_idx
+                st.rerun() # Pour refléter le changement
             
-            # 5. Accès sécurisé à la ligne (garanti valide par le bloc de sécurité 2)
-            sel_row_filtered = filtered.iloc[sel_idx]
+            # 5. Accès sécurisé et appel du formulaire (Indexation toujours valide ici)
+            # L'index est garanti d'être entre 0 et max_idx
+            sel_row_filtered = filtered.iloc[st.session_state.client_sel_idx]
             original_session_index = sel_row_filtered.name 
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
@@ -270,14 +273,12 @@ elif page == "Visa":
             
             current_value = st.session_state.visa_sel_idx
             
-            # 1. BLOC DE SÉCURITÉ CRITIQUE : CORRECTION IMPÉRATIVE + RERUN + STOP
+            # 1. **CONTRÔLE D'INDEX ET CORRECTION**
             # Si l'index stocké est invalide après suppression
             if current_value > max_idx or current_value < 0:
-                 st.session_state.visa_sel_idx = 0
-                 current_value = 0
-                 st.rerun() # Force le redémarrage si index invalide
-                 st.stop() # Arrêt garanti de l'exécution actuelle.
-
+                 # On corrige l'index de session, puis on redémarre
+                 st.session_state.visa_sel_idx = min(max_idx, max(0, current_value))
+                 st.rerun()
                  
             # Le code continue UNIQUEMENT si l'index est VALIDÉ
             
@@ -286,20 +287,24 @@ elif page == "Visa":
                 "Ouvrir visa (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
-                value=current_value,
+                value=st.session_state.visa_sel_idx,
                 key="visa_idx_input" 
             )
             
             sel_idx = int(sel_idx_float)
-            st.session_state.visa_sel_idx = sel_idx
             
-            # 3. Accès aux données (garanti valide par le bloc de sécurité 1)
-            sel_row = df.iloc[sel_idx]
+            # 3. Mettre à jour la session state (si l'utilisateur a changé la valeur)
+            if sel_idx != st.session_state.visa_sel_idx:
+                st.session_state.visa_sel_idx = sel_idx
+                st.rerun()
+
+            # 4. Accès sécurisé et appel du formulaire
+            sel_row = df.iloc[st.session_state.visa_sel_idx]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
-            # Ligne de l'appel (ligne 301/303)
-            render_visa_form(df, sel_row, action="update", original_index=sel_idx) 
+            # Ligne de l'appel (ligne 302)
+            render_visa_form(df, sel_row, action="update", original_index=st.session_state.visa_sel_idx) 
             
 
         else:
@@ -409,12 +414,11 @@ def update_client_data(df, sel_row, original_index, form_data, action):
     if action == "delete":
         st.session_state.clients_df = st.session_state.clients_df.drop(original_index, axis=0)
         st.session_state.clients_df = compute_finances(st.session_state.clients_df)
-        # Après la suppression, réinitialiser l'index de sélection pour éviter une erreur
+        # Après la suppression, réinitialiser l'index de sélection
         if 'client_sel_idx' in st.session_state:
              st.session_state.client_sel_idx = 0 
         st.success("Dossier client supprimé.")
         st.rerun()
-        st.stop()
         return
 
     # Préparation des données mises à jour
@@ -458,7 +462,6 @@ def update_client_data(df, sel_row, original_index, form_data, action):
     # Recalculer les finances et relancer
     st.session_state.clients_df = compute_finances(st.session_state.clients_df)
     st.rerun()
-    st.stop()
 
 
 def render_visa_form(df, sel_row, action, original_index=None):
@@ -507,17 +510,15 @@ def render_visa_form(df, sel_row, action, original_index=None):
                 st.success("Nouveau type de visa ajouté.")
             
             st.rerun()
-            st.stop()
         
         if not is_add and delete_button:
             st.session_state.visa_df = st.session_state.visa_df.drop(original_index, axis=0)
             st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
-            # Après la suppression, réinitialiser l'index de sélection pour éviter une erreur
+            # Après la suppression, réinitialiser l'index de sélection
             if 'visa_sel_idx' in st.session_state:
                  st.session_state.visa_sel_idx = 0 
             st.success("Type de visa supprimé.")
             st.rerun()
-            st.stop()
 
 # --- 5. LOGIQUE DE SAUVEGARDE GLOBALE ---
 
