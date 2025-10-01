@@ -1,4 +1,4 @@
-# app.py — Version finale avec gestion d'erreur ultime pour l'indexation (Corrigé 8)
+# app.py — Version finale avec contrôle d'index précoce et st.rerun() (Corrigé 9)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -199,55 +199,44 @@ if page == "Clients":
         # Sélection et modification
         if len(filtered) > 0:
             
-            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
+            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE (CORRECTION V9) ---
             
             max_idx = len(filtered) - 1
             
+            # 1. Initialisation de l'index
             if 'client_sel_idx' not in st.session_state:
                 st.session_state.client_sel_idx = 0
             
             current_value = st.session_state.client_sel_idx
             
-            # 1. Cap le *stockage* si l'ancien index est trop grand pour le nouveau DataFrame
+            # 2. **BLOC DE SÉCURITÉ CRITIQUE : FORCE RERUN SI INDEX INVALIDE**
             if current_value > max_idx or current_value < 0:
-                 current_value = 0 # Safe reset
-                 st.session_state.client_sel_idx = 0
-            
-            # 2. L'utilisateur choisit l'index affiché dans le DF filtré (0 à max_idx)
+                st.session_state.client_sel_idx = 0
+                # st.info("Correction automatique de l'index de sélection suite à un filtre.") 
+                # (Commenté pour éviter le flash mais le rerunn est actif)
+                st.rerun() # <-- LA CLÉ : Force le script à redémarrer avec une valeur sûre (0)
+
+            # 3. L'utilisateur choisit l'index affiché (la valeur est garantie valide par le bloc précédent)
             sel_idx_float = st.number_input(
                 "Ouvrir dossier (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
-                value=current_value, # Utilise la valeur sécurisée
+                value=current_value, # Utilise la valeur sécurisée (0 ou la dernière valide)
                 key="client_idx_input"
             )
             
             sel_idx = int(sel_idx_float) 
             
-            # 3. PLAFONNEMENT ULTIME: Assurez-vous que l'index ne dépasse jamais les limites disponibles
-            sel_idx = min(sel_idx, max_idx)
-            sel_idx = max(sel_idx, 0)
+            # 4. Mettre à jour la session state avec la valeur choisie/corrigée par le widget
+            st.session_state.client_sel_idx = sel_idx
             
-            # 4. On met à jour l'état de session avec l'index sécurisé pour la prochaine exécution
-            st.session_state.client_sel_idx = sel_idx 
+            # 5. Accès sécurisé à la ligne (garanti valide)
+            sel_row_filtered = filtered.iloc[sel_idx]
+            original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
+
+            st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # 5. Accès sécurisé à la ligne AVEC DÉFENSE ULTIME (try/except)
-            try:
-                sel_row_filtered = filtered.iloc[sel_idx]
-                original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
-
-                st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
-                
-                # Ligne d'appel qui posait problème (maintenant protégée)
-                render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
-            
-            except IndexError:
-                # La défense ultime contre le race condition de Streamlit
-                st.session_state.client_sel_idx = 0
-                st.info("Index de sélection hors limites détecté après filtrage. Réinitialisation...")
-                st.rerun()
-
-
+            render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
         else:
             st.info("Aucun dossier client ne correspond aux filtres.")
 
@@ -276,9 +265,13 @@ elif page == "Visa":
                 st.session_state.visa_sel_idx = 0
             
             current_value = st.session_state.visa_sel_idx
+            
+            # BLOC DE SÉCURITÉ CRITIQUE
             if current_value > max_idx or current_value < 0:
-                 current_value = 0
                  st.session_state.visa_sel_idx = 0
+                 current_value = 0
+                 st.rerun() # Force le redémarrage si index invalide
+
                  
             sel_idx_float = st.number_input(
                 "Ouvrir visa (index affiché)", 
@@ -289,19 +282,9 @@ elif page == "Visa":
             )
             
             sel_idx = int(sel_idx_float)
-            
-            # PLAFONNEMENT
-            sel_idx = min(sel_idx, max_idx)
-            sel_idx = max(sel_idx, 0)
-
             st.session_state.visa_sel_idx = sel_idx
             
-            try:
-                sel_row = df.iloc[sel_idx]
-            except IndexError:
-                st.session_state.visa_sel_idx = 0
-                st.info("Index de sélection Visa hors limites. Réinitialisation du formulaire...")
-                st.rerun()
+            sel_row = df.iloc[sel_idx]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
@@ -565,3 +548,4 @@ if src and (page == "Clients" or page == "Visa"):
                 st.warning("Renseignez un chemin local dans la sidebar.")
         elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
             st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
+
