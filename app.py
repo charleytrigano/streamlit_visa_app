@@ -639,4 +639,6 @@ if src and (page == "Clients" or page == "Visa"):
                 except Exception as e:
                     st.error(f"Erreur écriture locale: {e}")
             else:
-                st.warning("Renseignez un chemin
+                st.warning("Renseignez un chemin local dans la sidebar.")
+        elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
+            st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
