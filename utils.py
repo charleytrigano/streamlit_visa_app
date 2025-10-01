@@ -1,4 +1,4 @@
-# utils.py — Version finale, stable et corrigée (avec gestion renforcée du dtype Paiements)
+# utils.py — Version finale, stable et corrigée (avec mise à jour en bloc)
 
 import io
 import json
@@ -81,24 +81,18 @@ def _parse_payments_to_list(cell):
 def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     1. Standardise les noms de colonnes.
-    2. Migre les anciens paiements vers 'Paiements'.
+    2. Migre les anciens paiements vers 'Paiements' (en utilisant une mise à jour en bloc).
     3. Supprime les colonnes dupliquées/anciennes.
     """
     df = df.copy()
     columns = list(df.columns)
     
-    # --- 1. Standardisation des noms de colonnes ---
+    # --- 1. Standardisation des noms de colonnes (inchangé) ---
     col_std_mapping = {
-        "DossierID": ["Dossier"],
-        "DateCreation": ["Date"],
-        "TypeVisa": ["Type Visa"],
-        "DateFacture": ["Date facture"],
-        "DateEnvoi": ["Date envoi"],
-        "DateRetour": ["Date retour"],
-        "Dossier envoyé": ["Dossier envoye"],
-        "Dossier refusé": ["Dossier refuse"],
-        "Dossier approuvé": ["Dossier approuve"],
-        "DossierAnnule": ["Dossier Annule", "Dossier annulé"],
+        "DossierID": ["Dossier"], "DateCreation": ["Date"], "TypeVisa": ["Type Visa"], 
+        "DateFacture": ["Date facture"], "DateEnvoi": ["Date envoi"], "DateRetour": ["Date retour"], 
+        "Dossier envoyé": ["Dossier envoye"], "Dossier refusé": ["Dossier refuse"], 
+        "Dossier approuvé": ["Dossier approuve"], "DossierAnnule": ["Dossier Annule", "Dossier annulé"],
     }
     
     cols_to_drop = []
@@ -118,22 +112,23 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- 2. Migration des anciens paiements ---
     
-    # Étape 1: Assurer l'existence de la colonne 'Paiements'
+    # Assurer l'existence et le type 'object' pour gérer les listes de dicts
     if "Paiements" not in df.columns:
          df["Paiements"] = pd.Series([[] for _ in range(len(df))], index=df.index) 
     
-    # Étape 2: FORCER le type 'object' pour permettre le stockage de listes/dicts complexes
     df["Paiements"] = df["Paiements"].astype(object) 
     
-    # Étape 3: Parser le contenu existant (qui pourrait être en JSON string)
+    # Parser le contenu existant
     df["Paiements"] = df["Paiements"].apply(_parse_payments_to_list)
     
     # Identifier les lignes à migrer
     no_payments_mask = df["Paiements"].apply(lambda x: len(x) == 0)
 
-    legacy_payments = {idx: [] for idx in df.index[no_payments_mask]}
+    # Initialiser le dictionnaire pour la mise à jour en bloc
+    legacy_payments_update = {} 
     legacy_pay_cols = []
     
+    # Boucle de migration (construit legacy_payments_update)
     for i in range(1, 6): 
         date_col_name = _find_col([f"Date Acompte {i}"], columns)
         amount_col_name = _find_col([f"Acompte {i}"], columns)
@@ -141,7 +136,7 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
         if date_col_name and amount_col_name:
             legacy_pay_cols.extend([c for c in [date_col_name, amount_col_name] if c not in legacy_pay_cols])
             
-            for idx in legacy_payments.keys():
+            for idx in df.index[no_payments_mask]:
                 date_val = df.loc[idx, date_col_name]
                 amount_val = df.loc[idx, amount_col_name]
                 
@@ -153,13 +148,22 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
                         pay_date = str(dt_obj.date()) if pd.notna(dt_obj) else str(date.today()) 
                         
                         payment = {"date": pay_date, "amount": pay_amount}
-                        legacy_payments[idx].append(payment)
+                        
+                        # Récupérer la liste existante ou initiale pour cette ligne
+                        current_list = legacy_payments_update.get(idx, [])
+                        current_list.append(payment)
+                        legacy_payments_update[idx] = current_list
+                        
                 except Exception:
                     pass 
 
-    for idx, payments_list in legacy_payments.items():
-        if payments_list:
-            df.loc[idx, "Paiements"] = payments_list
+    # 🚨 Mise à jour de la colonne 'Paiements' en bloc (CORRECTIF CRUCIAL) 🚨
+    if legacy_payments_update:
+        # 1. Créer une Series temporaire de dtype=object avec les nouvelles listes
+        update_series = pd.Series(legacy_payments_update, dtype=object)
+        
+        # 2. Mettre à jour les lignes concernées en une seule opération sécurisée
+        df.loc[update_series.index, "Paiements"] = update_series
 
     # --- 3. Nettoyage final des colonnes ---
     all_cols_to_drop = list(set(cols_to_drop + legacy_pay_cols))
@@ -168,8 +172,11 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_finances(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (fonction inchangée) ...
+    """
+    Calcule 'TotalAcomptes' et 'SoldeCalc' à partir de 'Honoraires' et 'Paiements'.
+    """
     df = df.copy()
+
     if "Honoraires" not in df.columns:
         df["Honoraires"] = 0.0
     df["Honoraires"] = pd.to_numeric(df["Honoraires"], errors="coerce").fillna(0.0)
@@ -196,7 +203,7 @@ def compute_finances(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
-    # ... (fonction inchangée) ...
+    """Valide la cohérence des statuts d'un dossier."""
     rfe = bool(row.get("RFE", False))
     sent = bool(row.get("Dossier envoyé", False) or row.get("Dossier envoye", False))
     refused = bool(row.get("Dossier refusé", False) or row.get("Dossier refuse", False))
