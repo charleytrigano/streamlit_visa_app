@@ -1,4 +1,4 @@
-# app.py — Version finale avec CRUD complet et indexation ultra-sécurisée (Corrigé 4)
+# app.py — Version finale avec CRUD complet et indexation ultra-sécurisée (Corrigé 5)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -210,7 +210,7 @@ if page == "Clients":
             
             current_value = st.session_state.client_sel_idx
             
-            # Si l'ancienne valeur est hors limites, on la ramène à 0
+            # Pré-check: Si la valeur stockée est hors limites, on la ramène à 0
             if current_value > max_idx or current_value < 0:
                  current_value = 0 
                  st.session_state.client_sel_idx = 0
@@ -221,31 +221,27 @@ if page == "Clients":
                 min_value=0, 
                 max_value=max_idx, 
                 value=current_value,
-                key="client_idx_input" 
+                key="client_idx_input"
             )
             
             sel_idx = int(sel_idx_float)
             st.session_state.client_sel_idx = sel_idx
             
-            # --- DÉFENSE ULTIME contre IndexError ---
-            try:
-                # 2. Utiliser .iloc[position] pour obtenir la ligne, puis .name pour l'index original
-                sel_row_filtered = filtered.iloc[sel_idx]
-                original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
-
-                st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
-                
-                # Ligne 235 dans votre rapport précédent (c'est cet appel qui échoue)
-                render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
-            
-            except IndexError:
-                # Si filtered.iloc[sel_idx] échoue, c'est que l'index était temporairement hors bornes.
-                # On force la réinitialisation et un rerun pour stabiliser l'UI.
+            # 2. VÉRIFICATION DE LIMITE AGRESSIVE après lecture du composant
+            # Ceci est la défense ultime pour le problème de course conditionnelle
+            if sel_idx < 0 or sel_idx > max_idx:
                 st.session_state.client_sel_idx = 0
-                st.warning("Index de sélection réinitialisé après filtrage. Veuillez réessayer.")
-                st.rerun()
-            # --- FIN DÉFENSE ULTIME ---
+                # st.warning("Index sélectionné hors limite après filtrage. Réinitialisation de l'UI...")
+                st.rerun() # On force le redémarrage pour corriger la valeur du number_input
+                
+            # 3. Accès sécurisé
+            sel_row_filtered = filtered.iloc[sel_idx]
+            original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
 
+            st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+            
+            # Ligne 239 dans votre rapport précédent : Appel désormais sûr
+            render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
         else:
             st.info("Aucun dossier client ne correspond aux filtres.")
 
@@ -289,17 +285,17 @@ elif page == "Visa":
             sel_idx = int(sel_idx_float)
             st.session_state.visa_sel_idx = sel_idx
             
-            try:
-                sel_row = df.iloc[sel_idx]
-                
-                st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
-                
-                # L'index du dataframe est l'index de la série sel_row (pour le DF non filtré)
-                render_visa_form(df, sel_row, action="update", original_index=sel_idx) 
-            except IndexError:
+            # VÉRIFICATION DE LIMITE AGRESSIVE
+            if sel_idx < 0 or sel_idx > max_idx:
                 st.session_state.visa_sel_idx = 0
-                st.warning("Index de sélection réinitialisé. Veuillez réessayer.")
                 st.rerun()
+
+            sel_row = df.iloc[sel_idx]
+            
+            st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
+            
+            # L'index du dataframe est l'index de la série sel_row (pour le DF non filtré)
+            render_visa_form(df, sel_row, action="update", original_index=sel_idx) 
 
         else:
             st.info("Aucun type de visa à gérer.")
