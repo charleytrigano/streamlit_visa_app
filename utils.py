@@ -1,4 +1,4 @@
-# utils.py — Version finale et stable
+# utils.py — Version finale, stable et corrigée (avec gestion renforcée du dtype Paiements)
 
 import io
 import json
@@ -18,7 +18,6 @@ def _find_col(possible_names: List[str], columns: List[str]):
     """Recherche un nom de colonne en ignorant la casse et les accents."""
     def norm(s: str) -> str:
         s = str(s)
-        # Normalisation pour enlever les accents (ex: "é" -> "e")
         s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
         return s.lower().strip()
     cols_norm = {norm(c): c for c in columns}
@@ -44,7 +43,7 @@ def load_all_sheets(xlsx_input) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
     xls = pd.ExcelFile(xlsx_input)
     out = {}
     for name in xls.sheet_names:
-        _df = pd.read_excel(xls, sheet_name=name)
+        _df = pd.read_excel(xls, sheet_name=name) 
         _df.columns = _norm_cols(_df.columns)
         out[name] = _df
     return out, xls.sheet_names
@@ -52,7 +51,6 @@ def load_all_sheets(xlsx_input) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
 @st.cache_data(show_spinner=False)
 def to_excel_bytes_multi(sheets: Dict[str, pd.DataFrame]) -> bytes:
     """Convertit un dictionnaire de DataFrames en un fichier Excel binaire."""
-    # openpyxl doit être installé et est importé implicitement par Pandas ici
     import openpyxl  # noqa: F401
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -61,7 +59,7 @@ def to_excel_bytes_multi(sheets: Dict[str, pd.DataFrame]) -> bytes:
     return buffer.getvalue()
 
 def _parse_payments_to_list(cell):
-    """Analyse une cellule 'Paiements' (string JSON ou liste) en une liste de dicts."""
+    """Analyse une cellule 'Paiements' (string JSON ou liste) en une liste de dicts)."""
     try:
         if isinstance(cell, list):
             return cell
@@ -82,8 +80,8 @@ def _parse_payments_to_list(cell):
 
 def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    1. Standardise les noms de colonnes (ex: Dossier -> DossierID).
-    2. Migre les anciens paiements (Date Acompte X / Acompte X) vers 'Paiements'.
+    1. Standardise les noms de colonnes.
+    2. Migre les anciens paiements vers 'Paiements'.
     3. Supprime les colonnes dupliquées/anciennes.
     """
     df = df.copy()
@@ -120,13 +118,15 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- 2. Migration des anciens paiements ---
     
+    # Étape 1: Assurer l'existence de la colonne 'Paiements'
     if "Paiements" not in df.columns:
-         df["Paiements"] = pd.Series([[] for _ in range(len(df))], index=df.index, dtype=object) 
+         df["Paiements"] = pd.Series([[] for _ in range(len(df))], index=df.index) 
     
-    df["Paiements"] = df["Paiements"].apply(_parse_payments_to_list)
-    
-    # Correctif pour l'affectation de listes de dicts
+    # Étape 2: FORCER le type 'object' pour permettre le stockage de listes/dicts complexes
     df["Paiements"] = df["Paiements"].astype(object) 
+    
+    # Étape 3: Parser le contenu existant (qui pourrait être en JSON string)
+    df["Paiements"] = df["Paiements"].apply(_parse_payments_to_list)
     
     # Identifier les lignes à migrer
     no_payments_mask = df["Paiements"].apply(lambda x: len(x) == 0)
@@ -168,11 +168,8 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_finances(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calcule 'TotalAcomptes' et 'SoldeCalc' à partir de 'Honoraires' et 'Paiements'.
-    """
+    # ... (fonction inchangée) ...
     df = df.copy()
-
     if "Honoraires" not in df.columns:
         df["Honoraires"] = 0.0
     df["Honoraires"] = pd.to_numeric(df["Honoraires"], errors="coerce").fillna(0.0)
@@ -182,7 +179,6 @@ def compute_finances(df: pd.DataFrame) -> pd.DataFrame:
 
     def sum_payments(payments_list):
         total = 0.0
-        # S'assurer que c'est une liste itérable
         if not isinstance(payments_list, list):
              payments_list = _parse_payments_to_list(payments_list)
              
@@ -195,15 +191,12 @@ def compute_finances(df: pd.DataFrame) -> pd.DataFrame:
         return total
 
     df["TotalAcomptes"] = df["Paiements"].apply(sum_payments)
-    
     df["TotalAcomptes"] = pd.to_numeric(df["TotalAcomptes"], errors="coerce").fillna(0.0)
-    
     df["SoldeCalc"] = (df["Honoraires"] - df["TotalAcomptes"]).round(2)
-    
     return df
 
 def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
-    """Valide la cohérence des statuts d'un dossier."""
+    # ... (fonction inchangée) ...
     rfe = bool(row.get("RFE", False))
     sent = bool(row.get("Dossier envoyé", False) or row.get("Dossier envoye", False))
     refused = bool(row.get("Dossier refusé", False) or row.get("Dossier refuse", False))
@@ -218,4 +211,3 @@ def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
         return False, "Un dossier annulé ne peut pas être marqué Envoyé/Refusé/Approuvé"
     
     return True, ""
-
