@@ -1,12 +1,11 @@
-# app.py — Version finale avec CRUD pour Visa et Clients
-
+# app.py — Version finale avec CRUD complet pour Clients et Visa
 import json
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 import numpy as np 
 
-# Importer les utilitaires
+# Importer les utilitaires (assurez-vous que utils.py est à jour avec les dernières corrections)
 from utils import (
     load_all_sheets,
     to_excel_bytes_multi,
@@ -18,7 +17,7 @@ from utils import (
 
 st.set_page_config(page_title="Visa App", page_icon="🛂", layout="wide")
 
-# Clear cache via URL param
+# Clear cache via URL param ?clear=1
 try:
     params = st.query_params
     clear_val = params.get("clear", "0")
@@ -35,7 +34,7 @@ try:
 except Exception:
     pass
 
-# --- 1. FONCTIONS DE GESTION DES DONNÉES (CRUD) ---
+# --- 1. FONCTIONS DE GESTION DES DONNÉES (INITIALISATION ET UTILITAIRES) ---
 
 def initialize_session_state(all_sheets):
     """Charge les DataFrames initiaux et les stocke dans st.session_state."""
@@ -121,7 +120,7 @@ with st.sidebar:
     save_mode = st.selectbox("Mode de sauvegarde", ["Download (toujours disponible)", "Save to local path (serveur/PC)", "Google Drive (secrets req.)", "OneDrive (secrets req.)"])
     save_path = st.text_input("Chemin local pour sauvegarde (si Save to local path)", value="data_sauvegardee.xlsx")
     st.markdown("---")
-    st.info("Navigation : utilisez le menu en bas pour basculer entre Visa et Clients")
+    st.info("Navigation : utilisez le menu en bas pour basculer entre Clients et Visa")
 
 src = data_path if data_path.strip() else up
 if not src:
@@ -155,13 +154,10 @@ if page == "Clients":
     if crud_mode == "Ajouter un nouveau dossier":
         st.subheader("Ajouter un nouveau dossier client")
         
-        # Le formulaire sera le même que la partie 'Modifier', mais avec des valeurs vides
-        # Nous allons créer une ligne vide pour l'ajout
+        # Créer une ligne vide pour l'ajout
         empty_row = pd.Series("", index=df.columns)
-        # S'assurer que les paiements sont initialisés comme une liste vide d'objet
         empty_row["Paiements"] = [] 
         
-        # Appel du formulaire en mode 'Ajout'
         render_client_form(df, empty_row, action="add")
 
     elif crud_mode == "Lister/Modifier/Supprimer":
@@ -240,7 +236,8 @@ elif page == "Visa":
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
-            render_visa_form(df, sel_row, action="update", original_index=int(sel_idx))
+            # L'index du dataframe est l'index de la série sel_row (pour le DF non filtré)
+            render_visa_form(df, sel_row, action="update", original_index=int(sel_idx)) 
         else:
             st.info("Aucun type de visa à gérer.")
         
@@ -254,12 +251,10 @@ def render_client_form(df, sel_row, action, original_index=None):
 
     with st.form(f"client_form_{action}"):
         
-        # ... (Le reste du formulaire est le même que dans la version précédente)
-        # Remplacer cette section par le corps du formulaire du client.
-        
-        # Corps du formulaire
+        # Corps du formulaire CLIENTS
         cols1, cols2 = st.columns(2)
         with cols1:
+            # Pour l'ajout, l'ID doit être modifiable ; pour la modification, il est figé (car il sert d'identifiant)
             dossier_id = st.text_input("DossierID", value=sel_row.get("DossierID", ""), disabled=not is_add)
             nom = st.text_input("Nom", value=sel_row.get("Nom", ""))
             typevisa = st.text_input("TypeVisa", value=sel_row.get("TypeVisa", ""))
@@ -322,6 +317,7 @@ def render_client_form(df, sel_row, action, original_index=None):
         col_buttons = st.columns(3)
         submitted = col_buttons[0].form_submit_button(button_label)
         
+        delete_button = None
         if not is_add:
             delete_button = col_buttons[1].form_submit_button("❌ Supprimer le dossier")
 
@@ -404,6 +400,7 @@ def render_visa_form(df, sel_row, action, original_index=None):
 
     with st.form(f"visa_form_{action}"):
         
+        # Corps du formulaire VISAS
         visa_code = st.text_input("Code Visa", value=sel_row.get("Visa", ""), disabled=not is_add)
         category = st.text_input("Catégorie", value=sel_row.get("Categories", ""))
         definition = st.text_area("Définition", value=sel_row.get("Definition", ""))
@@ -412,6 +409,7 @@ def render_visa_form(df, sel_row, action, original_index=None):
         col_buttons = st.columns(3)
         submitted = col_buttons[0].form_submit_button(button_label)
         
+        delete_button = None
         if not is_add:
             delete_button = col_buttons[1].form_submit_button("❌ Supprimer le type")
 
@@ -449,8 +447,10 @@ def render_visa_form(df, sel_row, action, original_index=None):
 
 # --- 5. LOGIQUE DE SAUVEGARDE GLOBALE ---
 
-# Logique de sauvegarde (placée en bas pour être toujours disponible)
 if src and (page == "Clients" or page == "Visa"):
+    
+    st.markdown("---")
+    st.subheader("Exporter et Sauvegarder les Données")
     
     exp_col1, exp_col2, exp_col3 = st.columns(3)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -489,3 +489,4 @@ if src and (page == "Clients" or page == "Visa"):
                 st.warning("Renseignez un chemin local dans la sidebar.")
         elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
             st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
+
