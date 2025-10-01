@@ -1,4 +1,4 @@
-# app.py — Version finale avec isolation du formulaire par conteneur (Corrigé 24)
+# app.py — Version finale avec routage par vues (Corrigé 25)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -39,6 +39,7 @@ except Exception:
 def initialize_session_state(all_sheets):
     """Charge les DataFrames initiaux et les stocke dans st.session_state."""
     
+    # ... (INITIALISATION CLIENTS/VISA INCHANGÉE) ...
     # ------------------- DONNÉES CLIENTS -------------------
     clients_df_loaded = all_sheets.get("Clients")
     
@@ -99,6 +100,7 @@ def initialize_session_state(all_sheets):
     # Initialisation de l'index pour le formulaire (utiliser un index propre)
     if not st.session_state.visa_df.index.name:
         st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
+    # ... (FIN INITIALISATION CLIENTS/VISA) ...
 
 
 def get_date_for_input(col_name, row):
@@ -138,32 +140,82 @@ if "clients_df" not in st.session_state:
         st.stop()
     st.rerun()
 
-# Navigation principale
-page = st.selectbox("Page", ["Clients", "Visa"], index=0)
+# --- NOUVEAU: GESTION DE LA VUE PAR ÉTAT ---
+if "current_view" not in st.session_state:
+     st.session_state.current_view = "clients_list"
 
-# --- 3. RENDU DES PAGES ---
+def set_view(view_name):
+    """Callback pour changer la vue et relancer l'application."""
+    st.session_state.current_view = view_name
+    # Optionnel: Réinitialiser l'index de sélection si on revient à la liste
+    if view_name in ["clients_list", "visa_list"]:
+        st.session_state.pop("client_sel_idx", None)
+        st.session_state.pop("visa_sel_idx", None)
+
+
+# Navigation principale (mise à jour pour gérer le changement de vue)
+page = st.selectbox("Page", ["Clients", "Visa"], index=0, 
+                    key="main_page_select", 
+                    on_change=lambda: set_view("clients_list" if st.session_state.main_page_select == "Clients" else "visa_list"))
+
+# --- 3. RENDU DES PAGES (REFONTE TOTALE) ---
 
 if page == "Clients":
     
     st.header("👥 Clients — gestion & suivi")
     df = st.session_state.clients_df
-    
-    # Navigation CRUD dans la page Clients
-    crud_mode = st.radio("Action Clients", ["Lister/Modifier/Supprimer", "Ajouter un nouveau dossier"], index=0, horizontal=True)
+    current_view = st.session_state.current_view
 
-    if crud_mode == "Ajouter un nouveau dossier":
+    # --- CLIENTS : VUE AJOUT (add) ---
+    if current_view == "clients_add":
         st.subheader("Ajouter un nouveau dossier client")
-        
         # Créer une ligne vide pour l'ajout
         empty_row = pd.Series("", index=df.columns)
         empty_row["Paiements"] = [] 
         
         # Ligne 162 (ajout)
         render_client_form(df, empty_row, action="add")
+        st.markdown("---")
+        st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
 
-    elif crud_mode == "Lister/Modifier/Supprimer":
+
+    # --- CLIENTS : VUE MODIFICATION (edit) ---
+    elif current_view == "clients_edit":
         
-        # KPIs (omitted for brevity)
+        # Récupérer les données filtrées si des filtres ont été appliqués avant l'édition
+        filtered = st.session_state.get("clients_filtered_df", df.copy())
+        max_idx = len(filtered) - 1
+
+        # Utilisation de l'index sélectionné avant le changement de vue
+        final_safe_index_filtered = st.session_state.get("client_sel_idx", 0)
+        
+        if final_safe_index_filtered < 0 or final_safe_index_filtered > max_idx:
+             # Index invalide après une suppression, on revient à la liste
+             set_view("clients_list")
+             st.rerun()
+
+        try:
+             # Accès aux données garanti
+            sel_row_filtered = filtered.iloc[final_safe_index_filtered] 
+            original_session_index = sel_row_filtered.name 
+
+            st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+            
+            # Ligne 252 (mise à jour)
+            render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
+            st.markdown("---")
+            st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
+
+        except IndexError as e:
+            st.error("Dossier introuvable (IndexError). Retour à la liste.")
+            set_view("clients_list")
+            st.rerun()
+
+    
+    # --- CLIENTS : VUE LISTE (list) ---
+    else: # current_view == "clients_list"
+        
+        # KPI & ACTIONS
         total_dossiers = len(df)
         total_encaissé = df["TotalAcomptes"].sum()
         total_honoraires = df["Honoraires"].sum()
@@ -174,6 +226,10 @@ if page == "Clients":
         c2.metric("Total encaissé", f"{total_encaissé:,.2f} €")
         c3.metric("Total honoraires", f"{total_honoraires:,.2f} €")
         c4.metric("Solde total", f"{total_solde:,.2f} €")
+        
+        st.markdown("---")
+        st.button("➕ Ajouter un nouveau dossier", on_click=lambda: set_view("clients_add"))
+        st.markdown("---")
 
         # Filtrage
         with st.expander("Filtrer / Rechercher"):
@@ -194,37 +250,25 @@ if page == "Clients":
             if col_name:
                  filtered = filtered[filtered.get(col_name, False) == True]
 
-
-        st.dataframe(filtered.reset_index(drop=True), use_container_width=True)
-
-        # Conteneur pour le formulaire de modification (isolation maximale)
-        client_form_container = st.empty() 
+        st.dataframe(filtered.reset_index(drop=True).drop(columns=['Paiements', 'TotalAcomptes', 'SoldeCalc'], errors='ignore'), use_container_width=True)
+        st.session_state.clients_filtered_df = filtered.copy() # Stocker la liste filtrée pour la vue d'édition
 
         # Sélection et modification
         if len(filtered) > 0: 
-            
-            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
-            
             max_idx = len(filtered) - 1
             
             # 1. INITIALISATION ET CONTRÔLE D'INDEX CRITIQUE
-            if 'client_sel_idx' not in st.session_state:
-                st.session_state.client_sel_idx = 0
+            current_index = st.session_state.get('client_sel_idx', 0)
             
-            current_index = st.session_state.client_sel_idx
-            
-            # Fix index if out of bounds (protection primaire)
+            # Fix index if out of bounds 
             if current_index > max_idx or current_index < 0:
-                st.session_state.client_sel_idx = min(max_idx, max(0, current_index)) 
-                st.warning("Index Client réinitialisé (valeur hors limites).")
-                client_form_container.empty() # Détruire l'ancienne UI avant rerun
-                st.rerun() 
+                current_index = 0
             
-            final_safe_index = st.session_state.client_sel_idx
+            final_safe_index = current_index
 
             # 2. L'utilisateur choisit l'index affiché (Clé Statique)
             sel_idx_float = st.number_input(
-                "Ouvrir dossier (index affiché)", 
+                "Index du dossier à modifier", 
                 min_value=0, 
                 max_value=max_idx, 
                 value=final_safe_index, 
@@ -236,75 +280,80 @@ if page == "Clients":
             # 3. Mettre à jour la session state
             if sel_idx != final_safe_index:
                 st.session_state.client_sel_idx = sel_idx
-                client_form_container.empty() # Détruire l'ancienne UI avant rerun
                 st.rerun() 
-            
-            # --- DÉFENSE ULTIME CONTRE IndexError (try/except) ---
-            try:
-                # Accès aux données garanti
-                sel_row_filtered = filtered.iloc[st.session_state.client_sel_idx] 
-                original_session_index = sel_row_filtered.name 
+            else:
+                 st.session_state.client_sel_idx = final_safe_index
 
-                with client_form_container.container(): # Isoler le rendu du formulaire
-                    st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
-                    
-                    # Ligne 246 (mise à jour)
-                    render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
-
-            except IndexError as e:
-                # Si l'index est désynchronisé (après une suppression rapide), on réinitialise et on relance
-                client_form_container.empty() # Détruire l'ancienne UI avant rerun
-                st.session_state.client_sel_idx = 0
-                st.error("Erreur d'index détectée après modification. Redémarrage automatique.")
-                st.rerun()
-                st.stop()
+            # 4. Bouton pour passer à la vue d'édition
+            st.button("✏️ Modifier le dossier sélectionné", on_click=lambda: set_view("clients_edit"))
             
         else:
-            client_form_container.empty() # Si pas de résultats, s'assurer que le conteneur est vide
             st.info("Aucun dossier client ne correspond aux filtres.")
 
 
 elif page == "Visa":
     st.header("🛂 Visa — Gestion des types")
     df = st.session_state.visa_df
+    current_view = st.session_state.current_view
     
-    # Navigation CRUD dans la page Visa
-    crud_mode = st.radio("Action Visa", ["Lister/Modifier/Supprimer", "Ajouter un nouveau type"], index=0, horizontal=True)
-
-    if crud_mode == "Ajouter un nouveau type":
+    # --- VISA : VUE AJOUT (add) ---
+    if current_view == "visa_add":
         st.subheader("Ajouter un nouveau type de visa")
         empty_row = pd.Series("", index=df.columns)
         render_visa_form(df, empty_row, action="add")
+        st.markdown("---")
+        st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
         
-    elif crud_mode == "Lister/Modifier/Supprimer":
+    # --- VISA : VUE MODIFICATION (edit) ---
+    elif current_view == "visa_edit":
+        
+        max_idx = len(df) - 1
+        final_safe_index = st.session_state.get("visa_sel_idx", 0)
+
+        if final_safe_index < 0 or final_safe_index > max_idx:
+             set_view("visa_list")
+             st.rerun()
+             
+        try:
+            # Accès aux données garanti
+            sel_row = df.iloc[final_safe_index]
+            
+            st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
+            
+            # Ligne 331 (mise à jour)
+            render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
+            st.markdown("---")
+            st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
+        
+        except IndexError as e:
+            st.error("Type de visa introuvable (IndexError). Retour à la liste.")
+            set_view("visa_list")
+            st.rerun()
+            
+
+    # --- VISA : VUE LISTE (list) ---
+    else: # current_view == "visa_list"
         
         st.dataframe(df, use_container_width=True)
+        st.markdown("---")
+        st.button("➕ Ajouter un nouveau type", on_click=lambda: set_view("visa_add"))
+        st.markdown("---")
         
-        # Conteneur pour le formulaire de modification (isolation maximale)
-        visa_form_container = st.empty() 
-
         if len(df) > 0: 
             max_idx = len(df) - 1
             
-            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
-            if 'visa_sel_idx' not in st.session_state:
-                st.session_state.visa_sel_idx = 0
-            
-            current_index = st.session_state.visa_sel_idx
-            
             # 1. CONTRÔLE D'INDEX ET CORRECTION CRITIQUE
+            current_index = st.session_state.get('visa_sel_idx', 0)
+            
+            # Fix index if out of bounds
             if current_index > max_idx or current_index < 0:
-                 st.session_state.visa_sel_idx = min(max_idx, max(0, current_index))
-                 st.warning("Index Visa réinitialisé (valeur hors limites).")
-                 visa_form_container.empty() # Détruire l'ancienne UI avant rerun
-                 st.rerun()
+                 current_index = 0
                  
-            # 2. L'index est garanti d'être valide ici.
-            final_safe_index = st.session_state.visa_sel_idx
+            final_safe_index = current_index
             
             # Clé statique pour éviter les problèmes de recréation de widget
             sel_idx_float = st.number_input(
-                "Ouvrir visa (index affiché)", 
+                "Index du visa à modifier", 
                 min_value=0, 
                 max_value=max_idx, 
                 value=final_safe_index,
@@ -316,34 +365,20 @@ elif page == "Visa":
             # 3. Mettre à jour la session state (si l'utilisateur a changé la valeur)
             if sel_idx != final_safe_index:
                 st.session_state.visa_sel_idx = sel_idx
-                visa_form_container.empty() # Détruire l'ancienne UI avant rerun
                 st.rerun()
+            else:
+                 st.session_state.visa_sel_idx = final_safe_index
 
-            # --- DÉFENSE ULTIME CONTRE IndexError (try/except) ---
-            try:
-                # Accès aux données garanti
-                sel_row = df.iloc[final_safe_index]
-                
-                with visa_form_container.container(): # Isoler le rendu du formulaire
-                    st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
-                    
-                    # Ligne 317 (mise à jour)
-                    render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
-            
-            except IndexError as e:
-                # Si l'index est désynchronisé (après une suppression rapide), on réinitialise et on relance
-                visa_form_container.empty() # Détruire l'ancienne UI avant rerun
-                st.session_state.visa_sel_idx = 0
-                st.error("Erreur d'index détectée après modification. Redémarrage automatique.")
-                st.rerun()
-                st.stop()
-            
+            # 4. Bouton pour passer à la vue d'édition
+            st.button("✏️ Modifier le type de visa sélectionné", on_click=lambda: set_view("visa_edit"))
 
         else:
-            visa_form_container.empty() # Si pas de résultats, s'assurer que le conteneur est vide
             st.info("Aucun type de visa à gérer.")
         
 # --- 4. DEFINITION DES FORMULAIRES (CRUD) ---
+
+# --- NOTE: PAS DE CHANGEMENT DANS render_client_form ET render_visa_form (v24) ---
+# --- (Elles conservent les clés hyper-uniques pour éviter les collisions internes) ---
 
 def render_client_form(df, sel_row, action, original_index=None):
     """Rendu du formulaire d'ajout/modification/suppression pour un client."""
@@ -436,9 +471,8 @@ def render_client_form(df, sel_row, action, original_index=None):
             delete_button = col_buttons[1].form_submit_button("❌ Supprimer le dossier")
 
         if submitted:
-            # 3. RÉCUPÉRATION DES VALEURS DE WIDGETS : Récupération des valeurs soumises via la session state
             
-            # Récupérer les valeurs des widgets (en utilisant la session_state, car les variables locales peuvent être obsolètes dans le contexte d'un rerun)
+            # Récupération des valeurs via session_state après soumission
             final_dossier_id = st.session_state.get(f"dossier_id_{unique_form_key}")
             final_nom = st.session_state.get(f"nom_{unique_form_key}")
             final_typevisa = st.session_state.get(f"typevisa_{unique_form_key}")
@@ -483,21 +517,21 @@ def update_client_data(df, sel_row, original_index, form_data, action):
     if action == "delete":
         st.session_state.clients_df = st.session_state.clients_df.drop(original_index, axis=0)
         st.session_state.clients_df = compute_finances(st.session_state.clients_df)
-        # Réinitialiser l'index pour se placer sur le premier élément (0) si la liste n'est pas vide
-        if 'client_sel_idx' in st.session_state:
-             st.session_state.client_sel_idx = 0 
+        # Réinitialiser la vue et l'index de sélection
+        st.session_state.client_sel_idx = 0 
+        set_view("clients_list") 
         st.success("Dossier client supprimé.")
         st.rerun()
         return 
 
-    # Préparation des données mises à jour (inchangé)
+    # Préparation des données mises à jour
     updated = sel_row.copy()
     
     for key, value in form_data.items():
         if not key.startswith("Paiements_New"):
             updated[key] = value
 
-    # Gestion des paiements (inchangé)
+    # Gestion des paiements
     current_payments_list = updated.get("Paiements", [])
     if isinstance(current_payments_list, str): 
         current_payments_list = []
@@ -510,13 +544,13 @@ def update_client_data(df, sel_row, original_index, form_data, action):
 
     updated["Paiements"] = current_payments_list.copy()
     
-    # Validation (inchangé)
+    # Validation
     ok, msg = validate_rfe_row(updated)
     if not ok:
         st.error(msg)
         return
 
-    # Enregistrement (inchangé)
+    # Enregistrement
     if action == "update":
         st.session_state.clients_df.loc[original_index, updated.index] = updated.astype(object)
         st.success("Modifications client enregistrées.")
@@ -525,8 +559,9 @@ def update_client_data(df, sel_row, original_index, form_data, action):
         st.session_state.clients_df = pd.concat([st.session_state.clients_df, new_row_df], ignore_index=True)
         st.success("Nouveau dossier client ajouté.")
 
-    # Recalculer les finances et relancer (inchangé)
+    # Recalculer les finances et FORCER LE RETOUR À LA VUE LISTE
     st.session_state.clients_df = compute_finances(st.session_state.clients_df)
+    set_view("clients_list") # NEW REDIRECTION
     st.rerun()
 
 
@@ -586,14 +621,15 @@ def render_visa_form(df, sel_row, action, original_index=None):
                 st.session_state.visa_df = pd.concat([st.session_state.visa_df, new_row_df], ignore_index=True)
                 st.success("Nouveau type de visa ajouté.")
             
+            set_view("visa_list") # NEW REDIRECTION
             st.rerun()
         
         if not is_add and delete_button:
             st.session_state.visa_df = st.session_state.visa_df.drop(original_index, axis=0)
             st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
             # Réinitialiser l'index
-            if 'visa_sel_idx' in st.session_state:
-                 st.session_state.visa_sel_idx = 0 
+            st.session_state.visa_sel_idx = 0 
+            set_view("visa_list") # NEW REDIRECTION
             st.success("Type de visa supprimé.")
             st.rerun()
             return 
