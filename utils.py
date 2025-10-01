@@ -1,4 +1,4 @@
-# Début de utils.py
+# utils.py
 import io
 import json
 import unicodedata
@@ -6,7 +6,11 @@ from typing import Dict, List, Tuple
 from datetime import date 
 
 import pandas as pd
-import streamlit as st # <-- L'importation de Streamlit est correcte ici
+
+# 🚨 DÉPLACER STREAMLIT EN DERNIER 🚨
+# Cela donne une meilleure chance à l'interpréteur de charger les dépendances de base.
+import streamlit as st 
+# ... (le reste du fichier utils.py)
 # ... (le reste du fichier)
 
 def _norm_cols(cols: List[str]) -> List[str]:
@@ -152,4 +156,5 @@ def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
     # ... (Reste de la fonction inchangée) ...
     # ...
     return True, ""
+
 
