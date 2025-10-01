@@ -1,17 +1,14 @@
-# utils.py
+# utils.py — Version finale et stable
+
 import io
 import json
 import unicodedata
 from typing import Dict, List, Tuple
 from datetime import date 
 
+# Librairies externes principales
 import pandas as pd
-
-# 🚨 DÉPLACER STREAMLIT EN DERNIER 🚨
-# Cela donne une meilleure chance à l'interpréteur de charger les dépendances de base.
 import streamlit as st 
-# ... (le reste du fichier utils.py)
-# ... (le reste du fichier)
 
 def _norm_cols(cols: List[str]) -> List[str]:
     """Nettoie les noms de colonnes (enlève espaces)"""
@@ -31,7 +28,37 @@ def _find_col(possible_names: List[str], columns: List[str]):
             return cols_norm[key]
     return None
 
-# ... (Autres fonctions _as_bool_series, load_all_sheets, to_excel_bytes_multi inchangées) ...
+def _as_bool_series(s: pd.Series) -> pd.Series:
+    """Convertit une colonne en booléens de manière robuste."""
+    if s is None:
+        return pd.Series([], dtype=bool)
+    vals = s.astype(str).str.strip().str.lower()
+    truthy = {"1", "true", "vrai", "yes", "oui", "y", "o", "x", "✓", "checked"}
+    falsy = {"0", "false", "faux", "no", "non", "n", "", "none", "nan"}
+    out = vals.apply(lambda v: True if v in truthy else (False if v in falsy else pd.NA))
+    return out.fillna(False)
+
+@st.cache_data(show_spinner=False)
+def load_all_sheets(xlsx_input) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+    """Charge toutes les feuilles d'un fichier Excel."""
+    xls = pd.ExcelFile(xlsx_input)
+    out = {}
+    for name in xls.sheet_names:
+        _df = pd.read_excel(xls, sheet_sheet_name=name)
+        _df.columns = _norm_cols(_df.columns)
+        out[name] = _df
+    return out, xls.sheet_names
+
+@st.cache_data(show_spinner=False)
+def to_excel_bytes_multi(sheets: Dict[str, pd.DataFrame]) -> bytes:
+    """Convertit un dictionnaire de DataFrames en un fichier Excel binaire."""
+    # openpyxl doit être installé et est importé implicitement par Pandas ici
+    import openpyxl  # noqa: F401
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for name, _df in sheets.items():
+            _df.to_excel(writer, index=False, sheet_name=name[:31])
+    return buffer.getvalue()
 
 def _parse_payments_to_list(cell):
     """Analyse une cellule 'Paiements' (string JSON ou liste) en une liste de dicts."""
@@ -93,21 +120,15 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- 2. Migration des anciens paiements ---
     
-    # S'assurer que 'Paiements' est présent et formaté comme liste de dicts
     if "Paiements" not in df.columns:
-         # Initialisation avec dtype=object pour garantir qu'elle peut contenir des listes de dicts.
          df["Paiements"] = pd.Series([[] for _ in range(len(df))], index=df.index, dtype=object) 
     
-    # Assurer que Paiements existants sont lus comme une liste pour l'état initial
     df["Paiements"] = df["Paiements"].apply(_parse_payments_to_list)
     
-    # ********** CORRECTIF DU VALUER ERROR **********
-    # Forcer le type 'object'. Cela garantit que pandas autorise l'affectation de listes de dicts 
-    # à des cellules individuelles via .loc.
+    # Correctif pour l'affectation de listes de dicts
     df["Paiements"] = df["Paiements"].astype(object) 
-    # **********************************************
     
-    # Identifier les lignes où 'Paiements' est vide (ce sont les lignes à migrer)
+    # Identifier les lignes à migrer
     no_payments_mask = df["Paiements"].apply(lambda x: len(x) == 0)
 
     legacy_payments = {idx: [] for idx in df.index[no_payments_mask]}
@@ -136,7 +157,6 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
                 except Exception:
                     pass 
 
-    # Mettre à jour la colonne 'Paiements' avec les données migrées (liste de dicts)
     for idx, payments_list in legacy_payments.items():
         if payments_list:
             df.loc[idx, "Paiements"] = payments_list
@@ -148,13 +168,53 @@ def harmonize_clients_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def compute_finances(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (Reste de la fonction inchangée) ...
-    # ...
+    """
+    Calcule 'TotalAcomptes' et 'SoldeCalc' à partir de 'Honoraires' et 'Paiements'.
+    """
+    df = df.copy()
+
+    if "Honoraires" not in df.columns:
+        df["Honoraires"] = 0.0
+    df["Honoraires"] = pd.to_numeric(df["Honoraires"], errors="coerce").fillna(0.0)
+
+    if "Paiements" not in df.columns:
+        df["Paiements"] = pd.Series([[] for _ in range(len(df))], index=df.index, dtype=object)
+
+    def sum_payments(payments_list):
+        total = 0.0
+        # S'assurer que c'est une liste itérable
+        if not isinstance(payments_list, list):
+             payments_list = _parse_payments_to_list(payments_list)
+             
+        for p in payments_list:
+            try:
+                amt = float(p.get("amount", 0) or 0) if isinstance(p, dict) else float(p)
+            except Exception:
+                amt = 0.0
+            total += amt
+        return total
+
+    df["TotalAcomptes"] = df["Paiements"].apply(sum_payments)
+    
+    df["TotalAcomptes"] = pd.to_numeric(df["TotalAcomptes"], errors="coerce").fillna(0.0)
+    
+    df["SoldeCalc"] = (df["Honoraires"] - df["TotalAcomptes"]).round(2)
+    
     return df
 
 def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
-    # ... (Reste de la fonction inchangée) ...
-    # ...
+    """Valide la cohérence des statuts d'un dossier."""
+    rfe = bool(row.get("RFE", False))
+    sent = bool(row.get("Dossier envoyé", False) or row.get("Dossier envoye", False))
+    refused = bool(row.get("Dossier refusé", False) or row.get("Dossier refuse", False))
+    approved = bool(row.get("Dossier approuvé", False) or row.get("Dossier approuve", False))
+    canceled = bool(row.get("DossierAnnule", False) or row.get("Dossier Annule", False) or row.get("Dossier annulé", False))
+
+    if rfe and not (sent or refused or approved):
+        return False, "RFE doit être combinée avec Envoyé / Refusé / Approuvé"
+    if approved and refused:
+        return False, "Un dossier ne peut pas être à la fois Approuvé et Refusé"
+    if canceled and (sent or refused or approved):
+        return False, "Un dossier annulé ne peut pas être marqué Envoyé/Refusé/Approuvé"
+    
     return True, ""
-
-
