@@ -1,4 +1,4 @@
-# app.py — Version finale avec logique de rerun simplifiée et impérative (Corrigé 12)
+# app.py — Version finale avec arrêt garanti (Corrigé 13)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -209,13 +209,13 @@ if page == "Clients":
             
             current_value = st.session_state.client_sel_idx
             
-            # 2. **BLOC DE SÉCURITÉ CRITIQUE : CORRECTION IMPÉRATIVE + RERUN**
+            # 2. **BLOC DE SÉCURITÉ CRITIQUE : CORRECTION IMPÉRATIVE + RERUN + STOP**
             # Si l'index stocké est invalide après le filtre/suppression
             if current_value > max_idx or current_value < 0:
                 st.session_state.client_sel_idx = 0
-                st.rerun() # Force le script à redémarrer avec une valeur sûre (0)
-                # Note: Le code s'arrête ici et redémarre.
-
+                st.rerun() 
+                st.stop() # Arrêt garanti de l'exécution actuelle.
+            
             # Le code continue UNIQUEMENT si l'index est VALIDÉ
             
             # 3. L'utilisateur choisit l'index affiché 
@@ -238,7 +238,7 @@ if page == "Clients":
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # Ligne de l'appel (ligne 241 dans votre trace)
+            # Ligne de l'appel (ligne 242)
             render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
             
         else:
@@ -270,12 +270,13 @@ elif page == "Visa":
             
             current_value = st.session_state.visa_sel_idx
             
-            # 1. BLOC DE SÉCURITÉ CRITIQUE : CORRECTION IMPÉRATIVE + RERUN
+            # 1. BLOC DE SÉCURITÉ CRITIQUE : CORRECTION IMPÉRATIVE + RERUN + STOP
             # Si l'index stocké est invalide après suppression
             if current_value > max_idx or current_value < 0:
                  st.session_state.visa_sel_idx = 0
                  current_value = 0
                  st.rerun() # Force le redémarrage si index invalide
+                 st.stop() # Arrêt garanti de l'exécution actuelle.
 
                  
             # Le code continue UNIQUEMENT si l'index est VALIDÉ
@@ -297,7 +298,7 @@ elif page == "Visa":
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
-            # Ligne de l'appel (ligne 303 dans votre trace)
+            # Ligne de l'appel (ligne 301/303)
             render_visa_form(df, sel_row, action="update", original_index=sel_idx) 
             
 
@@ -413,6 +414,7 @@ def update_client_data(df, sel_row, original_index, form_data, action):
              st.session_state.client_sel_idx = 0 
         st.success("Dossier client supprimé.")
         st.rerun()
+        st.stop()
         return
 
     # Préparation des données mises à jour
@@ -456,6 +458,7 @@ def update_client_data(df, sel_row, original_index, form_data, action):
     # Recalculer les finances et relancer
     st.session_state.clients_df = compute_finances(st.session_state.clients_df)
     st.rerun()
+    st.stop()
 
 
 def render_visa_form(df, sel_row, action, original_index=None):
@@ -504,6 +507,7 @@ def render_visa_form(df, sel_row, action, original_index=None):
                 st.success("Nouveau type de visa ajouté.")
             
             st.rerun()
+            st.stop()
         
         if not is_add and delete_button:
             st.session_state.visa_df = st.session_state.visa_df.drop(original_index, axis=0)
@@ -513,6 +517,7 @@ def render_visa_form(df, sel_row, action, original_index=None):
                  st.session_state.visa_sel_idx = 0 
             st.success("Type de visa supprimé.")
             st.rerun()
+            st.stop()
 
 # --- 5. LOGIQUE DE SAUVEGARDE GLOBALE ---
 
