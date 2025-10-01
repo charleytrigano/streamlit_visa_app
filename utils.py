@@ -1,4 +1,4 @@
-# utils.py
+# Début de utils.py
 import io
 import json
 import unicodedata
@@ -6,7 +6,8 @@ from typing import Dict, List, Tuple
 from datetime import date 
 
 import pandas as pd
-import streamlit as st
+import streamlit as st # <-- L'importation de Streamlit est correcte ici
+# ... (le reste du fichier)
 
 def _norm_cols(cols: List[str]) -> List[str]:
     """Nettoie les noms de colonnes (enlève espaces)"""
@@ -151,3 +152,4 @@ def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
     # ... (Reste de la fonction inchangée) ...
     # ...
     return True, ""
+
