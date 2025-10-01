@@ -1,6 +1,10 @@
-# app.py — Visa App avec navigation latérale (Visa / Clients) et CRUD Clients
+# app.py — Visa App (Clients = source de vérité)
+# Features added: DateAnnulation, DossierAnnule, dynamic payments, RFE validation,
+# save options: Download XLSX, save to local path (when running locally), st.secrets-driven Google Drive/OneDrive upload stubs.
+
 import io
-from datetime import datetime
+import json
+from datetime import datetime, date
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -8,10 +12,13 @@ import streamlit as st
 
 
 # =============================
-# Clear cache via URL param ?clear=1 (API moderne)
+# Config & helpers
 # =============================
+st.set_page_config(page_title="Visa App", page_icon="🛂", layout="wide")
+
+# Clear cache via URL param ?clear=1
 try:
-    params = st.query_params  # MutableMapping
+    params = st.query_params
     clear_val = params.get("clear", "0")
     if isinstance(clear_val, list):
         clear_val = clear_val[0]
@@ -21,18 +28,17 @@ try:
             st.cache_resource.clear()
         except Exception:
             pass
-        # Nettoie les query params et relance
         st.query_params.clear()
         st.rerun()
 except Exception:
     pass
 
 
-# =============================
-# Helpers
-# =============================
+def _norm_cols(cols: List[str]) -> List[str]:
+    return [str(c).strip() for c in cols]
+
+
 def _find_col(possible_names: List[str], columns: List[str]):
-    """Retourne la 1re colonne correspondante (insensible aux accents/majuscules)."""
     import unicodedata
 
     def norm(s: str) -> str:
@@ -49,345 +55,318 @@ def _find_col(possible_names: List[str], columns: List[str]):
 
 
 def _as_bool_series(s: pd.Series) -> pd.Series:
-    """Convertit des valeurs 'case à cocher' en booléen (gère 1/0, oui/non, x, ✓...)."""
     import numpy as np
-
     if s is None:
         return pd.Series([], dtype=bool)
     vals = s.astype(str).str.strip().str.lower()
     truthy = {"1", "true", "vrai", "yes", "oui", "y", "o", "x", "✓", "checked"}
     falsy = {"0", "false", "faux", "no", "non", "n", "", "none", "nan"}
-    out = vals.apply(lambda v: True if v in truthy else (False if v in falsy else np.nan))
+    out = vals.apply(lambda v: True if v in truthy else (False if v in falsy else pd.NA))
     return out.fillna(False)
-
-
-def _to_numeric(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce")
 
 
 @st.cache_data(show_spinner=False)
 def load_all_sheets(xlsx_input) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
-    """Charge toutes les feuilles dans un dict {nom: DataFrame} avec colonnes normalisées."""
     xls = pd.ExcelFile(xlsx_input)
     out = {}
     for name in xls.sheet_names:
         _df = pd.read_excel(xls, sheet_name=name)
-        _df.columns = [str(c).strip() for c in _df.columns]
+        _df.columns = _norm_cols(_df.columns)
         out[name] = _df
     return out, xls.sheet_names
 
 
 @st.cache_data(show_spinner=False)
-def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Feuille1") -> bytes:
-    """Convertit un DataFrame en bytes Excel (XLSX)."""
-    import openpyxl  # noqa: F401
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-    return buffer.getvalue()
-
-
-@st.cache_data(show_spinner=False)
 def to_excel_bytes_multi(sheets: Dict[str, pd.DataFrame]) -> bytes:
-    """Crée un classeur XLSX avec plusieurs onglets à partir d'un dict {nom: df}."""
     import openpyxl  # noqa: F401
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for name, _df in sheets.items():
-            _df.to_excel(writer, index=False, sheet_name=name)
+            _df.to_excel(writer, index=False, sheet_name=name[:31])
     return buffer.getvalue()
 
 
-# =============================
-# UI
-# =============================
-st.set_page_config(page_title="Visa App", page_icon="🛂", layout="wide")
-st.title("🛂 Visa App — Excel → analyse & export")
-st.caption("Navigation latérale : **Visa** et **Clients** (CRUD Clients inclus).")
+# Finance helpers: dynamic payments stored as JSON in column 'Paiements' (list of {date,amount})
+def compute_finances(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    # ensure numeric honoraires
+    if "Honoraires" not in df.columns:
+        df["Honoraires"] = 0
+    df["Honoraires"] = pd.to_numeric(df["Honoraires"], errors="coerce").fillna(0)
+
+    # payments column
+    if "Paiements" not in df.columns:
+        df["Paiements"] = "[]"
+
+    def sum_payments(cell):
+        try:
+            lst = cell if isinstance(cell, list) else json.loads(cell) if cell and pd.notna(cell) else []
+        except Exception:
+            lst = []
+        s = 0
+        for p in lst:
+            try:
+                s += float(p.get("amount", 0))
+            except Exception:
+                pass
+        return s
+
+    df["TotalAcomptes"] = df["Paiements"].apply(sum_payments)
+    df["SoldeCalc"] = (df["Honoraires"] - df["TotalAcomptes"]).round(2)
+    return df
+
+
+def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
+    rfe = bool(row.get("RFE", False))
+    sent = bool(row.get("Dossier envoyé", False) or row.get("Dossier envoye", False))
+    refused = bool(row.get("Dossier refusé", False) or row.get("Dossier refuse", False))
+    approved = bool(row.get("Dossier approuvé", False) or row.get("Dossier approuve", False))
+    canceled = bool(row.get("DossierAnnule", False) or row.get("Dossier Annule", False) or row.get("Dossier annulé", False))
+    # RFE cannot be true if none of sent/refused/approved and not canceled
+    if rfe and not (sent or refused or approved):
+        return False, "RFE doit être combinée avec Envoyé / Refusé / Approuvé"
+    # Can't be both approved and refused
+    if approved and refused:
+        return False, "Un dossier ne peut pas être à la fois Approuvé et Refusé"
+    # If canceled, clear other statuses
+    if canceled and (sent or refused or approved):
+        return False, "Un dossier annulé ne peut pas être marqué Envoyé/Refusé/Approuvé"
+    return True, ""
 
 
 # =============================
-# Sidebar — source de données & navigation
+# Sidebar: source, save options
 # =============================
 with st.sidebar:
-    st.header("Importer votre Excel")
-    up = st.file_uploader(
-        "Fichier .xlsx",
-        type=["xlsx"],
-        help="Classeur contenant les onglets 'Visa' et/ou 'Clients'.",
-    )
-    data_path = st.text_input(
-        "Ou saisissez un chemin local vers le .xlsx (optionnel)",
-        value="",
-        help="Exemple: C:/Users/charl/Desktop/visa_app/data.xlsx",
-    )
+    st.header("Fichier source & sauvegarde")
+    up = st.file_uploader("Fichier .xlsx", type=["xlsx"], help="Classeur contenant 'Visa' et 'Clients'.")
+    data_path = st.text_input("Ou chemin local vers le .xlsx (optionnel)")
 
-    st.divider()
-    page = st.radio("Sections", ["Visa", "Clients"], index=0)
+    st.markdown("---")
+    st.subheader("Sauvegarde")
+    save_mode = st.selectbox("Mode de sauvegarde", ["Download (toujours disponible)", "Save to local path (serveur/PC)", "Google Drive (secrets req.)", "OneDrive (secrets req.)"]) 
+    save_path = st.text_input("Chemin local pour sauvegarde (si Save to local path)")
+    st.markdown("Les sauvegardes vers Google Drive/OneDrive requièrent des identifiants dans `st.secrets`.")
 
-    st.divider()
-    if st.button("♻️ Vider le cache et recharger", use_container_width=True):
-        st.cache_data.clear()
-        try:
-            st.cache_resource.clear()
-        except Exception:
-            pass
-        st.success("Cache vidé. Rechargement…")
-        st.rerun()
+    st.markdown("---")
+    st.info("Navigation : utilisez le menu en bas pour basculer entre Visa et Clients")
 
-    st.markdown("**Astuce** : ajoutez `?clear=1` à l’URL pour vider le cache au chargement.")
-
-
-# =============================
-# Sélection de la source (upload OU chemin)
-# =============================
 src = data_path if data_path.strip() else up
 if not src:
-    st.info("Chargez un fichier Excel (.xlsx) **ou** renseignez un chemin local dans la barre latérale pour commencer.")
+    st.info("Chargez un fichier ou renseignez un chemin local pour commencer.")
     st.stop()
 
-# =============================
-# Chargement de toutes les feuilles
-# =============================
+# load
 try:
     all_sheets, sheet_names = load_all_sheets(src)
-except ValueError as e:
-    st.error(f"Erreur lors de la lecture du classeur : {e}")
+except Exception as e:
+    st.error(f"Erreur lecture fichier: {e}")
     st.stop()
 
-st.success(f"✅ Onglets trouvés : {', '.join(sheet_names)}")
+st.success(f"Onglets trouvés: {', '.join(sheet_names)}")
 
 visa_df = all_sheets.get("Visa")
 clients_df_loaded = all_sheets.get("Clients")
 
-# Met en mémoire de session une copie éditable des Clients (pour CRUD)
-if "clients_df" not in st.session_state:
-    st.session_state.clients_df = clients_df_loaded.copy() if clients_df_loaded is not None else pd.DataFrame()
+# ensure clients has canonical columns including new ones
+base_cols = [
+    "DossierID", "DateCreation", "Nom", "TypeVisa", "Telephone", "Email",
+    "DateFacture", "Honoraires", "Solde", "DateEnvoi", "Dossier envoyé",
+    "DateRetour", "Dossier refusé", "Dossier approuvé", "RFE",
+    "DateAnnulation", "DossierAnnule", "Notes", "Paiements"
+]
 
+if clients_df_loaded is None:
+    clients_df_loaded = pd.DataFrame(columns=base_cols)
+else:
+    # normalize column names that users may have
+    clients_df_loaded.columns = _norm_cols(clients_df_loaded.columns)
+    for c in base_cols:
+        if c not in clients_df_loaded.columns:
+            clients_df_loaded[c] = "" if c != "Honoraires" else 0
+
+# session copy for edits
+if "clients_df" not in st.session_state:
+    st.session_state.clients_df = clients_df_loaded.copy()
+
+# compute finances
+st.session_state.clients_df = compute_finances(st.session_state.clients_df)
+
+# Navigation
+page = st.selectbox("Page", ["Visa", "Clients"], index=0)
 
 # =============================
-# PAGE: VISA
+# Page Visa
 # =============================
 if page == "Visa":
-    st.subheader("🛂 Visa — tableau & filtres")
-
+    st.header("🛂 Visa")
     if visa_df is None:
-        st.warning("L’onglet **Visa** est introuvable dans le classeur.")
+        st.warning("Onglet Visa introuvable")
     else:
-        df = visa_df.copy()
-        col_search, col_rows = st.columns([3, 1])
-        with col_search:
-            q = st.text_input("Recherche (plein-texte)", placeholder="Tapez un mot-clé…")
-        with col_rows:
-            max_rows = st.number_input("Lignes à afficher", min_value=5, max_value=5000, value=100, step=5)
-
-        filtered = df.copy()
-        if q:
-            mask = pd.Series(False, index=filtered.index)
-            for c in filtered.columns:
-                try:
-                    mask = mask | filtered[c].astype(str).str.contains(q, case=False, na=False)
-                except Exception:
-                    pass
-            filtered = filtered[mask]
-
-        with st.expander("Filtres par colonne (catégories)"):
-            for col in filtered.select_dtypes(include=["object", "category"]).columns:
-                unique_vals = sorted(
-                    [v for v in filtered[col].dropna().unique() if str(v) != ""],
-                    key=lambda x: str(x).lower(),
-                )
-                if 1 < len(unique_vals) <= 1000:
-                    sel = st.multiselect(f"{col}", unique_vals, default=None)
-                    if sel:
-                        filtered = filtered[filtered[col].isin(sel)]
-
-        # ✅ Correction ici : len(df) au lieu de len[df]
-        st.markdown(f"**{len(filtered):,}** lignes affichées (sur **{len(df):,}**), **{len(df.columns)}** colonnes.")
-        st.dataframe(filtered.head(int(max_rows)), use_container_width=True)
-
-        st.subheader("Exports — Visa")
-        c1, c2 = st.columns(2)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        with c1:
-            csv_bytes = filtered.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "⬇️ Télécharger CSV — Visa",
-                data=csv_bytes,
-                file_name=f"Visa_{stamp}.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        with c2:
-            xls_bytes = to_excel_bytes(filtered, sheet_name="Visa")
-            st.download_button(
-                "⬇️ Télécharger Excel — Visa",
-                data=xls_bytes,
-                file_name=f"Visa_{stamp}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
+        st.dataframe(visa_df.head(500), use_container_width=True)
 
 # =============================
-# PAGE: CLIENTS (CRUD)
+# Page Clients
 # =============================
 if page == "Clients":
-    st.subheader("👥 Clients — ajouter / modifier / supprimer")
+    st.header("👥 Clients — gestion & suivi")
 
-    if st.session_state.clients_df is None or st.session_state.clients_df.empty:
-        st.warning("L’onglet **Clients** est introuvable ou vide dans le classeur.")
-        # Option pour créer un squelette vide
-        if st.button("Créer l’onglet Clients vide"):
-            st.session_state.clients_df = pd.DataFrame([
-                {
-                    "Dossier": "",
-                    "Date": "",
-                    "Nom": "",
-                    "Type Visa": "",
-                    "Téléphone": "",
-                    "Email": "",
-                    "Date facture": "",
-                    "Honoraires": "",
-                    "Date acompte 1": "",
-                    "Acompte 1": "",
-                    "Date acompte 2": "",
-                    "Acompte 2": "",
-                    "Date acompte 3": "",
-                    "Acompte 3": "",
-                    "Solde": "",
-                    "Date envoi": "",
-                    "Dossier envoyé": "",
-                    "Date retour": "",
-                    "Dossier refusé": "",
-                    "Dossier approuvé": "",
-                    "RFE": "",
-                }
-            ])
-            st.rerun()
+    df = st.session_state.clients_df
+
+    # Top KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total dossiers", f"{len(df):,}")
+    c2.metric("Total encaissé", f"{df['TotalAcomptes'].sum():,.2f}")
+    c3.metric("Total honoraires", f"{df['Honoraires'].sum():,.2f}")
+    c4.metric("Solde total", f"{df['SoldeCalc'].sum():,.2f}")
+
+    # filter / select
+    with st.expander("Filtrer / Rechercher"):
+        q = st.text_input("Recherche (nom / dossier / email)")
+        status_filter = st.selectbox("Filtrer par statut", ["Tous", "Envoyé", "Approuvé", "Refusé", "Annulé", "RFE"])
+
+    filtered = df.copy()
+    if q:
+        mask = pd.Series(False, index=filtered.index)
+        for c in ["DossierID", "Nom", "Email", "TypeVisa"]:
+            if c in filtered.columns:
+                mask = mask | filtered[c].astype(str).str.contains(q, case=False, na=False)
+        filtered = filtered[mask]
+    if status_filter != "Tous":
+        if status_filter == "Envoyé":
+            filtered = filtered[filtered["Dossier envoyé"] == True]
+        elif status_filter == "Approuvé":
+            filtered = filtered[filtered["Dossier approuvé"] == True]
+        elif status_filter == "Refusé":
+            filtered = filtered[filtered["Dossier refusé"] == True]
+        elif status_filter == "Annulé":
+            filtered = filtered[filtered["DossierAnnule"] == True]
+        elif status_filter == "RFE":
+            filtered = filtered[filtered["RFE"] == True]
+
+    st.dataframe(filtered.reset_index(drop=True), use_container_width=True)
+
+    # Select a client to open detail / edit
+    sel_idx = st.number_input("Ouvrir dossier (index affiché)", min_value=0, max_value=max(0, len(filtered)-1), value=0)
+    if len(filtered) == 0:
+        st.info("Aucun dossier à afficher")
     else:
-        clients_df = st.session_state.clients_df
+        sel_row = filtered.reset_index(drop=True).loc[int(sel_idx)]
+        st.subheader(f"Dossier: {sel_row.get('DossierID','(sans id)')} — {sel_row.get('Nom','')}")
 
-        tabs = st.tabs(["Ajouter", "Modifier / Supprimer", "Tableau & exports"])
+        # detail form
+        with st.form("client_form"):
+            cols1, cols2 = st.columns(2)
+            with cols1:
+                dossier_id = st.text_input("DossierID", value=sel_row.get("DossierID", ""))
+                nom = st.text_input("Nom", value=sel_row.get("Nom", ""))
+                typevisa = st.text_input("TypeVisa", value=sel_row.get("TypeVisa", ""))
+                email = st.text_input("Email", value=sel_row.get("Email", ""))
+            with cols2:
+                telephone = st.text_input("Telephone", value=sel_row.get("Telephone", ""))
+                honoraires = st.number_input("Honoraires", value=float(sel_row.get("Honoraires", 0)), format="%.2f")
+                notes = st.text_area("Notes", value=sel_row.get("Notes", ""))
 
-        # --- Ajouter ---
-        with tabs[0]:
-            st.caption("Ajouter un nouveau client (les champs sont libres — adaptez à vos colonnes)")
-            cols = list(clients_df.columns)
-            # champs principaux suggérés
-            d1, d2, d3 = st.columns(3)
-            with d1:
-                v_dossier = st.text_input("Dossier", value="")
-                v_nom = st.text_input("Nom", value="")
-                v_type = st.text_input("Type Visa", value="")
-            with d2:
-                v_tel = st.text_input("Téléphone", value="")
-                v_email = st.text_input("Email", value="")
-                v_hon = st.text_input("Honoraires", value="")
-            with d3:
-                v_envoye = st.checkbox("Dossier envoyé")
-                v_refuse = st.checkbox("Dossier refusé")
-                v_approuve = st.checkbox("Dossier approuvé")
-                v_rfe = st.checkbox("RFE (doit être combiné avec un des 3 statuts)")
+            st.markdown("---")
+            st.write("Statuts / dates")
+            st_col1, st_col2, st_col3 = st.columns(3)
+            with st_col1:
+                dossier_envoye = st.checkbox("Dossier envoyé", value=bool(sel_row.get("Dossier envoyé", False)))
+                dossier_refuse = st.checkbox("Dossier refusé", value=bool(sel_row.get("Dossier refusé", False)))
+            with st_col2:
+                dossier_approuve = st.checkbox("Dossier approuvé", value=bool(sel_row.get("Dossier approuvé", False)))
+                dossier_annule = st.checkbox("DossierAnnule (annulé)", value=bool(sel_row.get("DossierAnnule", False)))
+            with st_col3:
+                rfe = st.checkbox("RFE (doit être combiné)", value=bool(sel_row.get("RFE", False)))
+                date_envoi = st.date_input("DateEnvoi", value=sel_row.get("DateEnvoi") if pd.notna(sel_row.get("DateEnvoi","")) and sel_row.get("DateEnvoi")!="" else date.today())
 
-            if st.button("➕ Ajouter ce client", type="primary"):
-                new_row = {c: "" for c in cols}
-                # injecte les valeurs communes si elles existent dans les colonnes
-                for k, val in {
-                    "Dossier": v_dossier,
-                    "Nom": v_nom,
-                    "Type Visa": v_type,
-                    "Téléphone": v_tel,
-                    "Email": v_email,
-                    "Honoraires": v_hon,
-                    "Dossier envoyé": v_envoye,
-                    "Dossier refusé": v_refuse,
-                    "Dossier approuvé": v_approuve,
-                    "RFE": v_rfe,
-                }.items():
-                    if k in new_row:
-                        new_row[k] = val
-                st.session_state.clients_df = pd.concat([clients_df, pd.DataFrame([new_row])], ignore_index=True)
-                st.success("Client ajouté.")
-                st.rerun()
+            st.markdown("---")
+            st.write("Paiements")
+            # show existing payments
+            payments = sel_row.get("Paiements", "[]")
+            try:
+                payments_list = payments if isinstance(payments, list) else json.loads(payments) if payments and pd.notna(payments) else []
+            except Exception:
+                payments_list = []
+            for i, p in enumerate(payments_list):
+                st.write(f"{i+1}. {p.get('date','')} — {p.get('amount','')}")
 
-        # --- Modifier / Supprimer ---
-        with tabs[1]:
-            st.caption("Modifiez directement dans le tableau. Cochez des lignes à supprimer puis cliquez sur Supprimer.")
-            editable = st.data_editor(
-                clients_df,
-                use_container_width=True,
-                num_rows="dynamic",
-                key="clients_editor",
-            )
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                if st.button("💾 Enregistrer les modifications"):
-                    st.session_state.clients_df = editable
-                    st.success("Modifications enregistrées en mémoire.")
-            with c2:
-                to_delete = st.multiselect("Sélectionner les index à supprimer", options=list(editable.index))
-                if st.button("🗑️ Supprimer les lignes sélectionnées") and to_delete:
-                    st.session_state.clients_df = editable.drop(index=to_delete).reset_index(drop=True)
-                    st.success(f"Supprimé : {len(to_delete)} ligne(s).")
-                    st.rerun()
-            with c3:
-                if st.button("↩️ Réinitialiser depuis le fichier chargé"):
-                    st.session_state.clients_df = clients_df_loaded.copy() if clients_df_loaded is not None else pd.DataFrame()
-                    st.success("Réinitialisé.")
-                    st.rerun()
+            # add payment
+            new_pay_date = st.date_input("Date paiement (nouveau)", value=date.today())
+            new_pay_amount = st.number_input("Montant (nouveau)", value=0.0, format="%.2f")
 
-        # --- Tableau & exports ---
-        with tabs[2]:
-            st.dataframe(st.session_state.clients_df, use_container_width=True)
-            e1, e2 = st.columns(2)
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            with e1:
-                clients_csv = st.session_state.clients_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "⬇️ Télécharger CSV — Clients (modifié)",
-                    data=clients_csv,
-                    file_name=f"Clients_mod_{stamp}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-            with e2:
-                clients_xlsx = to_excel_bytes(st.session_state.clients_df, sheet_name="Clients")
-                st.download_button(
-                    "⬇️ Télécharger Excel — Clients (modifié)",
-                    data=clients_xlsx,
-                    file_name=f"Clients_mod_{stamp}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+            submitted = st.form_submit_button("Enregistrer les modifications")
+            if submitted:
+                # build updated row
+                updated = sel_row.copy()
+                updated["DossierID"] = dossier_id
+                updated["Nom"] = nom
+                updated["TypeVisa"] = typevisa
+                updated["Email"] = email
+                updated["Telephone"] = telephone
+                updated["Honoraires"] = float(honoraires)
+                updated["Notes"] = notes
+                updated["Dossier envoyé"] = bool(dossier_envoye)
+                updated["Dossier refusé"] = bool(dossier_refuse)
+                updated["Dossier approuvé"] = bool(dossier_approuve)
+                updated["DossierAnnule"] = bool(dossier_annule)
+                updated["RFE"] = bool(rfe)
+                updated["DateEnvoi"] = str(date_envoi)
+                # append new payment if >0
+                if new_pay_amount and float(new_pay_amount) > 0:
+                    payments_list.append({"date": str(new_pay_date), "amount": float(new_pay_amount)})
+                updated["Paiements"] = json.dumps(payments_list)
 
-            # Export du classeur complet (Visa + Clients)
-            st.markdown("**Exporter le classeur complet (Visa + Clients)**")
-            sheets_out = {}
-            if visa_df is not None:
-                sheets_out["Visa"] = visa_df
-            if not st.session_state.clients_df.empty:
-                sheets_out["Clients"] = st.session_state.clients_df
-            if sheets_out:
-                full_xlsx = to_excel_bytes_multi(sheets_out)
-                st.download_button(
-                    "⬇️ Télécharger Excel — Classeur complet",
-                    data=full_xlsx,
-                    file_name=f"Visa_Clients_{stamp}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                # validate
+                ok, msg = validate_rfe_row(updated)
+                if not ok:
+                    st.error(msg)
+                else:
+                    # locate index in session_state df and update
+                    # find by DossierID first, otherwise by index matching
+                    idxs = st.session_state.clients_df.index[st.session_state.clients_df.get("DossierID") == sel_row.get("DossierID")].tolist()
+                    if not idxs:
+                        # fallback: match by exact row equality (not ideal) — append as new
+                        st.session_state.clients_df = pd.concat([st.session_state.clients_df, pd.DataFrame([updated])], ignore_index=True)
+                    else:
+                        st.session_state.clients_df.loc[idxs[0], :] = pd.Series(updated)
+                    # recompute finances
+                    st.session_state.clients_df = compute_finances(st.session_state.clients_df)
+                    st.success("Modifications sauvegardées en session.")
 
+    # quick export / save actions
+    st.markdown("---")
+    exp_col1, exp_col2, exp_col3 = st.columns(3)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    with exp_col1:
+        csv_bytes = st.session_state.clients_df.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Télécharger CSV — Clients", data=csv_bytes, file_name=f"Clients_{stamp}.csv", mime="text/csv")
+    with exp_col2:
+        xls_bytes = to_excel_bytes_multi({"Clients": st.session_state.clients_df, **({"Visa": visa_df} if visa_df is not None else {})})
+        st.download_button("⬇️ Télécharger XLSX — Classeur (Visa+Clients)", data=xls_bytes, file_name=f"Visa_Clients_{stamp}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with exp_col3:
+        if save_mode == "Save to local path (serveur/PC)":
+            if save_path:
+                try:
+                    with open(save_path, "wb") as f:
+                        f.write(to_excel_bytes_multi({"Clients": st.session_state.clients_df, **({"Visa": visa_df} if visa_df is not None else {})}))
+                    st.success(f"Fichier écrit: {save_path}")
+                except Exception as e:
+                    st.error(f"Erreur écriture locale: {e}")
+            else:
+                st.warning("Renseignez un chemin local dans la sidebar.")
+        elif save_mode == "Google Drive (secrets req.)":
+            # minimal attempt: expects st.secrets['gdrive'] with credentials JSON or token info
+            try:
+                creds = st.secrets.get("gdrive")
+                if not creds:
+                    st.error("Aucun secret gdrive trouvé. Ajoutez vos identifiants dans st.secrets['gdrive']")
+                else:
+                    st.info("Upload Google Drive non-implémenté automatiquement. Voir README pour config.")
+            except Exception as e:
+                st.error(f"Google Drive error: {e}")
+        elif save_mode == "OneDrive (secrets req.)":
+            st.info("OneDrive upload non-implémenté automatiquement. Voir README pour config OAuth.")
 
-# =============================
-# Aide / Dépannage
-# =============================
-with st.expander("Aide / Dépannage"):
-    st.markdown(
-        """
-        - Le disque de Streamlit Cloud est éphémère : les ajouts/modifs Clients sont conservés en **mémoire de session**
-          et disponibles au téléchargement (CSV/XLSX). Pour persister côté serveur, stockez dans un bucket (S3/GCS)
-          ou téléchargez le classeur complet puis remplacez votre fichier source.
-        - `RFE` est détecté comme colonne et peut être cochée en combinaison avec *Envoyé/Refusé/Approuvé*.
-        - Pour forcer un rafraîchissement : bouton **♻️** en sidebar ou ajoutez `?clear=1` à l’URL.
-        """
-    )
+# End of app
+
