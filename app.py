@@ -189,8 +189,67 @@ else:
 if "clients_df" not in st.session_state:
     st.session_state.clients_df = clients_df_loaded.copy()
 
-# compute finances
-st.session_state.clients_df = compute_finances(st.session_state.clients_df)
+def compute_finances(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcule TotalAcomptes et SoldeCalc à partir de la colonne 'Paiements' (JSON/list)
+    et de 'Honoraires'. Retourne une copie du dataframe avec colonnes ajoutées/normalisées.
+    """
+    df = df.copy()
+
+    # Ensure Honoraires exists and is numeric
+    if "Honoraires" not in df.columns:
+        df["Honoraires"] = 0
+    df["Honoraires"] = pd.to_numeric(df["Honoraires"], errors="coerce").fillna(0.0)
+
+    # Ensure Paiements exists (store as JSON-string or list)
+    if "Paiements" not in df.columns:
+        df["Paiements"] = "[]"
+
+    def sum_payments(cell):
+        # parse various possible formats safely -> return float sum
+        try:
+            if isinstance(cell, list):
+                lst = cell
+            elif isinstance(cell, str):
+                # empty or JSON list
+                cell_strip = cell.strip()
+                if cell_strip == "":
+                    lst = []
+                else:
+                    try:
+                        lst = json.loads(cell_strip)
+                    except Exception:
+                        # maybe it is a representation like "[{'date':...}]" — fallback: empty
+                        lst = []
+            elif pd.isna(cell):
+                lst = []
+            else:
+                lst = []
+        except Exception:
+            lst = []
+
+        total = 0.0
+        for p in lst:
+            try:
+                if isinstance(p, dict):
+                    amt = float(p.get("amount", 0) or 0)
+                elif isinstance(p, (int, float)):
+                    amt = float(p)
+                else:
+                    amt = float(str(p))
+            except Exception:
+                amt = 0.0
+            total += amt
+        return total
+
+    # Compute TotalAcomptes (as numeric)
+    df["TotalAcomptes"] = df["Paiements"].apply(sum_payments)
+    df["TotalAcomptes"] = pd.to_numeric(df["TotalAcomptes"], errors="coerce").fillna(0.0)
+
+    # Compute SoldeCalc as numeric and round
+    df["SoldeCalc"] = (df["Honoraires"].astype(float) - df["TotalAcomptes"].astype(float)).round(2)
+
+    return df
 
 # Navigation
 page = st.selectbox("Page", ["Visa", "Clients"], index=0)
@@ -369,4 +428,5 @@ if page == "Clients":
             st.info("OneDrive upload non-implémenté automatiquement. Voir README pour config OAuth.")
 
 # End of app
+
 
