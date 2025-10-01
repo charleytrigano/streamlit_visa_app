@@ -1,4 +1,4 @@
-# app.py — Version finale avec contrôle de taille de DataFrame (Corrigé 19)
+# app.py — Version finale avec bloc try/except sur l'accès aux données (Corrigé 20)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -198,7 +198,7 @@ if page == "Clients":
         st.dataframe(filtered.reset_index(drop=True), use_container_width=True)
 
         # Sélection et modification
-        if len(filtered) > 0: # <-- Protection critique
+        if len(filtered) > 0: 
             
             # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
             
@@ -210,10 +210,10 @@ if page == "Clients":
             
             current_index = st.session_state.client_sel_idx
             
-            # Fix index if out of bounds. This is the primary protection.
+            # Fix index if out of bounds (protection primaire)
             if current_index > max_idx or current_index < 0:
                 st.session_state.client_sel_idx = min(max_idx, max(0, current_index)) 
-                st.warning("Index Client réinitialisé après modification/suppression.")
+                st.warning("Index Client réinitialisé (valeur hors limites).")
                 st.rerun() 
             
             final_safe_index = st.session_state.client_sel_idx
@@ -234,25 +234,26 @@ if page == "Clients":
                 st.session_state.client_sel_idx = sel_idx
                 st.rerun() 
             
-            # --- VÉRIFICATION CRITIQUE FINALE AVANT ACCÈS ---
-            if st.session_state.client_sel_idx < 0 or st.session_state.client_sel_idx > max_idx:
-                 # Dernier filet de sécurité : si le rerun n'a pas eu lieu assez vite.
-                 st.session_state.client_sel_idx = 0
-                 st.warning("Désynchronisation critique d'index, nouvelle tentative de redémarrage.")
-                 st.rerun()
-                 st.stop()
-                 
-            # Accès aux données garanti
-            sel_row_filtered = filtered.iloc[st.session_state.client_sel_idx] 
-            original_session_index = sel_row_filtered.name 
+            # --- DÉFENSE ULTIME CONTRE IndexError (try/except) ---
+            try:
+                # Accès aux données garanti
+                sel_row_filtered = filtered.iloc[st.session_state.client_sel_idx] 
+                original_session_index = sel_row_filtered.name 
 
-            st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
-            
-            # Ligne 251 (mise à jour)
-            render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
+                st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+                
+                # Ligne 251 (mise à jour)
+                render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
+
+            except IndexError as e:
+                # Si l'index est désynchronisé (après une suppression rapide), on réinitialise et on relance
+                st.session_state.client_sel_idx = 0
+                st.error("Erreur d'index détectée après modification. Redémarrage automatique.")
+                st.rerun()
+                st.stop() # Arrêter l'exécution pour le cycle actuel
             
         else:
-            st.info("Aucun dossier client ne correspond aux filtres.") # <-- Cas d'un DataFrame filtré vide
+            st.info("Aucun dossier client ne correspond aux filtres.")
 
 
 elif page == "Visa":
@@ -271,7 +272,7 @@ elif page == "Visa":
         
         st.dataframe(df, use_container_width=True)
         
-        if len(df) > 0: # <-- Protection critique
+        if len(df) > 0: 
             max_idx = len(df) - 1
             
             # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
@@ -283,7 +284,7 @@ elif page == "Visa":
             # 1. CONTRÔLE D'INDEX ET CORRECTION CRITIQUE
             if current_index > max_idx or current_index < 0:
                  st.session_state.visa_sel_idx = min(max_idx, max(0, current_index))
-                 st.warning("Index Visa réinitialisé après suppression.")
+                 st.warning("Index Visa réinitialisé (valeur hors limites).")
                  st.rerun()
                  
             # 2. L'index est garanti d'être valide ici.
@@ -305,30 +306,32 @@ elif page == "Visa":
                 st.session_state.visa_sel_idx = sel_idx
                 st.rerun()
 
-            # --- VÉRIFICATION CRITIQUE FINALE AVANT ACCÈS ---
-            if st.session_state.visa_sel_idx < 0 or st.session_state.visa_sel_idx > max_idx:
-                 st.session_state.visa_sel_idx = 0
-                 st.warning("Désynchronisation critique d'index, nouvelle tentative de redémarrage.")
-                 st.rerun()
-                 st.stop()
-                 
-            # Accès aux données garanti
-            sel_row = df.iloc[final_safe_index]
+            # --- DÉFENSE ULTIME CONTRE IndexError (try/except) ---
+            try:
+                # Accès aux données garanti
+                sel_row = df.iloc[final_safe_index]
+                
+                st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
+                
+                # Ligne 320 (mise à jour)
+                render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
             
-            st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
-            
-            # Ligne 320 (mise à jour)
-            render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
+            except IndexError as e:
+                # Si l'index est désynchronisé (après une suppression rapide), on réinitialise et on relance
+                st.session_state.visa_sel_idx = 0
+                st.error("Erreur d'index détectée après modification. Redémarrage automatique.")
+                st.rerun()
+                st.stop() # Arrêter l'exécution pour le cycle actuel
             
 
         else:
-            st.info("Aucun type de visa à gérer.") # <-- Cas d'un DataFrame Visa vide
+            st.info("Aucun type de visa à gérer.")
         
-# --- 4. DEFINITION DES FORMULAIRES (CRUD) ---
+# --- 4. DEFINITION DES FORMULAIRES (CRUD) (Aucun changement nécessaire ici) ---
 
 def render_client_form(df, sel_row, action, original_index=None):
     """Rendu du formulaire d'ajout/modification/suppression pour un client."""
-    
+    # Le code de la fonction est inchangé par rapport à la version 19
     is_add = (action == "add")
     button_label = "Ajouter le dossier" if is_add else "Enregistrer les modifications"
 
@@ -428,24 +431,24 @@ def update_client_data(df, sel_row, original_index, form_data, action):
     if action == "delete":
         st.session_state.clients_df = st.session_state.clients_df.drop(original_index, axis=0)
         st.session_state.clients_df = compute_finances(st.session_state.clients_df)
-        # Reset de l'index avant rerun
+        # Réinitialiser l'index pour se placer sur le premier élément (0) si la liste n'est pas vide
         if 'client_sel_idx' in st.session_state:
              st.session_state.client_sel_idx = 0 
         st.success("Dossier client supprimé.")
         st.rerun()
         return 
 
-    # Préparation des données mises à jour
+    # Préparation des données mises à jour (inchangé)
     updated = sel_row.copy()
     
     for key, value in form_data.items():
         if not key.startswith("Paiements_New"):
             updated[key] = value
 
-    # Gestion des paiements
+    # Gestion des paiements (inchangé)
     current_payments_list = updated.get("Paiements", [])
     if isinstance(current_payments_list, str): 
-        current_payments_list = [] # S'assurer que c'est une liste
+        current_payments_list = []
         
     new_pay_amount = form_data.get("Paiements_New_Amount", 0.0)
     new_pay_date = form_data.get("Paiements_New_Date", date.today())
@@ -453,34 +456,31 @@ def update_client_data(df, sel_row, original_index, form_data, action):
     if new_pay_amount and float(new_pay_amount) > 0:
         current_payments_list.append({"date": str(new_pay_date), "amount": float(new_pay_amount)})
 
-    updated["Paiements"] = current_payments_list.copy() # Copier la liste pour éviter les références
+    updated["Paiements"] = current_payments_list.copy()
     
-    # Validation
+    # Validation (inchangé)
     ok, msg = validate_rfe_row(updated)
     if not ok:
         st.error(msg)
         return
 
-    # Enregistrement
+    # Enregistrement (inchangé)
     if action == "update":
-        # Mise à jour de la ligne existante
-        # Utiliser .loc[index] = Series pour une mise à jour fiable
         st.session_state.clients_df.loc[original_index, updated.index] = updated.astype(object)
         st.success("Modifications client enregistrées.")
     elif action == "add":
-        # Nouvelle ligne, utiliser concat
         new_row_df = pd.DataFrame([updated])
         st.session_state.clients_df = pd.concat([st.session_state.clients_df, new_row_df], ignore_index=True)
         st.success("Nouveau dossier client ajouté.")
 
-    # Recalculer les finances et relancer
+    # Recalculer les finances et relancer (inchangé)
     st.session_state.clients_df = compute_finances(st.session_state.clients_df)
     st.rerun()
 
 
 def render_visa_form(df, sel_row, action, original_index=None):
     """Rendu du formulaire d'ajout/modification/suppression pour un type de visa."""
-    
+    # Le code de la fonction est inchangé par rapport à la version 19
     is_add = (action == "add")
     button_label = "Ajouter le type" if is_add else "Enregistrer les modifications"
 
@@ -528,14 +528,14 @@ def render_visa_form(df, sel_row, action, original_index=None):
         if not is_add and delete_button:
             st.session_state.visa_df = st.session_state.visa_df.drop(original_index, axis=0)
             st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
-            # Reset de l'index avant rerun
+            # Réinitialiser l'index
             if 'visa_sel_idx' in st.session_state:
                  st.session_state.visa_sel_idx = 0 
             st.success("Type de visa supprimé.")
             st.rerun()
             return 
 
-# --- 5. LOGIQUE DE SAUVEGARDE GLOBALE ---
+# --- 5. LOGIQUE DE SAUVEGARDE GLOBALE (inchangé) ---
 
 if src and (page == "Clients" or page == "Visa"):
     
