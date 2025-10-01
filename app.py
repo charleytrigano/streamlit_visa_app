@@ -1,4 +1,4 @@
-# app.py — Version finale avec contrôle d'arrêt garanti (Corrigé 15)
+# app.py — Version finale avec contrôle d'arrêt garanti (Corrigé 16)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -203,45 +203,39 @@ if page == "Clients":
             
             max_idx = len(filtered) - 1
             
-            # 1. Initialisation de l'index
+            # 1. INITIALISATION ET CONTRÔLE D'INDEX CRITIQUE
             if 'client_sel_idx' not in st.session_state:
                 st.session_state.client_sel_idx = 0
             
-            # 2. **CONTRÔLE D'INDEX ET CORRECTION CRITIQUE**
             current_index = st.session_state.client_sel_idx
             
+            # Si l'index stocké est invalide, FORCER LE REDÉMARRAGE + ARRÊT
             if current_index > max_idx or current_index < 0:
-                # Corriger l'index de session IMMÉDIATEMENT
-                st.session_state.client_sel_idx = min(max_idx, max(0, current_index))
+                # Correction de l'index à la valeur la plus sûre (0 ou max_idx)
+                st.session_state.client_sel_idx = min(max_idx, max(0, current_index)) 
+                st.warning("Index réinitialisé après modification/suppression.")
                 st.rerun() 
+                st.stop() # ARRÊT GARANTI
             
-            # 3. L'index est garanti d'être valide ici. On l'utilise pour la valeur initiale du number_input.
-            safe_index = st.session_state.client_sel_idx
-            
+            # L'index est garanti d'être valide ici.
+            final_safe_index = st.session_state.client_sel_idx
+
+            # 2. L'utilisateur choisit l'index affiché
             sel_idx_float = st.number_input(
                 "Ouvrir dossier (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
-                value=safe_index, # Utilisation de l'index garanti valide
+                value=final_safe_index, # Utilisation de l'index garanti valide
                 key="client_idx_input"
             )
             
-            # 4. Vérification de l'intention de l'utilisateur (changement via input)
             sel_idx = int(sel_idx_float) 
             
-            if sel_idx != safe_index: # Si l'input a une valeur différente de l'index de session initial
+            # 3. Mettre à jour la session state (si l'utilisateur a changé la valeur)
+            if sel_idx != final_safe_index:
                 st.session_state.client_sel_idx = sel_idx
-                st.rerun() # Pour refléter le changement
-            
-            # 5. Accès sécurisé et appel du formulaire (Utiliser l'index garanti)
-            final_safe_index = st.session_state.client_sel_idx
-
-            # 5b. **FINAL INDEX BOUND CHECK BEFORE ACCESS (ULTRA SAFE)**
-            if final_safe_index > max_idx or final_safe_index < 0:
-                 # Si cette condition est VRAIE ici, c'est que l'état Streamlit est très incohérent
-                 st.session_state.client_sel_idx = 0 # Reset to 0 just in case
-                 st.error("Incohérence d'index critique détectée. Redémarrage du formulaire.")
-                 st.rerun()
+                st.rerun() 
+                st.stop() # ARRÊT GARANTI
             
             # Accès aux données garanti
             sel_row_filtered = filtered.iloc[final_safe_index] 
@@ -249,7 +243,7 @@ if page == "Clients":
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # Ligne de l'appel (ligne 245)
+            # Ligne de l'appel (ligne 253)
             render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
             
         else:
@@ -279,46 +273,43 @@ elif page == "Visa":
             if 'visa_sel_idx' not in st.session_state:
                 st.session_state.visa_sel_idx = 0
             
-            # 1. **CONTRÔLE D'INDEX ET CORRECTION CRITIQUE**
             current_index = st.session_state.visa_sel_idx
             
+            # 1. CONTRÔLE D'INDEX ET CORRECTION CRITIQUE
             if current_index > max_idx or current_index < 0:
                  st.session_state.visa_sel_idx = min(max_idx, max(0, current_index))
+                 st.warning("Index Visa réinitialisé après suppression.")
                  st.rerun()
+                 st.stop() # ARRÊT GARANTI
                  
             # 2. L'index est garanti d'être valide ici.
-            safe_index = st.session_state.visa_sel_idx
+            final_safe_index = st.session_state.visa_sel_idx
             
             sel_idx_float = st.number_input(
                 "Ouvrir visa (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
-                value=safe_index,
+                value=final_safe_index,
                 key="visa_idx_input" 
             )
             
             sel_idx = int(sel_idx_float)
             
             # 3. Mettre à jour la session state (si l'utilisateur a changé la valeur)
-            if sel_idx != safe_index:
+            if sel_idx != final_safe_index:
                 st.session_state.visa_sel_idx = sel_idx
                 st.rerun()
+                st.stop() # ARRÊT GARANTI
 
             # 4. Accès sécurisé et appel du formulaire
-            final_safe_index = st.session_state.visa_sel_idx
-
-            # 4b. **FINAL INDEX BOUND CHECK BEFORE ACCESS (ULTRA SAFE)**
-            if final_safe_index > max_idx or final_safe_index < 0:
-                 st.session_state.visa_sel_idx = 0 # Reset to 0 just in case
-                 st.error("Incohérence d'index critique détectée. Redémarrage du formulaire.")
-                 st.rerun()
-
+            # final_safe_index est déjà st.session_state.visa_sel_idx
+            
             # Accès aux données garanti
             sel_row = df.iloc[final_safe_index]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
-            # Ligne de l'appel (ligne 307)
+            # Ligne de l'appel (ligne 322)
             render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
             
 
