@@ -1,4 +1,4 @@
-# app.py — Version finale avec contrôle d'index précoce et st.rerun() (Corrigé 9)
+# app.py — Version finale avec contrôle d'index précoce et st.rerun() sur les deux pages (Corrigé 10)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -199,7 +199,7 @@ if page == "Clients":
         # Sélection et modification
         if len(filtered) > 0:
             
-            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE (CORRECTION V9) ---
+            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
             
             max_idx = len(filtered) - 1
             
@@ -212,8 +212,6 @@ if page == "Clients":
             # 2. **BLOC DE SÉCURITÉ CRITIQUE : FORCE RERUN SI INDEX INVALIDE**
             if current_value > max_idx or current_value < 0:
                 st.session_state.client_sel_idx = 0
-                # st.info("Correction automatique de l'index de sélection suite à un filtre.") 
-                # (Commenté pour éviter le flash mais le rerunn est actif)
                 st.rerun() # <-- LA CLÉ : Force le script à redémarrer avec une valeur sûre (0)
 
             # 3. L'utilisateur choisit l'index affiché (la valeur est garantie valide par le bloc précédent)
@@ -230,7 +228,7 @@ if page == "Clients":
             # 4. Mettre à jour la session state avec la valeur choisie/corrigée par le widget
             st.session_state.client_sel_idx = sel_idx
             
-            # 5. Accès sécurisé à la ligne (garanti valide)
+            # 5. Accès sécurisé à la ligne (garanti valide par le rerun)
             sel_row_filtered = filtered.iloc[sel_idx]
             original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
 
@@ -260,36 +258,39 @@ elif page == "Visa":
         if len(df) > 0:
             max_idx = len(df) - 1
             
-            # --- Sécurisation de l'indexation pour Visa ---
+            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE (Clients-style) ---
             if 'visa_sel_idx' not in st.session_state:
                 st.session_state.visa_sel_idx = 0
             
             current_value = st.session_state.visa_sel_idx
             
-            # BLOC DE SÉCURITÉ CRITIQUE
+            # 1. BLOC DE SÉCURITÉ CRITIQUE : FORCE RERUN SI INDEX INVALIDE
             if current_value > max_idx or current_value < 0:
                  st.session_state.visa_sel_idx = 0
                  current_value = 0
                  st.rerun() # Force le redémarrage si index invalide
 
                  
+            # 2. L'utilisateur choisit l'index (valeur maintenant sécurisée)
             sel_idx_float = st.number_input(
                 "Ouvrir visa (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
                 value=current_value,
-                key="visa_idx_input" # Ajout d'une clé pour stabiliser l'input
+                key="visa_idx_input" 
             )
             
             sel_idx = int(sel_idx_float)
             st.session_state.visa_sel_idx = sel_idx
             
+            # 3. Accès aux données (garanti valide)
             sel_row = df.iloc[sel_idx]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
             # L'index du dataframe est l'index de la série sel_row (pour le DF non filtré)
-            render_visa_form(df, sel_row, action="update", original_index=sel_idx) 
+            render_visa_form(df, sel_row, action="update", original_index=sel_idx) # Ligne de l'erreur
+            
 
         else:
             st.info("Aucun type de visa à gérer.")
@@ -548,4 +549,3 @@ if src and (page == "Clients" or page == "Visa"):
                 st.warning("Renseignez un chemin local dans la sidebar.")
         elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
             st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
-
