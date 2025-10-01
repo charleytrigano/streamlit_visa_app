@@ -1,4 +1,4 @@
-# app.py — Version finale avec CRUD complet et indexation ultra-sécurisée (Corrigé 6)
+# app.py — Version finale avec CRUD complet, indexation ultra-sécurisée et correction de syntaxe (Corrigé 7)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -233,7 +233,7 @@ if page == "Clients":
             # 4. On met à jour l'état de session avec l'index sécurisé pour la prochaine exécution
             st.session_state.client_sel_idx = sel_idx 
             
-            # 5. Accès sécurisé à la ligne (Line 244 dans votre rapport)
+            # 5. Accès sécurisé à la ligne 
             sel_row_filtered = filtered.iloc[sel_idx]
             original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
 
@@ -374,6 +374,7 @@ def render_client_form(df, sel_row, action, original_index=None):
 
         # Boutons d'action
         col_buttons = st.columns(3)
+        # Ligne 472 corrigée : syntaxe complétée
         submitted = col_buttons[0].form_submit_button(button_label)
         
         delete_button = None
@@ -469,4 +470,88 @@ def render_visa_form(df, sel_row, action, original_index=None):
 
         # Boutons d'action
         col_buttons = st.columns(3)
-        submitted = col_buttons[0].form_submit_button(button_
+        submitted = col_buttons[0].form_submit_button(button_label)
+        
+        delete_button = None
+        if not is_add:
+            delete_button = col_buttons[1].form_submit_button("❌ Supprimer le type")
+
+        if submitted:
+            if not visa_code:
+                 st.error("Veuillez entrer un Code Visa.")
+                 return
+
+            if action == "add" and visa_code in st.session_state.visa_df['Visa'].values:
+                 st.error(f"Le code Visa '{visa_code}' existe déjà. Veuillez modifier l'entrée existante.")
+                 return
+
+            # Préparation des données
+            updated = sel_row.copy()
+            updated["Visa"] = visa_code
+            updated["Categories"] = category
+            updated["Definition"] = definition
+            
+            # Enregistrement
+            if action == "update":
+                st.session_state.visa_df.loc[original_index, :] = updated
+                st.success("Type de visa modifié.")
+            elif action == "add":
+                new_row_df = pd.DataFrame([updated])
+                st.session_state.visa_df = pd.concat([st.session_state.visa_df, new_row_df], ignore_index=True)
+                st.success("Nouveau type de visa ajouté.")
+            
+            st.rerun()
+        
+        if not is_add and delete_button:
+            st.session_state.visa_df = st.session_state.visa_df.drop(original_index, axis=0)
+            st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
+            # Après la suppression, réinitialiser l'index de sélection pour éviter une erreur
+            if 'visa_sel_idx' in st.session_state:
+                 st.session_state.visa_sel_idx = 0 
+            st.success("Type de visa supprimé.")
+            st.rerun()
+
+# --- 5. LOGIQUE DE SAUVEGARDE GLOBALE ---
+
+if src and (page == "Clients" or page == "Visa"):
+    
+    st.markdown("---")
+    st.subheader("Exporter et Sauvegarder les Données")
+    
+    exp_col1, exp_col2, exp_col3 = st.columns(3)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    
+    # Préparation du DataFrame pour l'export (Paiements en JSON string)
+    clients_df_export = st.session_state.clients_df.copy()
+    clients_df_export["Paiements"] = clients_df_export["Paiements"].apply(json.dumps)
+    
+    # Création du dictionnaire d'onglets pour l'export XLSX
+    all_sheets_export = {
+        "Clients": clients_df_export,
+        "Visa": st.session_state.visa_df
+    }
+
+    with exp_col1:
+        # Téléchargement CSV Clients
+        csv_bytes = clients_df_export.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Télécharger CSV — Clients", data=csv_bytes, file_name=f"Clients_{stamp}.csv", mime="text/csv")
+    
+    with exp_col2:
+        # Téléchargement XLSX Classeur
+        xls_bytes = to_excel_bytes_multi(all_sheets_export)
+        st.download_button("⬇️ Télécharger XLSX — Classeur", data=xls_bytes, file_name=f"Visa_Clients_{stamp}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
+    with exp_col3:
+        if save_mode == "Save to local path (serveur/PC)":
+            if save_path:
+                try:
+                    xls_bytes = to_excel_bytes_multi(all_sheets_export)
+                    with open(save_path, "wb") as f:
+                        f.write(xls_bytes)
+                    st.success(f"Fichier écrit: {save_path}")
+                except Exception as e:
+                    st.error(f"Erreur écriture locale: {e}")
+            else:
+                st.warning("Renseignez un chemin local dans la sidebar.")
+        elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
+            st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
