@@ -1,4 +1,4 @@
-# app.py — Version finale avec routage par vues (Corrigé 25)
+# app.py — Version finale avec routage par vues et filtres avancés (Corrigé 26)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -39,7 +39,6 @@ except Exception:
 def initialize_session_state(all_sheets):
     """Charge les DataFrames initiaux et les stocke dans st.session_state."""
     
-    # ... (INITIALISATION CLIENTS/VISA INCHANGÉE) ...
     # ------------------- DONNÉES CLIENTS -------------------
     clients_df_loaded = all_sheets.get("Clients")
     
@@ -100,7 +99,6 @@ def initialize_session_state(all_sheets):
     # Initialisation de l'index pour le formulaire (utiliser un index propre)
     if not st.session_state.visa_df.index.name:
         st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
-    # ... (FIN INITIALISATION CLIENTS/VISA) ...
 
 
 def get_date_for_input(col_name, row):
@@ -140,7 +138,7 @@ if "clients_df" not in st.session_state:
         st.stop()
     st.rerun()
 
-# --- NOUVEAU: GESTION DE LA VUE PAR ÉTAT ---
+# --- GESTION DE LA VUE PAR ÉTAT ---
 if "current_view" not in st.session_state:
      st.session_state.current_view = "clients_list"
 
@@ -173,7 +171,6 @@ if page == "Clients":
         empty_row = pd.Series("", index=df.columns)
         empty_row["Paiements"] = [] 
         
-        # Ligne 162 (ajout)
         render_client_form(df, empty_row, action="add")
         st.markdown("---")
         st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
@@ -201,7 +198,6 @@ if page == "Clients":
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # Ligne 252 (mise à jour)
             render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
             st.markdown("---")
             st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
@@ -231,12 +227,76 @@ if page == "Clients":
         st.button("➕ Ajouter un nouveau dossier", on_click=lambda: set_view("clients_add"))
         st.markdown("---")
 
-        # Filtrage
+        # FILTRES MIS À JOUR
         with st.expander("Filtrer / Rechercher"):
             q = st.text_input("Recherche (nom / dossier / email)")
-            status_filter = st.selectbox("Filtrer par statut", ["Tous", "Envoyé", "Approuvé", "Refusé", "Annulé", "RFE"])
+            
+            # --- NOUVEAUX FILTRES ---
+            col_date, col_visa = st.columns(2)
+            
+            # 1. Année/Mois (basé sur la DateCreation)
+            # Extrait les années et mois uniques pour les options
+            df_temp = df.copy() # Travailler sur une copie pour les colonnes temporaires
+            df_temp['Year'] = df_temp['DateCreation'].dt.year.fillna(0).astype(int)
+            df_temp['Month'] = df_temp['DateCreation'].dt.month.fillna(0).astype(int)
+            
+            years = sorted(df_temp['Year'].unique().tolist(), reverse=True)
+            months = {1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril", 5: "Mai", 6: "Juin",
+                      7: "Juillet", 8: "Août", 9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre"}
+            
+            with col_date:
+                selected_year = st.selectbox("Filtrer par Année de création", ["Toutes"] + [y for y in years if y > 0])
+                selected_month = st.selectbox("Filtrer par Mois de création", ["Tous"] + list(months.values()))
+            
+            # 2. Type de Visa
+            with col_visa:
+                visa_types = sorted(df_temp['TypeVisa'].dropna().unique().tolist())
+                selected_visa = st.multiselect("Filtrer par Type de Visa", visa_types)
+                
+            # 3. Statut (inchangé)
+            status_filter = st.selectbox("Filtrer par Statut", ["Tous", "Envoyé", "Approuvé", "Refusé", "Annulé", "RFE"])
 
-        filtered = df.copy()
+            st.markdown("---")
+            st.subheader("Filtres financiers (€)")
+            
+            # 4. Honoraires / Payé / Dû
+            min_h = int(df['Honoraires'].min()) if not df['Honoraires'].empty and df['Honoraires'].min() is not np.nan else 0
+            max_h = int(df['Honoraires'].max()) if not df['Honoraires'].empty and df['Honoraires'].max() is not np.nan else 0
+            min_p = int(df['TotalAcomptes'].min()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].min() is not np.nan else 0
+            max_p = int(df['TotalAcomptes'].max()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].max() is not np.nan else 0
+            min_d = int(df['SoldeCalc'].min()) if not df['SoldeCalc'].empty and df['SoldeCalc'].min() is not np.nan else 0
+            max_d = int(df['SoldeCalc'].max()) if not df['SoldeCalc'].empty and df['SoldeCalc'].max() is not np.nan else 0
+
+            # Ajuster les min/max pour les sliders si la plage est nulle ou non définie
+            min_h = 0 if min_h == max_h and max_h > 0 else min_h
+            min_p = 0 if min_p == max_p and max_p > 0 else min_p
+            min_d = 0 if min_d == max_d and max_d > 0 else min_d
+            
+            h_range_default = (min_h, max_h)
+            p_range_default = (min_p, max_p)
+            d_range_default = (min_d, max_d)
+            
+            # Pour éviter les erreurs si min > max 
+            if min_h > max_h: h_range_default = (0, 0)
+            if min_p > max_p: p_range_default = (0, 0)
+            if min_d > max_d: d_range_default = (0, 0)
+            
+            
+            col_h, col_p, col_d = st.columns(3)
+
+            with col_h:
+                honoraires_range = st.slider("Honoraires (Total)", min_h, max_h, h_range_default)
+            with col_p:
+                paye_range = st.slider("Montant Payé", min_p, max_p, p_range_default)
+            with col_d:
+                du_range = st.slider("Montant Dû (Solde)", min_d, max_d, d_range_default)
+            # --- FIN NOUVEAUX FILTRES ---
+
+
+        # --- LOGIQUE D'APPLICATION DES FILTRES ---
+        filtered = df_temp.copy() # Utiliser la copie temporaire avec Year/Month
+        
+        # 1. Filtre Texte (inchangé)
         if q:
             mask = pd.Series(False, index=filtered.index)
             for c in ["DossierID", "Nom", "Email", "TypeVisa"]:
@@ -244,12 +304,41 @@ if page == "Clients":
                     mask = mask | filtered[c].astype(str).str.contains(q, case=False, na=False)
             filtered = filtered[mask]
         
+        # 2. Filtre Année
+        if selected_year != "Toutes":
+            filtered = filtered[filtered['Year'] == int(selected_year)]
+            
+        # 3. Filtre Mois
+        if selected_month != "Tous":
+            month_num = [k for k, v in months.items() if v == selected_month][0]
+            filtered = filtered[filtered['Month'] == month_num]
+            
+        # 4. Filtre Type de Visa
+        if selected_visa:
+            filtered = filtered[filtered['TypeVisa'].isin(selected_visa)]
+
+        # 5. Filtre Statut (inchangé)
         if status_filter != "Tous":
             col_map = {"Envoyé": "Dossier envoyé", "Approuvé": "Dossier approuvé", "Refusé": "Dossier refusé", "Annulé": "DossierAnnule", "RFE": "RFE"}
             col_name = col_map.get(status_filter)
             if col_name:
                  filtered = filtered[filtered.get(col_name, False) == True]
+                 
+        # 6. Filtres Financiers
+        filtered = filtered[
+            (filtered['Honoraires'] >= honoraires_range[0]) & (filtered['Honoraires'] <= honoraires_range[1])
+        ]
+        filtered = filtered[
+            (filtered['TotalAcomptes'] >= paye_range[0]) & (filtered['TotalAcomptes'] <= paye_range[1])
+        ]
+        filtered = filtered[
+            (filtered['SoldeCalc'] >= du_range[0]) & (filtered['SoldeCalc'] <= du_range[1])
+        ]
+        
+        # Suppression des colonnes temporaires
+        filtered = filtered.drop(columns=['Year', 'Month'], errors='ignore')
 
+        # Affichage du DataFrame filtré
         st.dataframe(filtered.reset_index(drop=True).drop(columns=['Paiements', 'TotalAcomptes', 'SoldeCalc'], errors='ignore'), use_container_width=True)
         st.session_state.clients_filtered_df = filtered.copy() # Stocker la liste filtrée pour la vue d'édition
 
@@ -320,7 +409,6 @@ elif page == "Visa":
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
-            # Ligne 331 (mise à jour)
             render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
             st.markdown("---")
             st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
@@ -376,9 +464,6 @@ elif page == "Visa":
             st.info("Aucun type de visa à gérer.")
         
 # --- 4. DEFINITION DES FORMULAIRES (CRUD) ---
-
-# --- NOTE: PAS DE CHANGEMENT DANS render_client_form ET render_visa_form (v24) ---
-# --- (Elles conservent les clés hyper-uniques pour éviter les collisions internes) ---
 
 def render_client_form(df, sel_row, action, original_index=None):
     """Rendu du formulaire d'ajout/modification/suppression pour un client."""
