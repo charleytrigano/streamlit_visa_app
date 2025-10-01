@@ -1,4 +1,4 @@
-# app.py — Version finale avec hyper-unicité des clés de widget (Corrigé 22)
+# app.py — Version finale avec hyper-unicité des clés de widget (Corrigé 23)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -343,15 +343,16 @@ def render_client_form(df, sel_row, action, original_index=None):
         # Corps du formulaire CLIENTS
         cols1, cols2 = st.columns(2)
         with cols1:
-            # Pour l'ajout, l'ID doit être modifiable ; pour la modification, il est figé (car il sert d'identifiant)
-            dossier_id = st.text_input("DossierID", value=sel_row.get("DossierID", ""), disabled=not is_add)
-            nom = st.text_input("Nom", value=sel_row.get("Nom", ""))
-            typevisa = st.text_input("TypeVisa", value=sel_row.get("TypeVisa", ""))
-            email = st.text_input("Email", value=sel_row.get("Email", ""))
+            # 💥 Clés explicites pour chaque widget
+            dossier_id = st.text_input("DossierID", value=sel_row.get("DossierID", ""), disabled=not is_add, key=f"dossier_id_{unique_form_key}")
+            nom = st.text_input("Nom", value=sel_row.get("Nom", ""), key=f"nom_{unique_form_key}")
+            typevisa = st.text_input("TypeVisa", value=sel_row.get("TypeVisa", ""), key=f"typevisa_{unique_form_key}")
+            email = st.text_input("Email", value=sel_row.get("Email", ""), key=f"email_{unique_form_key}")
         with cols2:
-            telephone = st.text_input("Telephone", value=sel_row.get("Telephone", ""))
-            honoraires = st.number_input("Honoraires", value=float(sel_row.get("Honoraires", 0.0)), format="%.2f")
-            notes = st.text_area("Notes", value=sel_row.get("Notes", ""))
+            # 💥 Clés explicites pour chaque widget
+            telephone = st.text_input("Telephone", value=sel_row.get("Telephone", ""), key=f"telephone_{unique_form_key}")
+            honoraires = st.number_input("Honoraires", value=float(sel_row.get("Honoraires", 0.0)), format="%.2f", key=f"honoraires_{unique_form_key}")
+            notes = st.text_area("Notes", value=sel_row.get("Notes", ""), key=f"notes_{unique_form_key}")
         
         st.markdown("---")
         st.write("Statuts / dates")
@@ -365,14 +366,17 @@ def render_client_form(df, sel_row, action, original_index=None):
         rfe_val = bool(sel_row.get("RFE", False))
         
         with st_col1:
-            dossier_envoye = st.checkbox("Dossier envoyé", value=envoye)
-            dossier_refuse = st.checkbox("Dossier refusé", value=refuse)
+            # 💥 Clés explicites pour chaque widget
+            dossier_envoye = st.checkbox("Dossier envoyé", value=envoye, key=f"envoye_{unique_form_key}")
+            dossier_refuse = st.checkbox("Dossier refusé", value=refuse, key=f"refuse_{unique_form_key}")
         with st_col2:
-            dossier_approuve = st.checkbox("Dossier approuvé", value=approuve)
-            dossier_annule = st.checkbox("DossierAnnule (annulé)", value=annule)
+            # 💥 Clés explicites pour chaque widget
+            dossier_approuve = st.checkbox("Dossier approuvé", value=approuve, key=f"approuve_{unique_form_key}")
+            dossier_annule = st.checkbox("DossierAnnule (annulé)", value=annule, key=f"annule_{unique_form_key}")
         with st_col3:
-            rfe = st.checkbox("RFE (doit être combiné)", value=rfe_val)
-            date_envoi = st.date_input("DateEnvoi", value=get_date_for_input("DateEnvoi", sel_row))
+            # 💥 Clés explicites pour chaque widget
+            rfe = st.checkbox("RFE (doit être combiné)", value=rfe_val, key=f"rfe_{unique_form_key}")
+            date_envoi = st.date_input("DateEnvoi", value=get_date_for_input("DateEnvoi", sel_row), key=f"date_envoi_{unique_form_key}")
 
         st.markdown("---")
         
@@ -417,18 +421,36 @@ def render_client_form(df, sel_row, action, original_index=None):
 
         if submitted:
             # 3. RÉCUPÉRATION DES VALEURS DE WIDGETS : Utilisation des nouvelles clés uniques
+            # Les champs qui n'ont pas de valeur dans la session state sont récupérés directement par le retour du widget
+            
+            # Récupérer les valeurs des widgets (en utilisant la variable de retour si possible, ou session_state pour les clés dynamiques si hors scope)
+            final_dossier_id = st.session_state.get(f"dossier_id_{unique_form_key}", dossier_id)
+            final_nom = st.session_state.get(f"nom_{unique_form_key}", nom)
+            final_typevisa = st.session_state.get(f"typevisa_{unique_form_key}", typevisa)
+            final_email = st.session_state.get(f"email_{unique_form_key}", email)
+            final_telephone = st.session_state.get(f"telephone_{unique_form_key}", telephone)
+            final_honoraires = st.session_state.get(f"honoraires_{unique_form_key}", honoraires)
+            final_notes = st.session_state.get(f"notes_{unique_form_key}", notes)
+            
+            final_envoye = st.session_state.get(f"envoye_{unique_form_key}", dossier_envoye)
+            final_refuse = st.session_state.get(f"refuse_{unique_form_key}", dossier_refuse)
+            final_approuve = st.session_state.get(f"approuve_{unique_form_key}", dossier_approuve)
+            final_annule = st.session_state.get(f"annule_{unique_form_key}", dossier_annule)
+            final_rfe = st.session_state.get(f"rfe_{unique_form_key}", rfe)
+            final_date_envoi = st.session_state.get(f"date_envoi_{unique_form_key}", date_envoi)
+            
             final_pay_amount = st.session_state.get(pay_amount_key, 0.0)
             final_pay_date = st.session_state.get(pay_date_key, date.today())
             
-            if not dossier_id and is_add:
+            if not final_dossier_id and is_add:
                  st.error("Veuillez entrer un DossierID pour l'ajout.")
             else:
                 update_client_data(df, sel_row, original_index, {
-                    "DossierID": dossier_id, "Nom": nom, "TypeVisa": typevisa, "Email": email,
-                    "Telephone": telephone, "Honoraires": float(honoraires), "Notes": notes,
-                    "Dossier envoyé": dossier_envoye, "Dossier refusé": dossier_refuse,
-                    "Dossier approuvé": dossier_approuve, "DossierAnnule": dossier_annule,
-                    "RFE": rfe, "DateEnvoi": date_envoi, 
+                    "DossierID": final_dossier_id, "Nom": final_nom, "TypeVisa": final_typevisa, "Email": final_email,
+                    "Telephone": final_telephone, "Honoraires": float(final_honoraires), "Notes": final_notes,
+                    "Dossier envoyé": final_envoye, "Dossier refusé": final_refuse,
+                    "Dossier approuvé": final_approuve, "DossierAnnule": final_annule,
+                    "RFE": final_rfe, "DateEnvoi": final_date_envoi, 
                     "Paiements_New_Amount": float(final_pay_amount), 
                     "Paiements_New_Date": final_pay_date
                 }, action)
@@ -501,10 +523,10 @@ def render_visa_form(df, sel_row, action, original_index=None):
 
     with st.form(f"visa_form_{unique_form_key}"):
         
-        # Corps du formulaire VISAS
-        visa_code = st.text_input("Code Visa", value=sel_row.get("Visa", ""), disabled=not is_add)
-        category = st.text_input("Catégorie", value=sel_row.get("Categories", ""))
-        definition = st.text_area("Définition", value=sel_row.get("Definition", ""))
+        # Corps du formulaire VISAS - 💥 Clés explicites
+        visa_code = st.text_input("Code Visa", value=sel_row.get("Visa", ""), disabled=not is_add, key=f"visa_code_{unique_form_key}")
+        category = st.text_input("Catégorie", value=sel_row.get("Categories", ""), key=f"category_{unique_form_key}")
+        definition = st.text_area("Définition", value=sel_row.get("Definition", ""), key=f"definition_{unique_form_key}")
 
         # Boutons d'action
         col_buttons = st.columns(3)
@@ -515,19 +537,25 @@ def render_visa_form(df, sel_row, action, original_index=None):
             delete_button = col_buttons[1].form_submit_button("❌ Supprimer le type")
 
         if submitted:
-            if not visa_code:
+            
+            # Récupération des valeurs via session_state après soumission
+            final_visa_code = st.session_state.get(f"visa_code_{unique_form_key}", visa_code)
+            final_category = st.session_state.get(f"category_{unique_form_key}", category)
+            final_definition = st.session_state.get(f"definition_{unique_form_key}", definition)
+            
+            if not final_visa_code:
                  st.error("Veuillez entrer un Code Visa.")
                  return
 
-            if action == "add" and visa_code in st.session_state.visa_df['Visa'].values:
-                 st.error(f"Le code Visa '{visa_code}' existe déjà. Veuillez modifier l'entrée existante.")
+            if action == "add" and final_visa_code in st.session_state.visa_df['Visa'].values:
+                 st.error(f"Le code Visa '{final_visa_code}' existe déjà. Veuillez modifier l'entrée existante.")
                  return
 
             # Préparation des données
             updated = sel_row.copy()
-            updated["Visa"] = visa_code
-            updated["Categories"] = category
-            updated["Definition"] = definition
+            updated["Visa"] = final_visa_code
+            updated["Categories"] = final_category
+            updated["Definition"] = final_definition
             
             # Enregistrement
             if action == "update":
