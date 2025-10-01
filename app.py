@@ -1,11 +1,11 @@
-# app.py — version finale et complète
+# app.py — Version finale et complète
 import json
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
-import numpy as np # Ajout pour le to_datetime de pandas/numpy dans la gestion des dates
+import numpy as np 
 
-# Importer les utilitaires depuis le nouveau fichier
+# Importer les utilitaires depuis le nouveau fichier utils.py
 from utils import (
     load_all_sheets,
     to_excel_bytes_multi,
@@ -34,12 +34,12 @@ try:
 except Exception:
     pass
 
-# --- DÉBUT DE LA SECTION SIDEBAR (où data_path est défini) ---
+# --- DÉBUT DE LA SECTION SIDEBAR ---
 # Sidebar / source / save options
 with st.sidebar:
     st.header("Fichier source & sauvegarde")
     up = st.file_uploader("Fichier .xlsx", type=["xlsx"], help="Classeur contenant 'Visa' et 'Clients'.")
-    data_path = st.text_input("Ou chemin local vers le .xlsx (optionnel)") # <-- DÉFINITION DE data_path
+    data_path = st.text_input("Ou chemin local vers le .xlsx (optionnel)") 
     st.markdown("---")
     st.subheader("Sauvegarde")
     save_mode = st.selectbox("Mode de sauvegarde", ["Download (toujours disponible)", "Save to local path (serveur/PC)", "Google Drive (secrets req.)", "OneDrive (secrets req.)"])
@@ -68,6 +68,17 @@ st.success(f"Onglets trouvés: {', '.join(sheet_names)}")
 visa_df = all_sheets.get("Visa")
 clients_df_loaded = all_sheets.get("Clients")
 
+# 🚨 Dépannage pour l'onglet Clients (recherche robuste)
+if clients_df_loaded is None:
+    # Recherche d'une clé contenant 'client' (ex: 'clients', 'My Clients', 'CLIENTS')
+    clients_key = next((k for k in all_sheets.keys() if "client" in str(k).lower()), None)
+    
+    if clients_key:
+        clients_df_loaded = all_sheets.get(clients_key)
+        if clients_df_loaded is not None:
+             st.info(f"Onglet 'Clients' non trouvé. Utilisation de l'onglet '{clients_key}' pour les données clients.")
+
+
 # Normalize and ensure base columns
 base_cols = [
     "DossierID", "DateCreation", "Nom", "TypeVisa", "Telephone", "Email",
@@ -76,7 +87,9 @@ base_cols = [
     "DateAnnulation", "DossierAnnule", "Notes", "Paiements" 
 ]
 
-if clients_df_loaded is None:
+if clients_df_loaded is None or clients_df_loaded.empty:
+    if clients_df_loaded is None:
+        st.warning("Onglet Clients introuvable ou illisible. Création d'un DataFrame Clients vide.")
     clients_df_loaded = pd.DataFrame(columns=base_cols)
 else:
     # --- ÉTAPE CRUCIALE : HARMONISATION DES DONNÉES ---
@@ -269,10 +282,13 @@ if page == "Clients":
                          update_row_idx = idxs[0] if idxs else None
 
                     if update_row_idx is not None:
-                         st.session_state.clients_df.loc[update_row_idx] = updated
+                         # Attention: ici la colonne Paiements doit être de type object
+                         st.session_state.clients_df.loc[update_row_idx, updated.index] = updated.astype(object)
                          st.success("Modifications sauvegardées en session.")
                     else:
-                        st.session_state.clients_df = pd.concat([st.session_state.clients_df, pd.DataFrame([updated])], ignore_index=True)
+                        # Nouvelle ligne, utiliser concat pour s'assurer que les dtypes sont respectés
+                        new_row_df = pd.DataFrame([updated])
+                        st.session_state.clients_df = pd.concat([st.session_state.clients_df, new_row_df], ignore_index=True)
                         st.success("Nouveau dossier ajouté en session.")
 
                     st.session_state.clients_df = compute_finances(st.session_state.clients_df)
