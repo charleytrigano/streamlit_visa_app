@@ -1,4 +1,4 @@
-# app.py — Version finale avec synchronisation forcée du number_input (Corrigé 17)
+# app.py — Version finale avec contrôle d'index explicite avant ILOC (Corrigé 18)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -158,7 +158,6 @@ if page == "Clients":
         empty_row = pd.Series("", index=df.columns)
         empty_row["Paiements"] = [] 
         
-        # Ligne 161
         render_client_form(df, empty_row, action="add")
 
     elif crud_mode == "Lister/Modifier/Supprimer":
@@ -210,22 +209,22 @@ if page == "Clients":
             
             current_index = st.session_state.client_sel_idx
             
-            # Si l'index stocké est invalide, FORCER LE REDÉMARRAGE.
+            # Fix index if out of bounds. This is the primary protection.
             if current_index > max_idx or current_index < 0:
                 st.session_state.client_sel_idx = min(max_idx, max(0, current_index)) 
-                st.warning("Index réinitialisé après modification/suppression.")
+                st.warning("Index Client réinitialisé après modification/suppression.")
                 st.rerun() 
             
             final_safe_index = st.session_state.client_sel_idx
 
-            # 2. L'utilisateur choisit l'index affiché
-            # Clé dynamique pour forcer la réinitialisation du number_input quand la liste change
+            # 2. L'utilisateur choisit l'index affiché (Clé Statique)
+            # Nous revenons à une clé statique pour éviter les problèmes de recréation de widget
             sel_idx_float = st.number_input(
                 "Ouvrir dossier (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
                 value=final_safe_index, 
-                key=f"client_idx_input_{max_idx}" # Clé dynamique
+                key="client_idx_input_static" 
             )
             
             sel_idx = int(sel_idx_float) 
@@ -235,13 +234,20 @@ if page == "Clients":
                 st.session_state.client_sel_idx = sel_idx
                 st.rerun() 
             
+            # --- VÉRIFICATION CRITIQUE AVANT ACCÈS (Défense contre l'erreur 245) ---
+            if st.session_state.client_sel_idx < 0 or st.session_state.client_sel_idx > max_idx:
+                 st.session_state.client_sel_idx = 0
+                 st.error("Désynchronisation critique d'index, redémarrage.")
+                 st.rerun()
+                 st.stop()
+                 
             # Accès aux données garanti
             sel_row_filtered = filtered.iloc[st.session_state.client_sel_idx] 
             original_session_index = sel_row_filtered.name 
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # Ligne 247
+            # Ligne de l'appel (ligne 245 environ)
             render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
             
         else:
@@ -282,13 +288,13 @@ elif page == "Visa":
             # 2. L'index est garanti d'être valide ici.
             final_safe_index = st.session_state.visa_sel_idx
             
-            # Clé dynamique pour forcer la réinitialisation du number_input quand la liste change
+            # Clé statique pour éviter les problèmes de recréation de widget
             sel_idx_float = st.number_input(
                 "Ouvrir visa (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
                 value=final_safe_index,
-                key=f"visa_idx_input_{max_idx}" # Clé dynamique
+                key="visa_idx_input_static" 
             )
             
             sel_idx = int(sel_idx_float)
@@ -298,15 +304,19 @@ elif page == "Visa":
                 st.session_state.visa_sel_idx = sel_idx
                 st.rerun()
 
-            # 4. Accès sécurisé et appel du formulaire
-            # final_safe_index est déjà st.session_state.visa_sel_idx
-            
+            # --- VÉRIFICATION CRITIQUE AVANT ACCÈS (Défense contre l'erreur 310) ---
+            if st.session_state.visa_sel_idx < 0 or st.session_state.visa_sel_idx > max_idx:
+                 st.session_state.visa_sel_idx = 0
+                 st.error("Désynchronisation critique d'index, redémarrage.")
+                 st.rerun()
+                 st.stop()
+                 
             # Accès aux données garanti
             sel_row = df.iloc[final_safe_index]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
-            # Ligne 313
+            # Ligne de l'appel (ligne 310 environ)
             render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
             
 
@@ -422,7 +432,7 @@ def update_client_data(df, sel_row, original_index, form_data, action):
              st.session_state.client_sel_idx = 0 
         st.success("Dossier client supprimé.")
         st.rerun()
-        return # Plus de st.stop()
+        return 
 
     # Préparation des données mises à jour
     updated = sel_row.copy()
@@ -522,7 +532,7 @@ def render_visa_form(df, sel_row, action, original_index=None):
                  st.session_state.visa_sel_idx = 0 
             st.success("Type de visa supprimé.")
             st.rerun()
-            return # Plus de st.stop()
+            return 
 
 # --- 5. LOGIQUE DE SAUVEGARDE GLOBALE ---
 
