@@ -1,4 +1,4 @@
-# app.py — Version finale avec contrôle d'index précoce et st.rerun() sur les deux pages (Corrigé 10)
+# app.py — Version finale avec gestion d'erreur critique sur les deux pages (Corrigé 11)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -209,32 +209,42 @@ if page == "Clients":
             
             current_value = st.session_state.client_sel_idx
             
-            # 2. **BLOC DE SÉCURITÉ CRITIQUE : FORCE RERUN SI INDEX INVALIDE**
-            if current_value > max_idx or current_value < 0:
-                st.session_state.client_sel_idx = 0
-                st.rerun() # <-- LA CLÉ : Force le script à redémarrer avec une valeur sûre (0)
+            # 2. Protection avant le widget
+            current_value = min(max_idx, max(0, current_value))
+            if current_value != st.session_state.client_sel_idx:
+                st.session_state.client_sel_idx = current_value
+                st.rerun() # Correction précoce si on est hors limites après un filtre
 
-            # 3. L'utilisateur choisit l'index affiché (la valeur est garantie valide par le bloc précédent)
+            # 3. L'utilisateur choisit l'index affiché (la valeur est garantie valide)
             sel_idx_float = st.number_input(
                 "Ouvrir dossier (index affiché)", 
                 min_value=0, 
                 max_value=max_idx, 
-                value=current_value, # Utilise la valeur sécurisée (0 ou la dernière valide)
+                value=current_value, 
                 key="client_idx_input"
             )
             
             sel_idx = int(sel_idx_float) 
             
-            # 4. Mettre à jour la session state avec la valeur choisie/corrigée par le widget
+            # 4. Mettre à jour la session state avec l'index sélectionné (sera utilisé au prochain run)
             st.session_state.client_sel_idx = sel_idx
             
-            # 5. Accès sécurisé à la ligne (garanti valide par le rerun)
-            sel_row_filtered = filtered.iloc[sel_idx]
-            original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
+            # 5. Accès sécurisé à la ligne AVEC DÉFENSE ULTIME (try/except)
+            try:
+                # Accès aux données (source de l'IndexError)
+                sel_row_filtered = filtered.iloc[sel_idx]
+                original_session_index = sel_row_filtered.name 
 
-            st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+                st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+                
+                # Ligne de l'appel (ligne 237 dans votre trace)
+                render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
             
-            render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
+            except IndexError:
+                # Si l'erreur se produit quand même (race condition), on nettoie et on relance
+                st.session_state.client_sel_idx = 0
+                st.warning("Index de sélection client corrigé. Redémarrage pour stabilisation...")
+                st.rerun()
         else:
             st.info("Aucun dossier client ne correspond aux filtres.")
 
@@ -258,18 +268,17 @@ elif page == "Visa":
         if len(df) > 0:
             max_idx = len(df) - 1
             
-            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE (Clients-style) ---
+            # --- ZONE CRITIQUE DE SÉLECTION D'INDEX STABILISÉE ---
             if 'visa_sel_idx' not in st.session_state:
                 st.session_state.visa_sel_idx = 0
             
             current_value = st.session_state.visa_sel_idx
             
-            # 1. BLOC DE SÉCURITÉ CRITIQUE : FORCE RERUN SI INDEX INVALIDE
-            if current_value > max_idx or current_value < 0:
-                 st.session_state.visa_sel_idx = 0
-                 current_value = 0
-                 st.rerun() # Force le redémarrage si index invalide
-
+            # 1. Protection avant le widget
+            current_value = min(max_idx, max(0, current_value))
+            if current_value != st.session_state.visa_sel_idx:
+                st.session_state.visa_sel_idx = current_value
+                st.rerun() # Correction précoce si on est hors limites
                  
             # 2. L'utilisateur choisit l'index (valeur maintenant sécurisée)
             sel_idx_float = st.number_input(
@@ -283,14 +292,21 @@ elif page == "Visa":
             sel_idx = int(sel_idx_float)
             st.session_state.visa_sel_idx = sel_idx
             
-            # 3. Accès aux données (garanti valide)
-            sel_row = df.iloc[sel_idx]
+            # 3. Accès sécurisé à la ligne AVEC DÉFENSE ULTIME (try/except)
+            try:
+                # Accès aux données (source de l'IndexError)
+                sel_row = df.iloc[sel_idx]
             
-            st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
+                st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
+                
+                # Ligne de l'appel (ligne 292 dans votre trace)
+                render_visa_form(df, sel_row, action="update", original_index=sel_idx) 
             
-            # L'index du dataframe est l'index de la série sel_row (pour le DF non filtré)
-            render_visa_form(df, sel_row, action="update", original_index=sel_idx) # Ligne de l'erreur
-            
+            except IndexError:
+                # Si l'erreur se produit quand même (race condition), on nettoie et on relance
+                st.session_state.visa_sel_idx = 0 
+                st.warning("Index de sélection Visa corrigé. Redémarrage pour stabilisation...")
+                st.rerun()
 
         else:
             st.info("Aucun type de visa à gérer.")
