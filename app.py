@@ -1,4 +1,4 @@
-# app.py — Version finale avec clé de formulaire dynamique (Corrigé 21)
+# app.py — Version finale avec hyper-unicité des clés de widget (Corrigé 22)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -242,7 +242,7 @@ if page == "Clients":
 
                 st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
                 
-                # Ligne 251 (mise à jour)
+                # Ligne 246 (mise à jour)
                 render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
 
             except IndexError as e:
@@ -335,7 +335,7 @@ def render_client_form(df, sel_row, action, original_index=None):
     is_add = (action == "add")
     button_label = "Ajouter le dossier" if is_add else "Enregistrer les modifications"
     
-    # 💥 MODIFICATION CLÉ DU FORMULAIRE : Utiliser l'index d'origine pour l'UPDATE
+    # 1. CLÉ DU FORMULAIRE : Unique par action et index
     unique_form_key = f"{action}_{original_index}" if action == 'update' and original_index is not None else f"{action}_new"
 
     with st.form(f"client_form_{unique_form_key}"):
@@ -396,12 +396,15 @@ def render_client_form(df, sel_row, action, original_index=None):
         st.markdown("---")
         st.write("Ajouter un nouveau paiement")
         col_pay1, col_pay2 = st.columns(2)
+        
+        # 2. CLÉS DE WIDGETS DE PAIEMENT : Utilisation de la clé unique du formulaire
+        pay_date_key = f"pay_date_{unique_form_key}"
+        pay_amount_key = f"pay_amount_{unique_form_key}"
+        
         with col_pay1:
-            # Clés basées sur l'action et l'index unique
-            st.date_input("Date du paiement", value=date.today(), key=f"pay_date_{unique_form_key}")
+            new_pay_date = st.date_input("Date du paiement", value=date.today(), key=pay_date_key)
         with col_pay2:
-            # Clés basées sur l'action et l'index unique
-            st.number_input("Montant", value=0.0, min_value=0.0, format="%.2f", key=f"pay_amount_{unique_form_key}")
+            new_pay_amount = st.number_input("Montant", value=0.0, min_value=0.0, format="%.2f", key=pay_amount_key)
 
 
         # Boutons d'action
@@ -413,11 +416,9 @@ def render_client_form(df, sel_row, action, original_index=None):
             delete_button = col_buttons[1].form_submit_button("❌ Supprimer le dossier")
 
         if submitted:
-            # Code de soumission... (omitted for brevity)
-            # ...
-            # Code de soumission
-            new_pay_amount = st.session_state.get(f"pay_amount_{unique_form_key}", 0.0)
-            new_pay_date = st.session_state.get(f"pay_date_{unique_form_key}", date.today())
+            # 3. RÉCUPÉRATION DES VALEURS DE WIDGETS : Utilisation des nouvelles clés uniques
+            final_pay_amount = st.session_state.get(pay_amount_key, 0.0)
+            final_pay_date = st.session_state.get(pay_date_key, date.today())
             
             if not dossier_id and is_add:
                  st.error("Veuillez entrer un DossierID pour l'ajout.")
@@ -428,8 +429,8 @@ def render_client_form(df, sel_row, action, original_index=None):
                     "Dossier envoyé": dossier_envoye, "Dossier refusé": dossier_refuse,
                     "Dossier approuvé": dossier_approuve, "DossierAnnule": dossier_annule,
                     "RFE": rfe, "DateEnvoi": date_envoi, 
-                    "Paiements_New_Amount": float(new_pay_amount), 
-                    "Paiements_New_Date": new_pay_date
+                    "Paiements_New_Amount": float(final_pay_amount), 
+                    "Paiements_New_Date": final_pay_date
                 }, action)
         
         if not is_add and delete_button:
@@ -495,7 +496,7 @@ def render_visa_form(df, sel_row, action, original_index=None):
     is_add = (action == "add")
     button_label = "Ajouter le type" if is_add else "Enregistrer les modifications"
 
-    # 💥 MODIFICATION CLÉ DU FORMULAIRE : Utiliser l'index d'origine pour l'UPDATE
+    # 1. CLÉ DU FORMULAIRE : Unique par action et index
     unique_form_key = f"{action}_{original_index}" if action == 'update' and original_index is not None else f"{action}_new"
 
     with st.form(f"visa_form_{unique_form_key}"):
