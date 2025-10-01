@@ -1,4 +1,4 @@
-# app.py — Version finale avec bloc try/except sur l'accès aux données (Corrigé 20)
+# app.py — Version finale avec clé de formulaire dynamique (Corrigé 21)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -158,7 +158,7 @@ if page == "Clients":
         empty_row = pd.Series("", index=df.columns)
         empty_row["Paiements"] = [] 
         
-        # Ligne 161 (ajout)
+        # Ligne 162 (ajout)
         render_client_form(df, empty_row, action="add")
 
     elif crud_mode == "Lister/Modifier/Supprimer":
@@ -250,7 +250,7 @@ if page == "Clients":
                 st.session_state.client_sel_idx = 0
                 st.error("Erreur d'index détectée après modification. Redémarrage automatique.")
                 st.rerun()
-                st.stop() # Arrêter l'exécution pour le cycle actuel
+                st.stop()
             
         else:
             st.info("Aucun dossier client ne correspond aux filtres.")
@@ -313,7 +313,7 @@ elif page == "Visa":
                 
                 st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
                 
-                # Ligne 320 (mise à jour)
+                # Ligne 317 (mise à jour)
                 render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
             
             except IndexError as e:
@@ -321,21 +321,24 @@ elif page == "Visa":
                 st.session_state.visa_sel_idx = 0
                 st.error("Erreur d'index détectée après modification. Redémarrage automatique.")
                 st.rerun()
-                st.stop() # Arrêter l'exécution pour le cycle actuel
+                st.stop()
             
 
         else:
             st.info("Aucun type de visa à gérer.")
         
-# --- 4. DEFINITION DES FORMULAIRES (CRUD) (Aucun changement nécessaire ici) ---
+# --- 4. DEFINITION DES FORMULAIRES (CRUD) ---
 
 def render_client_form(df, sel_row, action, original_index=None):
     """Rendu du formulaire d'ajout/modification/suppression pour un client."""
-    # Le code de la fonction est inchangé par rapport à la version 19
+    
     is_add = (action == "add")
     button_label = "Ajouter le dossier" if is_add else "Enregistrer les modifications"
+    
+    # 💥 MODIFICATION CLÉ DU FORMULAIRE : Utiliser l'index d'origine pour l'UPDATE
+    unique_form_key = f"{action}_{original_index}" if action == 'update' and original_index is not None else f"{action}_new"
 
-    with st.form(f"client_form_{action}"):
+    with st.form(f"client_form_{unique_form_key}"):
         
         # Corps du formulaire CLIENTS
         cols1, cols2 = st.columns(2)
@@ -394,9 +397,11 @@ def render_client_form(df, sel_row, action, original_index=None):
         st.write("Ajouter un nouveau paiement")
         col_pay1, col_pay2 = st.columns(2)
         with col_pay1:
-            new_pay_date = st.date_input("Date du paiement", value=date.today(), key=f"pay_date_{action}")
+            # Clés basées sur l'action et l'index unique
+            st.date_input("Date du paiement", value=date.today(), key=f"pay_date_{unique_form_key}")
         with col_pay2:
-            new_pay_amount = st.number_input("Montant", value=0.0, min_value=0.0, format="%.2f", key=f"pay_amount_{action}")
+            # Clés basées sur l'action et l'index unique
+            st.number_input("Montant", value=0.0, min_value=0.0, format="%.2f", key=f"pay_amount_{unique_form_key}")
 
 
         # Boutons d'action
@@ -408,6 +413,12 @@ def render_client_form(df, sel_row, action, original_index=None):
             delete_button = col_buttons[1].form_submit_button("❌ Supprimer le dossier")
 
         if submitted:
+            # Code de soumission... (omitted for brevity)
+            # ...
+            # Code de soumission
+            new_pay_amount = st.session_state.get(f"pay_amount_{unique_form_key}", 0.0)
+            new_pay_date = st.session_state.get(f"pay_date_{unique_form_key}", date.today())
+            
             if not dossier_id and is_add:
                  st.error("Veuillez entrer un DossierID pour l'ajout.")
             else:
@@ -480,11 +491,14 @@ def update_client_data(df, sel_row, original_index, form_data, action):
 
 def render_visa_form(df, sel_row, action, original_index=None):
     """Rendu du formulaire d'ajout/modification/suppression pour un type de visa."""
-    # Le code de la fonction est inchangé par rapport à la version 19
+    
     is_add = (action == "add")
     button_label = "Ajouter le type" if is_add else "Enregistrer les modifications"
 
-    with st.form(f"visa_form_{action}"):
+    # 💥 MODIFICATION CLÉ DU FORMULAIRE : Utiliser l'index d'origine pour l'UPDATE
+    unique_form_key = f"{action}_{original_index}" if action == 'update' and original_index is not None else f"{action}_new"
+
+    with st.form(f"visa_form_{unique_form_key}"):
         
         # Corps du formulaire VISAS
         visa_code = st.text_input("Code Visa", value=sel_row.get("Visa", ""), disabled=not is_add)
