@@ -1,11 +1,11 @@
-# app.py — Version finale avec CRUD complet pour Clients et Visa
+# app.py — Version finale avec CRUD complet et indexation sécurisée
 import json
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 import numpy as np 
 
-# Importer les utilitaires (assurez-vous que utils.py est à jour avec les dernières corrections)
+# Importer les utilitaires (assurez-vous que utils.py est à jour)
 from utils import (
     load_all_sheets,
     to_excel_bytes_multi,
@@ -199,11 +199,29 @@ if page == "Clients":
         # Sélection et modification
         if len(filtered) > 0:
             max_idx = len(filtered) - 1
-            sel_idx = st.number_input("Ouvrir dossier (index affiché)", min_value=0, max_value=max_idx, value=0)
-            sel_row_filtered = filtered.reset_index(drop=True).loc[int(sel_idx)]
             
-            # Récupérer l'index original dans le DF de session
-            original_session_index = filtered.index[int(sel_idx)] 
+            # --- CORRECTION DE L'INDEXATION (Ligne 211) ---
+            # S'assurer que la sélection de l'index est valide sur les reruns après un filtre.
+            if 'client_sel_idx' not in st.session_state:
+                st.session_state.client_sel_idx = 0
+            
+            # On réinitialise la valeur de session si elle est hors de la nouvelle borne max
+            current_value = st.session_state.client_sel_idx
+            if current_value > max_idx:
+                 current_value = 0 # On choisit le premier élément (index 0)
+            
+            # L'utilisateur choisit l'index affiché dans le DF filtré (0 à max_idx)
+            sel_idx = st.number_input("Ouvrir dossier (index affiché)", min_value=0, max_value=max_idx, value=current_value)
+            
+            # Mise à jour de la valeur dans la session pour le prochain rerun
+            st.session_state.client_sel_idx = int(sel_idx)
+
+            # Utiliser l'index filtré (int(sel_idx)) pour trouver l'index original dans le DF global.
+            safe_sel_idx = int(sel_idx)
+            
+            original_session_index = filtered.index[safe_sel_idx] 
+            # Récupérer la ligne par son index d'origine dans le DF filtré
+            sel_row_filtered = filtered.loc[original_session_index] 
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
@@ -231,7 +249,18 @@ elif page == "Visa":
         
         if len(df) > 0:
             max_idx = len(df) - 1
-            sel_idx = st.number_input("Ouvrir visa (index affiché)", min_value=0, max_value=max_idx, value=0)
+            
+            # --- Sécurisation de l'indexation pour Visa ---
+            if 'visa_sel_idx' not in st.session_state:
+                st.session_state.visa_sel_idx = 0
+            
+            current_value = st.session_state.visa_sel_idx
+            if current_value > max_idx:
+                 current_value = 0
+                 
+            sel_idx = st.number_input("Ouvrir visa (index affiché)", min_value=0, max_value=max_idx, value=current_value)
+            st.session_state.visa_sel_idx = int(sel_idx)
+            
             sel_row = df.iloc[int(sel_idx)]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
@@ -489,4 +518,3 @@ if src and (page == "Clients" or page == "Visa"):
                 st.warning("Renseignez un chemin local dans la sidebar.")
         elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
             st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
-
