@@ -1,4 +1,4 @@
-# app.py — Version finale avec hyper-unicité des clés de widget (Corrigé 23)
+# app.py — Version finale avec isolation du formulaire par conteneur (Corrigé 24)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -197,6 +197,9 @@ if page == "Clients":
 
         st.dataframe(filtered.reset_index(drop=True), use_container_width=True)
 
+        # Conteneur pour le formulaire de modification (isolation maximale)
+        client_form_container = st.empty() 
+
         # Sélection et modification
         if len(filtered) > 0: 
             
@@ -214,6 +217,7 @@ if page == "Clients":
             if current_index > max_idx or current_index < 0:
                 st.session_state.client_sel_idx = min(max_idx, max(0, current_index)) 
                 st.warning("Index Client réinitialisé (valeur hors limites).")
+                client_form_container.empty() # Détruire l'ancienne UI avant rerun
                 st.rerun() 
             
             final_safe_index = st.session_state.client_sel_idx
@@ -232,6 +236,7 @@ if page == "Clients":
             # 3. Mettre à jour la session state
             if sel_idx != final_safe_index:
                 st.session_state.client_sel_idx = sel_idx
+                client_form_container.empty() # Détruire l'ancienne UI avant rerun
                 st.rerun() 
             
             # --- DÉFENSE ULTIME CONTRE IndexError (try/except) ---
@@ -240,19 +245,22 @@ if page == "Clients":
                 sel_row_filtered = filtered.iloc[st.session_state.client_sel_idx] 
                 original_session_index = sel_row_filtered.name 
 
-                st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
-                
-                # Ligne 246 (mise à jour)
-                render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
+                with client_form_container.container(): # Isoler le rendu du formulaire
+                    st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+                    
+                    # Ligne 246 (mise à jour)
+                    render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
 
             except IndexError as e:
                 # Si l'index est désynchronisé (après une suppression rapide), on réinitialise et on relance
+                client_form_container.empty() # Détruire l'ancienne UI avant rerun
                 st.session_state.client_sel_idx = 0
                 st.error("Erreur d'index détectée après modification. Redémarrage automatique.")
                 st.rerun()
                 st.stop()
             
         else:
+            client_form_container.empty() # Si pas de résultats, s'assurer que le conteneur est vide
             st.info("Aucun dossier client ne correspond aux filtres.")
 
 
@@ -272,6 +280,9 @@ elif page == "Visa":
         
         st.dataframe(df, use_container_width=True)
         
+        # Conteneur pour le formulaire de modification (isolation maximale)
+        visa_form_container = st.empty() 
+
         if len(df) > 0: 
             max_idx = len(df) - 1
             
@@ -285,6 +296,7 @@ elif page == "Visa":
             if current_index > max_idx or current_index < 0:
                  st.session_state.visa_sel_idx = min(max_idx, max(0, current_index))
                  st.warning("Index Visa réinitialisé (valeur hors limites).")
+                 visa_form_container.empty() # Détruire l'ancienne UI avant rerun
                  st.rerun()
                  
             # 2. L'index est garanti d'être valide ici.
@@ -304,6 +316,7 @@ elif page == "Visa":
             # 3. Mettre à jour la session state (si l'utilisateur a changé la valeur)
             if sel_idx != final_safe_index:
                 st.session_state.visa_sel_idx = sel_idx
+                visa_form_container.empty() # Détruire l'ancienne UI avant rerun
                 st.rerun()
 
             # --- DÉFENSE ULTIME CONTRE IndexError (try/except) ---
@@ -311,13 +324,15 @@ elif page == "Visa":
                 # Accès aux données garanti
                 sel_row = df.iloc[final_safe_index]
                 
-                st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
-                
-                # Ligne 317 (mise à jour)
-                render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
+                with visa_form_container.container(): # Isoler le rendu du formulaire
+                    st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
+                    
+                    # Ligne 317 (mise à jour)
+                    render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
             
             except IndexError as e:
                 # Si l'index est désynchronisé (après une suppression rapide), on réinitialise et on relance
+                visa_form_container.empty() # Détruire l'ancienne UI avant rerun
                 st.session_state.visa_sel_idx = 0
                 st.error("Erreur d'index détectée après modification. Redémarrage automatique.")
                 st.rerun()
@@ -325,6 +340,7 @@ elif page == "Visa":
             
 
         else:
+            visa_form_container.empty() # Si pas de résultats, s'assurer que le conteneur est vide
             st.info("Aucun type de visa à gérer.")
         
 # --- 4. DEFINITION DES FORMULAIRES (CRUD) ---
@@ -420,28 +436,30 @@ def render_client_form(df, sel_row, action, original_index=None):
             delete_button = col_buttons[1].form_submit_button("❌ Supprimer le dossier")
 
         if submitted:
-            # 3. RÉCUPÉRATION DES VALEURS DE WIDGETS : Utilisation des nouvelles clés uniques
-            # Les champs qui n'ont pas de valeur dans la session state sont récupérés directement par le retour du widget
+            # 3. RÉCUPÉRATION DES VALEURS DE WIDGETS : Récupération des valeurs soumises via la session state
             
-            # Récupérer les valeurs des widgets (en utilisant la variable de retour si possible, ou session_state pour les clés dynamiques si hors scope)
-            final_dossier_id = st.session_state.get(f"dossier_id_{unique_form_key}", dossier_id)
-            final_nom = st.session_state.get(f"nom_{unique_form_key}", nom)
-            final_typevisa = st.session_state.get(f"typevisa_{unique_form_key}", typevisa)
-            final_email = st.session_state.get(f"email_{unique_form_key}", email)
-            final_telephone = st.session_state.get(f"telephone_{unique_form_key}", telephone)
-            final_honoraires = st.session_state.get(f"honoraires_{unique_form_key}", honoraires)
-            final_notes = st.session_state.get(f"notes_{unique_form_key}", notes)
+            # Récupérer les valeurs des widgets (en utilisant la session_state, car les variables locales peuvent être obsolètes dans le contexte d'un rerun)
+            final_dossier_id = st.session_state.get(f"dossier_id_{unique_form_key}")
+            final_nom = st.session_state.get(f"nom_{unique_form_key}")
+            final_typevisa = st.session_state.get(f"typevisa_{unique_form_key}")
+            final_email = st.session_state.get(f"email_{unique_form_key}")
+            final_telephone = st.session_state.get(f"telephone_{unique_form_key}")
+            final_honoraires = st.session_state.get(f"honoraires_{unique_form_key}")
+            final_notes = st.session_state.get(f"notes_{unique_form_key}")
             
-            final_envoye = st.session_state.get(f"envoye_{unique_form_key}", dossier_envoye)
-            final_refuse = st.session_state.get(f"refuse_{unique_form_key}", dossier_refuse)
-            final_approuve = st.session_state.get(f"approuve_{unique_form_key}", dossier_approuve)
-            final_annule = st.session_state.get(f"annule_{unique_form_key}", dossier_annule)
-            final_rfe = st.session_state.get(f"rfe_{unique_form_key}", rfe)
-            final_date_envoi = st.session_state.get(f"date_envoi_{unique_form_key}", date_envoi)
+            final_envoye = st.session_state.get(f"envoye_{unique_form_key}")
+            final_refuse = st.session_state.get(f"refuse_{unique_form_key}")
+            final_approuve = st.session_state.get(f"approuve_{unique_form_key}")
+            final_annule = st.session_state.get(f"annule_{unique_form_key}")
+            final_rfe = st.session_state.get(f"rfe_{unique_form_key}")
+            final_date_envoi = st.session_state.get(f"date_envoi_{unique_form_key}")
             
             final_pay_amount = st.session_state.get(pay_amount_key, 0.0)
             final_pay_date = st.session_state.get(pay_date_key, date.today())
             
+            # Utiliser les valeurs de la ligne si la récupération par session state échoue (seulement pour les champs qui existaient)
+            final_dossier_id = final_dossier_id if final_dossier_id is not None else sel_row.get("DossierID", "")
+
             if not final_dossier_id and is_add:
                  st.error("Veuillez entrer un DossierID pour l'ajout.")
             else:
@@ -539,10 +557,12 @@ def render_visa_form(df, sel_row, action, original_index=None):
         if submitted:
             
             # Récupération des valeurs via session_state après soumission
-            final_visa_code = st.session_state.get(f"visa_code_{unique_form_key}", visa_code)
-            final_category = st.session_state.get(f"category_{unique_form_key}", category)
-            final_definition = st.session_state.get(f"definition_{unique_form_key}", definition)
+            final_visa_code = st.session_state.get(f"visa_code_{unique_form_key}")
+            final_category = st.session_state.get(f"category_{unique_form_key}")
+            final_definition = st.session_state.get(f"definition_{unique_form_key}")
             
+            final_visa_code = final_visa_code if final_visa_code is not None else sel_row.get("Visa", "")
+
             if not final_visa_code:
                  st.error("Veuillez entrer un Code Visa.")
                  return
@@ -619,6 +639,4 @@ if src and (page == "Clients" or page == "Visa"):
                 except Exception as e:
                     st.error(f"Erreur écriture locale: {e}")
             else:
-                st.warning("Renseignez un chemin local dans la sidebar.")
-        elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
-            st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
+                st.warning("Renseignez un chemin
