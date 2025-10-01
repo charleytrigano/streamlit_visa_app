@@ -1,4 +1,4 @@
-# app.py — Version finale avec CRUD complet, indexation ultra-sécurisée et correction de syntaxe (Corrigé 7)
+# app.py — Version finale avec gestion d'erreur ultime pour l'indexation (Corrigé 8)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -210,7 +210,7 @@ if page == "Clients":
             
             # 1. Cap le *stockage* si l'ancien index est trop grand pour le nouveau DataFrame
             if current_value > max_idx or current_value < 0:
-                 current_value = 0 # On réinitialise à 0 pour l'affichage du number_input
+                 current_value = 0 # Safe reset
                  st.session_state.client_sel_idx = 0
             
             # 2. L'utilisateur choisit l'index affiché dans le DF filtré (0 à max_idx)
@@ -224,22 +224,30 @@ if page == "Clients":
             
             sel_idx = int(sel_idx_float) 
             
-            # 3. PLAFONNEMENT ULTIME: Si la valeur lue du widget est temporairement hors limites (race condition), on la corrige.
-            if sel_idx > max_idx:
-                sel_idx = max_idx # Plafonner à l'index maximum possible
-            elif sel_idx < 0:
-                sel_idx = 0
+            # 3. PLAFONNEMENT ULTIME: Assurez-vous que l'index ne dépasse jamais les limites disponibles
+            sel_idx = min(sel_idx, max_idx)
+            sel_idx = max(sel_idx, 0)
             
             # 4. On met à jour l'état de session avec l'index sécurisé pour la prochaine exécution
             st.session_state.client_sel_idx = sel_idx 
             
-            # 5. Accès sécurisé à la ligne 
-            sel_row_filtered = filtered.iloc[sel_idx]
-            original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
+            # 5. Accès sécurisé à la ligne AVEC DÉFENSE ULTIME (try/except)
+            try:
+                sel_row_filtered = filtered.iloc[sel_idx]
+                original_session_index = sel_row_filtered.name # C'est l'index dans df = st.session_state.clients_df
 
-            st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+                st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+                
+                # Ligne d'appel qui posait problème (maintenant protégée)
+                render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
             
-            render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
+            except IndexError:
+                # La défense ultime contre le race condition de Streamlit
+                st.session_state.client_sel_idx = 0
+                st.info("Index de sélection hors limites détecté après filtrage. Réinitialisation...")
+                st.rerun()
+
+
         else:
             st.info("Aucun dossier client ne correspond aux filtres.")
 
@@ -283,14 +291,17 @@ elif page == "Visa":
             sel_idx = int(sel_idx_float)
             
             # PLAFONNEMENT
-            if sel_idx > max_idx:
-                sel_idx = max_idx
-            elif sel_idx < 0:
-                sel_idx = 0
+            sel_idx = min(sel_idx, max_idx)
+            sel_idx = max(sel_idx, 0)
 
             st.session_state.visa_sel_idx = sel_idx
             
-            sel_row = df.iloc[sel_idx]
+            try:
+                sel_row = df.iloc[sel_idx]
+            except IndexError:
+                st.session_state.visa_sel_idx = 0
+                st.info("Index de sélection Visa hors limites. Réinitialisation du formulaire...")
+                st.rerun()
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
@@ -374,7 +385,6 @@ def render_client_form(df, sel_row, action, original_index=None):
 
         # Boutons d'action
         col_buttons = st.columns(3)
-        # Ligne 472 corrigée : syntaxe complétée
         submitted = col_buttons[0].form_submit_button(button_label)
         
         delete_button = None
