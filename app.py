@@ -22,7 +22,7 @@ st.markdown("""
 # =========================
 # Helpers
 # =========================
-def _first_col(df: pd.DataFrame, candidates) -> str | None:
+def _first_col(df: pd.DataFrame, candidates):
     for c in candidates:
         if c in df.columns:
             return c
@@ -52,7 +52,10 @@ def _to_date(s: pd.Series) -> pd.Series:
     return d.dt.normalize().dt.date  # YYYY-MM-DD (no time)
 
 def _fmt_money_us(v: float) -> str:
-    return f"${v:,.2f}"
+    try:
+        return f"${float(v):,.2f}"
+    except Exception:
+        return "$0.00"
 
 def _parse_paiements(x):
     if isinstance(x, list):
@@ -202,7 +205,7 @@ def build_categories_to_visa_map(data_bytes: bytes, visa_sheet_name: str = "Visa
     except Exception:
         return {}
 
-def enrich_visa_from_categories(df: pd.DataFrame, cat2visa: dict) -> tuple[pd.DataFrame, int]:
+def enrich_visa_from_categories(df: pd.DataFrame, cat2visa: dict):
     """Si Visa est vide mais Categories correspond dans le mapping, remplit Visa."""
     if not cat2visa or "Categories" not in df.columns or "Visa" not in df.columns:
         return df, 0
@@ -272,15 +275,26 @@ else:
 if "excel_bytes_current" not in st.session_state or st.session_state.get("excel_source_id") != source_id:
     st.session_state["excel_bytes_current"] = data_bytes
     st.session_state["excel_source_id"] = source_id
-
 current_bytes = st.session_state["excel_bytes_current"]
+
+# --- Redirection de la feuille (post-écriture) AVANT de créer le selectbox ---
+if "pending_sheet_choice" in st.session_state:
+    pending = st.session_state.pop("pending_sheet_choice")
+    if pending in sheet_names:
+        st.session_state["sheet_choice"] = pending
 
 # choix onglet (vue Dashboard) — on conserve le dernier choix
 preferred_order = ["Données normalisées", "Clients", "Visa"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
-sheet_choice_default_index = sheet_names.index(st.session_state.get("sheet_choice", default_sheet)) \
-    if st.session_state.get("sheet_choice", default_sheet) in sheet_names else sheet_names.index(default_sheet)
-sheet_choice = st.sidebar.selectbox("Feuille Excel (vue Dashboard)", sheet_names, index=sheet_choice_default_index, key="sheet_choice")
+sheet_choice_default = st.session_state.get("sheet_choice", default_sheet)
+if sheet_choice_default not in sheet_names:
+    sheet_choice_default = default_sheet
+sheet_choice = st.sidebar.selectbox(
+    "Feuille Excel (vue Dashboard)",
+    sheet_names,
+    index=sheet_names.index(sheet_choice_default),
+    key="sheet_choice"
+)
 
 # ------- Feuille cible pour le CRUD Clients (indépendante de la vue) -------
 CLIENT_SHEET_DEFAULT = "Clients"
@@ -321,6 +335,7 @@ if is_ref and sheet_choice.lower() == "visa":
             if full_ref_df[c].dtype != "object":
                 full_ref_df[c] = full_ref_df[c].astype(str)
             full_ref_df[c] = full_ref_df[c].fillna("")
+
         edited_df = st.data_editor(
             full_ref_df, num_rows="dynamic", use_container_width=True, hide_index=True, key="visa_editor",
         )
@@ -583,8 +598,8 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                 try:
                     updated_bytes = write_updated_excel_bytes(current_bytes, client_target_sheet, original_df)
                     st.session_state["excel_bytes_current"] = updated_bytes
-                    # Basculer l'affichage sur la feuille cible Clients
-                    st.session_state["sheet_choice"] = client_target_sheet
+                    # Programmer la bascule de la vue sur la feuille cible
+                    st.session_state["pending_sheet_choice"] = client_target_sheet
                     if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
                         original_path = source_id.split("path:", 1)[1]
                         try:
@@ -662,7 +677,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                     try:
                         updated_bytes = write_updated_excel_bytes(current_bytes, client_target_sheet, original_df)
                         st.session_state["excel_bytes_current"] = updated_bytes
-                        st.session_state["sheet_choice"] = client_target_sheet
+                        st.session_state["pending_sheet_choice"] = client_target_sheet
                         if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
                             original_path = source_id.split("path:", 1)[1]
                             try:
@@ -691,7 +706,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                         original_df = original_df.drop(index=sel_idx).reset_index(drop=True)
                         updated_bytes = write_updated_excel_bytes(current_bytes, client_target_sheet, original_df)
                         st.session_state["excel_bytes_current"] = updated_bytes
-                        st.session_state["sheet_choice"] = client_target_sheet
+                        st.session_state["pending_sheet_choice"] = client_target_sheet
                         if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
                             original_path = source_id.split("path:", 1)[1]
                             try:
