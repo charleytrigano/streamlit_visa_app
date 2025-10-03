@@ -1,97 +1,68 @@
+import json
+from pathlib import Path
 import streamlit as st
 import pandas as pd
-import altair as alt
 
-from utils import compute_finances  # ← on exploite l’utilitaire
+st.set_page_config(page_title="📊 Visas — Simplifié", layout="wide")
+st.title("📊 Visas — Tableau simplifié")
 
-st.set_page_config(page_title="📊 Visas & Règlements", layout="wide")
-st.title("📊 Tableau de bord — Visas & Règlements")
+# ---------- Utilitaires internes (sans module externe) ----------
 
-# ---------- Helpers ----------
-def _coerce_datetime(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce")
-
-def _coerce_numeric(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce")
-
-def _first_existing(df: pd.DataFrame, candidates):
+def _first_col(df: pd.DataFrame, candidates) -> str | None:
     for c in candidates:
         if c in df.columns:
             return c
     return None
 
-def _ensure_money_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aligne les colonnes sur Montant/Payé/Reste en s'appuyant sur :
-    - Honoraires / Acomptes / Solde (ton Excel)
-    - Paiements (JSON) via compute_finances si présent
-    """
+def _to_num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+def _to_date(s: pd.Series) -> pd.Series:
+    return pd.to_datetime(s, errors="coerce")
+
+def _parse_paiements(x):
+    """Accepte liste ou chaîne JSON; renvoie liste de dicts ou nombres."""
+    if isinstance(x, list):
+        return x
+    if pd.isna(x):
+        return []
+    try:
+        return json.loads(x)
+    except Exception:
+        return []
+
+def _sum_payments(pay_list) -> float:
+    total = 0.0
+    for p in (pay_list or []):
+        try:
+            amt = float(p.get("amount", 0) or 0) if isinstance(p, dict) else float(p)
+        except Exception:
+            amt = 0.0
+        total += amt
+    return total
+
+def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Uniformise les colonnes clés: Date, Année, Mois, Visa, Statut, Montant, Payé, Reste."""
     df = df.copy()
 
-    # Si Paiements existe, calcule TotalAcomptes/ SoldeCalc
-    if "Paiements" in df.columns or "Honoraires" in df.columns:
-        df = compute_finances(df)  # crée TotalAcomptes & SoldeCalc à partir d'Honoraires/Paiements
-
-    # Montant
-    if "Montant" not in df.columns:
-        src_montant = _first_existing(df, ["Honoraires", "Total", "Amount"])
-        df["Montant"] = _coerce_numeric(df[src_montant]) if src_montant else 0.0
-    else:
-        df["Montant"] = _coerce_numeric(df["Montant"]).fillna(0.0)
-
-    # Payé
-    if "Payé" not in df.columns:
-        # priorité aux champs calculés, puis Acomptes
-        src_paye = _first_existing(df, ["TotalAcomptes", "Acomptes", "Paye", "Paid"])
-        df["Payé"] = _coerce_numeric(df[src_paye]) if src_paye else 0.0
-    else:
-        df["Payé"] = _coerce_numeric(df["Payé"]).fillna(0.0)
-
-    # Reste
-    if "Reste" not in df.columns:
-        # priorité Solde (si déjà fourni), sinon Montant - Payé, sinon SoldeCalc
-        src_reste = _first_existing(df, ["Solde", "SoldeCalc", "Reste"])
-        if src_reste:
-            df["Reste"] = _coerce_numeric(df[src_reste])
-        else:
-            df["Reste"] = (df["Montant"] - df["Payé"])
-    else:
-        df["Reste"] = _coerce_numeric(df["Reste"])
-
-    df["Montant"] = df["Montant"].fillna(0.0)
-    df["Payé"] = df["Payé"].fillna(0.0)
-    df["Reste"] = df["Reste"].fillna(df["Montant"] - df["Payé"])
-    return df
-
-def _ensure_date_fields(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    # Date
+    # --- Date / Année / Mois
     if "Date" in df.columns:
-        df["Date"] = _coerce_datetime(df["Date"])
+        df["Date"] = _to_date(df["Date"])
     else:
-        # si pas de Date, on laisse vide; le dashboard fonctionnera quand même
         df["Date"] = pd.NaT
 
-    # Année / Mois
     if "Année" not in df.columns:
         df["Année"] = df["Date"].dt.year
 
     if "Mois" not in df.columns:
-        # chaîne AAAA-MM
+        # format AAAA-MM pour un groupby simple
         df["Mois"] = df["Date"].dt.to_period("M").astype(str)
 
-    return df
+    # --- Type de visa
+    visa_col = _first_col(df, ["Visa", "Categories", "Catégorie", "TypeVisa"])
+    df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
 
-def _ensure_visa_and_status(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    # Type de visa
-    visa_col = _first_existing(df, ["Visa", "Categories", "Catégorie", "TypeVisa"])
-    if visa_col is None:
-        df["Visa"] = "Inconnu"
-    else:
-        df["Visa"] = df[visa_col].astype(str).fillna("Inconnu")
-
-    # Statut de règlement
+    # --- Statut (optionnel)
     if "__Statut règlement__" in df.columns and "Statut" not in df.columns:
         df = df.rename(columns={"__Statut règlement__": "Statut"})
     if "Statut" not in df.columns:
@@ -99,143 +70,122 @@ def _ensure_visa_and_status(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Statut"] = df["Statut"].astype(str).fillna("Inconnu")
 
+    # --- Montant / Payé / Reste
+    # Montant
+    if "Montant" in df.columns:
+        df["Montant"] = _to_num(df["Montant"])
+    else:
+        src_montant = _first_col(df, ["Honoraires", "Total", "Amount"])
+        df["Montant"] = _to_num(df[src_montant]) if src_montant else 0.0
+
+    # Paiements (JSON ou liste) -> TotalAcomptes
+    if "Paiements" in df.columns:
+        parsed = df["Paiements"].apply(_parse_paiements)
+        df["TotalAcomptes"] = parsed.apply(_sum_payments)
+
+    # Payé
+    if "Payé" in df.columns:
+        df["Payé"] = _to_num(df["Payé"])
+    else:
+        src_paye = _first_col(df, ["TotalAcomptes", "Acomptes", "Paye", "Paid"])
+        df["Payé"] = _to_num(df[src_paye]) if src_paye else 0.0
+
+    # Reste
+    if "Reste" in df.columns:
+        df["Reste"] = _to_num(df["Reste"])
+    else:
+        src_reste = _first_col(df, ["Solde", "SoldeCalc"])
+        if src_reste:
+            df["Reste"] = _to_num(df[src_reste])
+        else:
+            df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
+
     return df
 
 @st.cache_data
-def load_any_sheet(xlsx_obj) -> pd.DataFrame:
-    """
-    Charge intelligemment le fichier :
-    - si 'Données normalisées' existe, on la prend
-    - sinon on privilégie 'Clients', puis la 1ère feuille
-    - normalisation colonnes pour le dashboard
-    """
+def load_excel_smart(xlsx_obj) -> pd.DataFrame:
+    """Choisit automatiquement la feuille: 'Données normalisées' > 'Clients' > 1ère."""
     xls = pd.ExcelFile(xlsx_obj)
-    sheet_names = xls.sheet_names
-    target = None
-    for candidate in ["Données normalisées", "Clients"]:
-        if candidate in sheet_names:
-            target = candidate
-            break
-    if target is None:
-        target = sheet_names[0]
+    names = xls.sheet_names
+    target = "Données normalisées" if "Données normalisées" in names else (
+        "Clients" if "Clients" in names else names[0]
+    )
+    base = pd.read_excel(xls, sheet_name=target)
+    return normalize_dataframe(base)
 
-    df = pd.read_excel(xls, sheet_name=target)
+# ---------- Source de données (très simple) ----------
 
-    df = _ensure_money_columns(df)
-    df = _ensure_date_fields(df)
-    df = _ensure_visa_and_status(df)
-
-    return df
-
-# ---------- Données ----------
-DEFAULT_DATA_PATH = "/mnt/data/Visa_Clients_20251001-114844.xlsx"  # ton fichier actuel par défaut
+DEFAULT_CANDIDATES = [
+    "/mnt/data/Visa_Clients_20251001-114844.xlsx",  # fourni
+    "/mnt/data/visa_analytics_datecol.xlsx",        # fourni
+]
 
 st.sidebar.header("Données")
-mode = st.sidebar.radio("Source", ["Fichier par défaut", "Importer un autre fichier Excel"])
-if mode == "Fichier par défaut":
-    st.sidebar.info(f"Lecture : {DEFAULT_DATA_PATH}")
-    df = load_any_sheet(DEFAULT_DATA_PATH)
-else:
-    up = st.sidebar.file_uploader("Dépose ton Excel (Clients / Visa ou Données normalisées)", type=["xlsx", "xls"])
-    if up is not None:
-        df = load_any_sheet(up)
-    else:
-        st.stop()
+mode = st.sidebar.radio("Source", ["Fichier par défaut", "Importer un Excel"])
 
-# ---------- Filtres ----------
+if mode == "Fichier par défaut":
+    path = next((p for p in DEFAULT_CANDIDATES if Path(p).exists()), None)
+    if not path:
+        st.sidebar.error("Aucun fichier par défaut trouvé. Merci d'en importer un.")
+        st.stop()
+    st.sidebar.success(f"Fichier: {path}")
+    df = load_excel_smart(path)
+else:
+    up = st.sidebar.file_uploader("Dépose un fichier Excel (.xlsx, .xls)", type=["xlsx", "xls"])
+    if not up:
+        st.info("Importe un fichier pour commencer.")
+        st.stop()
+    df = load_excel_smart(up)
+
+# ---------- Filtres légers ----------
 with st.container():
-    c1, c2, c3, c4 = st.columns([1,1,1,1])
+    c1, c2, c3 = st.columns(3)
     years = sorted([int(y) for y in df["Année"].dropna().unique()]) if "Année" in df else []
-    types = sorted(df["Visa"].dropna().astype(str).unique())
+    visas = sorted(df["Visa"].dropna().astype(str).unique())
     statuses = sorted(df["Statut"].dropna().astype(str).unique())
 
     year_sel = c1.multiselect("Années", years, default=years or None)
-    type_sel = c2.multiselect("Types de visa", types, default=types or None)
-    status_sel = c3.multiselect("Statuts de règlement", statuses, default=statuses or None)
-    show_table = c4.toggle("Afficher le tableau détaillé", value=False)
+    visa_sel = c2.multiselect("Type de visa", visas, default=visas or None)
+    stat_sel = c3.multiselect("Statut", statuses, default=statuses or None)
 
 f = df.copy()
 if year_sel:
     f = f[f["Année"].isin(year_sel)]
-if type_sel:
-    f = f[f["Visa"].astype(str).isin(type_sel)]
-if status_sel:
-    f = f[f["Statut"].astype(str).isin(status_sel)]
+if visa_sel:
+    f = f[f["Visa"].astype(str).isin(visa_sel)]
+if stat_sel:
+    f = f[f["Statut"].astype(str).isin(stat_sel)]
 
-# ---------- KPIs ----------
+# ---------- KPIs minimales ----------
 k1, k2, k3, k4 = st.columns(4)
-total_visas = len(f.dropna(subset=["Date"])) if "Date" in f.columns else len(f)
-k1.metric("Visas (sélection)", f"{total_visas}")
-k2.metric("Montant total", f"{f['Montant'].sum(skipna=True):,.2f} €" if "Montant" in f else "—")
-k3.metric("Payé", f"{f['Payé'].sum(skipna=True):,.2f} €" if "Payé" in f else "—")
-k4.metric("Reste", f"{f['Reste'].sum(skipna=True):,.2f} €" if "Reste" in f else "—")
+k1.metric("Dossiers", f"{len(f)}")
+k2.metric("Montant total", f"{f['Montant'].sum():,.2f} €")
+k3.metric("Payé", f"{f['Payé'].sum():,.2f} €")
+k4.metric("Reste", f"{f['Reste'].sum():,.2f} €")
 
 st.divider()
 
-# ---------- Graphiques ----------
-colA, colB = st.columns(2)
-
-if "Mois" in f.columns and "Visa" in f.columns:
-    monthly_counts = (
+# ---------- Graphe simple : nombre par mois ----------
+st.subheader("📈 Nombre de dossiers par mois")
+if "Mois" in f.columns:
+    counts = (
         f.dropna(subset=["Mois"])
-         .groupby(["Mois","Visa"]).size().reset_index(name="Nombre de visas")
+         .groupby("Mois")
+         .size()
+         .rename("Dossiers")
+         .reset_index()
+         .sort_values("Mois")
     )
-    with colA:
-        st.subheader("Visas par mois (par type)")
-        if not monthly_counts.empty:
-            chart_month = alt.Chart(monthly_counts).mark_bar().encode(
-                x=alt.X("Mois:O", sort="ascending"),
-                y="Nombre de visas:Q",
-                color="Visa:N",
-                tooltip=["Mois","Visa","Nombre de visas"]
-            ).properties(height=360)
-            st.altair_chart(chart_month, use_container_width=True)
-        else:
-            st.info("Pas de données mensuelles à afficher.")
-
-if "Année" in f.columns and "Visa" in f.columns:
-    yearly_counts = (
-        f.dropna(subset=["Année"])
-         .groupby(["Année","Visa"]).size().reset_index(name="Nombre de visas")
-    )
-    with colB:
-        st.subheader("Visas par année (par type)")
-        if not yearly_counts.empty:
-            chart_year = alt.Chart(yearly_counts).mark_bar().encode(
-                x=alt.X("Année:O", sort="ascending"),
-                y="Nombre de visas:Q",
-                color="Visa:N",
-                tooltip=["Année","Visa","Nombre de visas"]
-            ).properties(height=360)
-            st.altair_chart(chart_year, use_container_width=True)
-        else:
-            st.info("Pas de données annuelles à afficher.")
-
-st.subheader("Suivi des règlements")
-if set(["Montant","Payé","Reste","Statut"]).issubset(f.columns):
-    pay = (
-        f.groupby(["Statut"])[["Montant","Payé","Reste"]]
-         .sum(min_count=1).reset_index()
-         .sort_values("Reste", ascending=False)
-    )
-    st.dataframe(pay, use_container_width=True)
-    if not pay.empty:
-        chart_reste = alt.Chart(pay).mark_bar().encode(
-            x=alt.X("Statut:N", sort="-y"),
-            y="Reste:Q",
-            tooltip=["Statut","Montant","Payé","Reste"]
-        ).properties(height=300)
-        st.altair_chart(chart_reste, use_container_width=True)
+    st.bar_chart(counts.set_index("Mois"))
 else:
-    st.info("Colonnes de montants manquantes pour le suivi des règlements.")
+    st.info("Aucune colonne 'Mois' exploitable.")
 
-# ---------- Tableau détaillé (optionnel) ----------
-if show_table:
-    st.subheader("Données (après filtres)")
-    order_cols = ["Date","Année","Mois"] if "Date" in f.columns else f.columns.tolist()
-    st.dataframe(
-        f.sort_values(by=order_cols),
-        use_container_width=True
-    )
+# ---------- Tableau détaillé (toggle) ----------
+st.subheader("📋 Données")
+st.dataframe(
+    f[["Date","Année","Mois","Visa","Statut","Montant","Payé","Reste"]]
+      .sort_values(by=["Date","Visa","Statut"], na_position="last"),
+    use_container_width=True
+)
 
-st.caption("💡 Astuce : le type de visa est détecté depuis 'Visa' ou 'Categories'. Les montants sont harmonisés à partir d'Honoraires/Acomptes/Solde ou directement via Paiements.")
+st.caption("Astuce : le programme détecte automatiquement les colonnes (Honoraires/Acomptes/Solde ou Montant/Payé/Reste) et lit aussi les Paiements JSON si présents.")
