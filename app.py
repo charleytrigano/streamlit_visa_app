@@ -103,39 +103,41 @@ def looks_like_reference(df: pd.DataFrame) -> bool:
     return has_ref and no_money
 
 def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_df: pd.DataFrame) -> bytes:
-    """Recharge toutes les feuilles depuis original_bytes, remplace sheet_to_replace par new_df, retourne les nouveaux octets Excel."""
+    """Recharge toutes les feuilles, remplace sheet_to_replace par new_df, renvoie les nouveaux octets Excel."""
     xls = pd.ExcelFile(io.BytesIO(original_bytes))
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         for name in xls.sheet_names:
             if name == sheet_to_replace:
-                new_df.to_excel(writer, sheet_name=name, index=False)
+                # cast en str pour éviter des types 'object' non éditables
+                dfw = new_df.copy()
+                for c in dfw.columns:
+                    if dfw[c].dtype == "object":
+                        dfw[c] = dfw[c].astype(str).fillna("")
+                dfw.to_excel(writer, sheet_name=name, index=False)
             else:
                 pd.read_excel(xls, sheet_name=name).to_excel(writer, sheet_name=name, index=False)
     out.seek(0)
     return out.read()
 
-
-
-# ---------------- Cache: on stocke des BYTES sérialisables ----------------
+# ---------------- Cache sérialisable ----------------
 @st.cache_data
 def load_excel_bytes(xlsx_input):
     """
-    Retourne (sheet_names, data_bytes) pour un chemin ou un fichier uploadé.
-    - Sérialisable par Streamlit (pas d'objets ExcelFile en cache)
+    Retourne (sheet_names, data_bytes, source_id) pour un chemin ou un fichier uploadé.
     """
     if hasattr(xlsx_input, "read"):  # UploadedFile
         data = xlsx_input.read()
+        src_id = f"upload:{getattr(xlsx_input, 'name', 'uploaded')}"
     else:  # chemin
         data = Path(xlsx_input).read_bytes()
+        src_id = f"path:{xlsx_input}"
     xls = pd.ExcelFile(io.BytesIO(data))
-    return xls.sheet_names, data  # liste (serialisable) + bytes (serialisable)
+    return xls.sheet_names, data, src_id
 
 def read_sheet_from_bytes(data_bytes: bytes, sheet_name: str, normalize: bool) -> pd.DataFrame:
-    """Recrée un ExcelFile à la demande, lit la feuille, normalise si nécessaire."""
     xls = pd.ExcelFile(io.BytesIO(data_bytes))
     df = pd.read_excel(xls, sheet_name=sheet_name)
-    # Si c'est une table de référence, on ne normalise pas
     if normalize and not looks_like_reference(df):
         df = normalize_dataframe(df)
     return df
@@ -155,35 +157,107 @@ if source_mode == "Fichier par défaut":
         st.sidebar.error("Aucun fichier par défaut trouvé. Importez un fichier.")
         st.stop()
     st.sidebar.success(f"Fichier: {path}")
-    sheet_names, data_bytes = load_excel_bytes(path)
+    sheet_names, data_bytes, source_id = load_excel_bytes(path)
 else:
     up = st.sidebar.file_uploader("Dépose un Excel (.xlsx, .xls)", type=["xlsx", "xls"])
     if not up:
         st.info("Importe un fichier pour commencer.")
         st.stop()
-    sheet_names, data_bytes = load_excel_bytes(up)
+    sheet_names, data_bytes, source_id = load_excel_bytes(up)
+
+# Initialise/actualise l'état courant des octets selon la source
+if "excel_bytes_current" not in st.session_state or st.session_state.get("excel_source_id") != source_id:
+    st.session_state["excel_bytes_current"] = data_bytes
+    st.session_state["excel_source_id"] = source_id
+
+current_bytes = st.session_state["excel_bytes_current"]
 
 # Choix explicite de la feuille (inclut 'Visa')
 preferred_order = ["Données normalisées", "Clients", "Visa"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
-sheet_choice = st.sidebar.selectbox("Feuille", sheet_names, index=sheet_names.index(default_sheet))
+sheet_choice = st.sidebar.selectbox("Feuille", sheet_names, index=sheet_names.index(default_sheet), key="sheet_choice")
 
-# Lecture de la feuille
-# On fait un petit échantillon pour décider si c'est une table de référence
-sample_df = read_sheet_from_bytes(data_bytes, sheet_choice, normalize=False).head(5)
+# Lecture de la feuille (échantillon pour la détection)
+sample_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).head(5)
 is_ref = looks_like_reference(sample_df)
 
-if is_ref:
-    st.info("ℹ️ Cette feuille ressemble à une **table de référence** (ex: Catégories ↔ Visa). "
-            "Elle s'affiche telle quelle. Pour analyser des dossiers, sélectionne l'onglet "
-            "**Clients** ou **Données normalisées**.")
-    full_ref_df = read_sheet_from_bytes(data_bytes, sheet_choice, normalize=False)
-    st.dataframe(full_ref_df, use_container_width=True)
+# ---------------- MODE RÉFÉRENCE — ÉDITION VISA ----------------
+if is_ref and sheet_choice.lower() == "visa":
+    st.subheader("📚 Table de référence — Visa")
+    st.caption("Ajoute / modifie / supprime directement ci-dessous. Les lignes et cellules sont éditables. "
+               "Utilise le bouton **+ Ajouter une ligne** en bas du tableau, ou le menu ⋮ pour supprimer.")
+
+    # charge la feuille complète depuis les OCTETS COURANTS
+    full_ref_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).copy()
+
+    # Colonnes par défaut
+    default_cols = ["Categories", "Visa", "Definition"]
+    for c in default_cols:
+        if c not in full_ref_df.columns:
+            full_ref_df[c] = ""
+
+    # Ordonne : d'abord les colonnes par défaut, puis les autres
+    ordered_cols = [c for c in default_cols if c in full_ref_df.columns] + [c for c in full_ref_df.columns if c not in default_cols]
+    full_ref_df = full_ref_df[ordered_cols]
+
+    # Forcer string pour rendre l'édition plus fluide
+    for c in full_ref_df.columns:
+        if full_ref_df[c].dtype != "object":
+            full_ref_df[c] = full_ref_df[c].astype(str)
+        full_ref_df[c] = full_ref_df[c].fillna("")
+
+    # ÉDITEUR : clé dédiée + lignes dynamiques
+    edited_df = st.data_editor(
+        full_ref_df,
+        num_rows="dynamic",       # permet d'ajouter/supprimer des lignes
+        use_container_width=True,
+        hide_index=True,
+        key="visa_editor",        # clé nécessaire pour bien gérer l'état d'édition
+    )
+
+    st.divider()
+    col_save, col_dl, col_reset = st.columns([1,1,1])
+
+    # Sauvegarde → met à jour les octets courants + (si possible) le fichier d'origine
+    if col_save.button("💾 Enregistrer (remplace la feuille 'Visa')", type="primary"):
+        try:
+            updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, edited_df)
+            st.session_state["excel_bytes_current"] = updated_bytes  # ← met à jour la SOURCE courante
+            # Si la source est un fichier par défaut sur disque, on tente d'écrire dessus
+            if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
+                original_path = source_id.split("path:", 1)[1]
+                try:
+                    Path(original_path).write_bytes(updated_bytes)
+                    st.success(f"Fichier mis à jour sur le disque : {original_path}")
+                except Exception as e:
+                    st.info(f"Impossible d’écrire sur le disque. Télécharge le fichier ci-dessous. Détail: {e}")
+            st.success("Modifications enregistrées.")
+            st.rerun()  # ← très important : on relit la version à jour
+        except Exception as e:
+            st.error(f"Erreur à l’enregistrement : {e}")
+
+    # Télécharger l’Excel mis à jour (depuis l'état courant)
+    col_dl.download_button(
+        "⬇️ Télécharger l’Excel mis à jour",
+        data=st.session_state["excel_bytes_current"],
+        file_name="visa_mis_a_jour.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    # Réinitialiser (revient aux octets de la lecture initiale de la session)
+    if col_reset.button("↩️ Réinitialiser (annuler les modifs non enregistrées)"):
+        st.session_state.pop("excel_bytes_current", None)  # on efface l'état courant
+        # recharge depuis la source initiale
+        st.session_state["excel_bytes_current"] = data_bytes
+        st.success("Réinitialisé.")
+        st.rerun()
+
     st.stop()
 
-df = read_sheet_from_bytes(data_bytes, sheet_choice, normalize=True)
+# ---------------- MODE DOSSIERS ----------------
+# si ce n'est pas une table de référence 'Visa', on normalise et on affiche KPIs + graph + table
+df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=True)
 
-# ---------------- Filtres ----------------
 with st.container():
     c1, c2, c3 = st.columns(3)
     years = sorted([int(y) for y in df["Année"].dropna().unique()]) if "Année" in df else []
@@ -202,7 +276,6 @@ if visa_sel:
 if stat_sel:
     f = f[f["Statut"].astype(str).isin(stat_sel)]
 
-# ---------------- KPIs ----------------
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Dossiers", f"{len(f)}")
 k2.metric("Montant total", f"{f['Montant'].sum():,.2f} €")
@@ -211,7 +284,6 @@ k4.metric("Reste", f"{f['Reste'].sum():,.2f} €")
 
 st.divider()
 
-# ---------------- Graphique ----------------
 st.subheader("📈 Nombre de dossiers par mois")
 if "Mois" in f.columns:
     counts = (
@@ -226,7 +298,6 @@ if "Mois" in f.columns:
 else:
     st.info("Aucune colonne 'Mois' exploitable.")
 
-# ---------------- Tableau ----------------
 st.subheader("📋 Données")
 cols_show = [c for c in ["Date","Année","Mois","Visa","Statut","Montant","Payé","Reste"] if c in f.columns]
 st.dataframe(
@@ -234,6 +305,10 @@ st.dataframe(
     use_container_width=True
 )
 
-st.caption("Astuce : la lecture est mise en cache sous forme **d’octets** (sérialisables). "
-           "Choisis l’onglet dans la sidebar. L’onglet 'Visa' (référentiel) s’affiche tel quel.")
+st.caption("Dans l’onglet **Visa**, tu peux ajouter/modifier/supprimer des lignes, puis **Enregistrer**. "
+           "Le fichier courant est mis à jour et tu peux le **Télécharger**.")
+
+
+
+
 
