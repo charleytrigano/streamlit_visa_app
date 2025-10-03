@@ -1,5 +1,5 @@
+streamlit
 pandas
 openpyxl
-matplotlib
-streamlit
-matplotlib==3.8.4
+altair
+
