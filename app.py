@@ -1,4 +1,4 @@
-# app.py — Version finale avec routage par vues et filtres avancés (Corrigé 26)
+# app.py — Version finale avec routage par vues et filtres avancés (Corrigé 27)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -259,24 +259,35 @@ if page == "Clients":
             st.markdown("---")
             st.subheader("Filtres financiers (€)")
             
-            # 4. Honoraires / Payé / Dû
+            # 4. Honoraires / Payé / Dû (LOGIQUE CORRIGÉE POUR st.slider)
+            
+            # Récupération des min/max sécurisée
             min_h = int(df['Honoraires'].min()) if not df['Honoraires'].empty and df['Honoraires'].min() is not np.nan else 0
             max_h = int(df['Honoraires'].max()) if not df['Honoraires'].empty and df['Honoraires'].max() is not np.nan else 0
             min_p = int(df['TotalAcomptes'].min()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].min() is not np.nan else 0
             max_p = int(df['TotalAcomptes'].max()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].max() is not np.nan else 0
             min_d = int(df['SoldeCalc'].min()) if not df['SoldeCalc'].empty and df['SoldeCalc'].min() is not np.nan else 0
             max_d = int(df['SoldeCalc'].max()) if not df['SoldeCalc'].empty and df['SoldeCalc'].max() is not np.nan else 0
-
-            # Ajuster les min/max pour les sliders si la plage est nulle ou non définie
-            min_h = 0 if min_h == max_h and max_h > 0 else min_h
-            min_p = 0 if min_p == max_p and max_p > 0 else min_p
-            min_d = 0 if min_d == max_d and max_d > 0 else min_d
             
+            # --- CORRECTION DU BUG st.slider ---
+            # Si min_value == max_value, Streamlit lève une exception. On force max_value > min_value.
+            if min_h == max_h:
+                max_h = 1 if max_h == 0 else (max_h + 1)
+                
+            if min_p == max_p:
+                max_p = 1 if max_p == 0 else (max_p + 1)
+
+            if min_d == max_d:
+                # CORRECTION DE L'ERREUR À LA LIGNE 292
+                max_d = 1 if max_d == 0 else (max_d + 1)
+            # -----------------------------------
+
+            # Calcul des valeurs par défaut pour les sliders
             h_range_default = (min_h, max_h)
             p_range_default = (min_p, max_p)
             d_range_default = (min_d, max_d)
             
-            # Pour éviter les erreurs si min > max 
+            # Sécurité pour les cas extrêmes (même si la correction au-dessus rend cela presque inutile)
             if min_h > max_h: h_range_default = (0, 0)
             if min_p > max_p: p_range_default = (0, 0)
             if min_d > max_d: d_range_default = (0, 0)
@@ -325,6 +336,7 @@ if page == "Clients":
                  filtered = filtered[filtered.get(col_name, False) == True]
                  
         # 6. Filtres Financiers
+        # Note: Les bornes utilisées ici sont celles corrigées (min_h, max_h...)
         filtered = filtered[
             (filtered['Honoraires'] >= honoraires_range[0]) & (filtered['Honoraires'] <= honoraires_range[1])
         ]
@@ -763,3 +775,4 @@ if src and (page == "Clients" or page == "Visa"):
                 st.warning("Renseignez un chemin local dans la sidebar.")
         elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
             st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
+
