@@ -102,6 +102,21 @@ def looks_like_reference(df: pd.DataFrame) -> bool:
     no_money = not ({"montant", "honoraires", "acomptes", "payé", "reste", "solde"} & cols)
     return has_ref and no_money
 
+def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_df: pd.DataFrame) -> bytes:
+    """Recharge toutes les feuilles depuis original_bytes, remplace sheet_to_replace par new_df, retourne les nouveaux octets Excel."""
+    xls = pd.ExcelFile(io.BytesIO(original_bytes))
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        for name in xls.sheet_names:
+            if name == sheet_to_replace:
+                new_df.to_excel(writer, sheet_name=name, index=False)
+            else:
+                pd.read_excel(xls, sheet_name=name).to_excel(writer, sheet_name=name, index=False)
+    out.seek(0)
+    return out.read()
+
+
+
 # ---------------- Cache: on stocke des BYTES sérialisables ----------------
 @st.cache_data
 def load_excel_bytes(xlsx_input):
@@ -221,3 +236,4 @@ st.dataframe(
 
 st.caption("Astuce : la lecture est mise en cache sous forme **d’octets** (sérialisables). "
            "Choisis l’onglet dans la sidebar. L’onglet 'Visa' (référentiel) s’affiche tel quel.")
+
