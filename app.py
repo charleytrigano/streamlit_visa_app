@@ -16,10 +16,26 @@ def _first_col(df: pd.DataFrame, candidates) -> str | None:
     return None
 
 def _to_num(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce").fillna(0.0)
+    # Nettoie "1 234,56 €" → 1234.56
+    cleaned = (
+        s.astype(str)
+         .str.replace("\u00a0", "", regex=False)   # espace insécable
+         .str.replace("\u202f", "", regex=False)   # fine space
+         .str.replace(" ", "", regex=False)
+         .str.replace("€", "", regex=False)
+         .str.replace(",", ".", regex=False)
+    )
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
 
 def _to_date(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce")
+    d = pd.to_datetime(s, errors="coerce")
+    # enlève les fuseaux si présents et supprime l'heure
+    try:
+        d = d.dt.tz_localize(None)
+    except Exception:
+        pass
+    # tronque à la date (00:00), puis renvoie type date
+    return d.dt.normalize().dt.date
 
 def _safe_str(x):
     return "" if pd.isna(x) else str(x).strip()
@@ -81,25 +97,23 @@ def looks_like_reference(df: pd.DataFrame) -> bool:
     return has_ref and no_money
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Uniformise Date/Année/Mois/Visa/Statut/Montant/Payé/Reste et génère ID_Client si manquant."""
+    """Uniformise Date/Visa/Statut/Montant/Payé/Reste, génère ID_Client, calcule Mois=MM (interne)."""
     df = df.copy()
 
-    # Date / Année / Mois
+    # --- Date (sans heure) ---
     if "Date" in df.columns:
         df["Date"] = _to_date(df["Date"])
     else:
         df["Date"] = pd.NaT
 
-    if "Année" not in df.columns:
-        df["Année"] = df["Date"].dt.year
-    if "Mois" not in df.columns:
-        df["Mois"] = df["Date"].dt.to_period("M").astype(str)
+    # --- Mois (MM) pour les regroupements internes (non affiché) ---
+    df["Mois"] = df["Date"].apply(lambda x: f"{x.month:02d}" if pd.notna(x) else pd.NA)
 
-    # Visa / Categories
+    # --- Visa / Categories
     visa_col = _first_col(df, ["Visa", "Categories", "Catégorie", "TypeVisa"])
     df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
 
-    # Statut
+    # --- Statut
     if "__Statut règlement__" in df.columns and "Statut" not in df.columns:
         df = df.rename(columns={"__Statut règlement__": "Statut"})
     if "Statut" not in df.columns:
@@ -107,44 +121,35 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Statut"] = df["Statut"].astype(str).fillna("Inconnu")
 
-    # Montant
+    # --- Montant
     if "Montant" in df.columns:
         df["Montant"] = _to_num(df["Montant"])
     else:
         src_montant = _first_col(df, ["Honoraires", "Total", "Amount"])
         df["Montant"] = _to_num(df[src_montant]) if src_montant else 0.0
 
-    # Paiements (JSON) -> TotalAcomptes
+    # --- Paiements (JSON) -> TotalAcomptes
     if "Paiements" in df.columns:
         parsed = df["Paiements"].apply(_parse_paiements)
         df["TotalAcomptes"] = parsed.apply(_sum_payments)
 
-    # Payé
+    # --- Payé
     if "Payé" in df.columns:
         df["Payé"] = _to_num(df["Payé"])
     else:
         src_paye = _first_col(df, ["TotalAcomptes", "Acomptes", "Paye", "Paid"])
         df["Payé"] = _to_num(df[src_paye]) if src_paye else 0.0
 
-    # Reste
-    if "Reste" in df.columns:
-        df["Reste"] = _to_num(df["Reste"])
-    else:
-        src_reste = _first_col(df, ["Solde", "SoldeCalc"])
-        if src_reste:
-            df["Reste"] = _to_num(df[src_reste])
-        else:
-            df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
+    # --- Reste (toujours calculé)
+    df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
 
-    # === ID client auto (Nom + Telephone + Date) ===
+    # --- ID client auto (Nom + Telephone + Date)
     if "ID_Client" not in df.columns:
         df["ID_Client"] = ""
-
     need_id = df["ID_Client"].astype(str).str.strip().eq("") | df["ID_Client"].isna()
     if need_id.any():
         generated = df.loc[need_id].apply(_make_client_id_from_row, axis=1)
         df.loc[need_id, "ID_Client"] = generated
-
     df["ID_Client"] = _dedupe_ids(df["ID_Client"].astype(str).str.strip())
 
     return df
@@ -168,10 +173,7 @@ def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_
 
 # ---- Référence: map Categories -> Visa
 def build_categories_to_visa_map(data_bytes: bytes, visa_sheet_name: str = "Visa") -> dict:
-    """
-    Construit un mapping {categories_normalisées: visa} depuis l’onglet 'Visa'.
-    Normalisation: lower().strip() sur Categories.
-    """
+    """Construit un mapping {categories_normalisées: visa} depuis l’onglet 'Visa'."""
     try:
         xls = pd.ExcelFile(io.BytesIO(data_bytes))
         if visa_sheet_name not in xls.sheet_names:
@@ -190,10 +192,7 @@ def build_categories_to_visa_map(data_bytes: bytes, visa_sheet_name: str = "Visa
         return {}
 
 def enrich_visa_from_categories(df: pd.DataFrame, cat2visa: dict) -> tuple[pd.DataFrame, int]:
-    """
-    Si Visa est vide mais Categories correspond dans le mapping, remplit Visa.
-    Retourne (df_enrichi, nb_modifs).
-    """
+    """Si Visa est vide mais Categories correspond dans le mapping, remplit Visa."""
     if not cat2visa or "Categories" not in df.columns or "Visa" not in df.columns:
         return df, 0
     df = df.copy()
@@ -214,9 +213,7 @@ def enrich_visa_from_categories(df: pd.DataFrame, cat2visa: dict) -> tuple[pd.Da
 # ---------------- Cache sérialisable ----------------
 @st.cache_data
 def load_excel_bytes(xlsx_input):
-    """
-    Retourne (sheet_names, data_bytes, source_id) pour un chemin ou un fichier uploadé.
-    """
+    """Retourne (sheet_names, data_bytes, source_id) pour un chemin ou un fichier uploadé."""
     if hasattr(xlsx_input, "read"):  # UploadedFile
         data = xlsx_input.read()
         src_id = f"upload:{getattr(xlsx_input, 'name', 'uploaded')}"
@@ -278,7 +275,7 @@ if is_ref and sheet_choice.lower() == "visa":
     st.caption("Ajoute / modifie / supprime directement ci-dessous. Les lignes et cellules sont éditables. "
                "Utilise le bouton **+ Ajouter une ligne** en bas du tableau, ou le menu ⋮ pour supprimer.")
 
-    # charge la feuille complète depuis les OCTETS COURANTS
+    # Feuille complète depuis les octets courants
     full_ref_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).copy()
 
     # Colonnes par défaut
@@ -287,7 +284,7 @@ if is_ref and sheet_choice.lower() == "visa":
         if c not in full_ref_df.columns:
             full_ref_df[c] = ""
 
-    # Ordonner: d'abord défaut, puis autres
+    # Ordre colonnes
     ordered_cols = [c for c in default_cols if c in full_ref_df.columns] + [c for c in full_ref_df.columns if c not in default_cols]
     full_ref_df = full_ref_df[ordered_cols]
 
@@ -355,10 +352,9 @@ if nb_filled > 0 and "Visa" in df_enriched.columns and sheet_choice.lower() in [
     if cols_top[0].button("💾 Écrire les 'Visa' complétés dans l’Excel", type="primary"):
         try:
             original_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False)
-            # S’assurer qu'une colonne Visa existe
             if "Visa" not in original_df.columns:
                 original_df["Visa"] = ""
-            # On écrit uniquement aux lignes correspondant à la table normalisée (même index attendu)
+            # on écrit sur les mêmes indices
             original_df.loc[df_enriched.index, "Visa"] = df_enriched["Visa"].values
             updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df)
             st.session_state["excel_bytes_current"] = updated_bytes
@@ -387,7 +383,6 @@ df = df_enriched
 # --- Détection des ID ajoutés et écriture dans l’Excel (Clients / Données normalisées) ---
 if sheet_choice.lower() in ["clients", "données normalisées", "donnees normalisees"]:
     original_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False)
-
     had_id_col = "ID_Client" in original_df.columns
     orig_ids = original_df["ID_Client"].astype(str).str.strip() if had_id_col else pd.Series([""] * len(original_df))
 
@@ -405,10 +400,8 @@ if sheet_choice.lower() in ["clients", "données normalisées", "donnees normali
                     if "ID_Client" not in original_upd.columns:
                         original_upd["ID_Client"] = ""
                     original_upd.loc[newly_filled.index, "ID_Client"] = df.loc[newly_filled.index, "ID_Client"].values
-
                     updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_upd)
                     st.session_state["excel_bytes_current"] = updated_bytes
-
                     if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
                         original_path = source_id.split("path:", 1)[1]
                         try:
@@ -416,7 +409,6 @@ if sheet_choice.lower() in ["clients", "données normalisées", "donnees normali
                             st.success(f"✅ Écrit dans le fichier : {original_path}")
                         except Exception as e:
                             st.info(f"Impossible d’écrire sur le disque. Télécharge le fichier mis à jour ci-dessous. Détail: {e}")
-
                     st.success("✅ ID_Client enregistrés dans l’Excel.")
                     st.rerun()
                 except Exception as e:
@@ -432,31 +424,32 @@ if sheet_choice.lower() in ["clients", "données normalisées", "donnees normali
 # --- Filtres & KPIs & affichages dossiers ---
 with st.container():
     c1, c2, c3 = st.columns(3)
-    years = sorted([int(y) for y in df["Année"].dropna().unique()]) if "Année" in df else []
-    visas = sorted(df["Visa"].dropna().astype(str).unique())
-    statuses = sorted(df["Statut"].dropna().astype(str).unique())
+    # Année/Mois n'apparaissent plus à l'écran
+    years = sorted([int(y) for y in []])  # placeholder pour garder la structure si besoin plus tard
+    visas = sorted(df["Visa"].dropna().astype(str).unique()) if "Visa" in df.columns else []
+    statuses = sorted(df["Statut"].dropna().astype(str).unique()) if "Statut" in df.columns else []
 
-    year_sel = c1.multiselect("Années", years, default=years or None)
-    visa_sel = c2.multiselect("Type de visa", visas, default=visas or None)
-    stat_sel = c3.multiselect("Statut", statuses, default=statuses or None)
+    # Filtres disponibles : Visa / Statut seulement (Date reste visible mais sans heure)
+    visa_sel = c1.multiselect("Type de visa", visas, default=visas or None)
+    stat_sel = c2.multiselect("Statut", statuses, default=statuses or None)
+    # c3 laissé vide pour équilibre visuel
 
 f = df.copy()
-if year_sel:
-    f = f[f["Année"].isin(year_sel)]
-if visa_sel:
+if "Visa" in f.columns and visa_sel:
     f = f[f["Visa"].astype(str).isin(visa_sel)]
-if stat_sel:
+if "Statut" in f.columns and stat_sel:
     f = f[f["Statut"].astype(str).isin(stat_sel)]
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Dossiers", f"{len(f)}")
-k2.metric("Montant total", f"{f['Montant'].sum():,.2f} €")
-k3.metric("Payé", f"{f['Payé'].sum():,.2f} €")
-k4.metric("Reste", f"{f['Reste'].sum():,.2f} €")
+k2.metric("Montant total", f"{f['Montant'].sum():,.2f} €" if "Montant" in f.columns else "—")
+k3.metric("Payé", f"{f['Payé'].sum():,.2f} €" if "Payé" in f.columns else "—")
+k4.metric("Reste", f"{f['Reste'].sum():,.2f} €" if "Reste" in f.columns else "—")
 
 st.divider()
 
-st.subheader("📈 Nombre de dossiers par mois")
+# Graphique simple par Mois (MM). ATTENTION: agrège tous les mois de l'année ensemble (janv de toutes années).
+st.subheader("📈 Nombre de dossiers par mois (MM)")
 if "Mois" in f.columns:
     counts = (
         f.dropna(subset=["Mois"])
@@ -471,10 +464,23 @@ else:
     st.info("Aucune colonne 'Mois' exploitable.")
 
 st.subheader("📋 Données")
-cols_show = [c for c in ["ID_Client","Nom","Telephone","Email","Date","Année","Mois","Visa","Statut","Montant","Payé","Reste"] if c in f.columns]
+# Année/Mois ne sont pas affichées
+cols_show = [c for c in ["ID_Client","Nom","Telephone","Email","Date","Visa","Statut","Montant","Payé","Reste"] if c in f.columns]
+table = f.copy()
+
+# Formatage propre montants + date str
+def _fmt_money_col(df, name):
+    if name in df.columns:
+        df[name] = df[name].map(lambda v: f"{v:,.2f} €".replace(",", " ").replace(".", ","))
+_fmt_money_col(table, "Montant")
+_fmt_money_col(table, "Payé")
+_fmt_money_col(table, "Reste")
+if "Date" in table.columns:
+    table["Date"] = table["Date"].astype(str)  # YYYY-MM-DD sans heure
+
 st.dataframe(
-    f[cols_show].sort_values(by=[c for c in ["Date","Visa","Statut"] if c in f.columns], na_position="last"),
+    table[cols_show].sort_values(by=[c for c in ["Date","Visa","Statut"] if c in table.columns], na_position="last"),
     use_container_width=True
 )
 
-st.caption("• ID_Client auto (Nom + Telephone + Date) • Onglet Visa éditable • 'Visa' complété depuis 'Categories' via l’onglet de référence • Écriture et téléchargement possibles.")
+st.caption("• Mois = MM (non affiché), Date sans heure • Reste = Montant − Payé • Onglet Visa éditable • ID_Client auto (Nom + Telephone + Date) • Jointure Categories→Visa.")
