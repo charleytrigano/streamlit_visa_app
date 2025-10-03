@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 import streamlit as st
@@ -63,22 +64,26 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Statut"] = df["Statut"].astype(str).fillna("Inconnu")
 
+    # Montant
     if "Montant" in df.columns:
         df["Montant"] = _to_num(df["Montant"])
     else:
         src_montant = _first_col(df, ["Honoraires", "Total", "Amount"])
         df["Montant"] = _to_num(df[src_montant]) if src_montant else 0.0
 
+    # Paiements (JSON) -> TotalAcomptes
     if "Paiements" in df.columns:
         parsed = df["Paiements"].apply(_parse_paiements)
         df["TotalAcomptes"] = parsed.apply(_sum_payments)
 
+    # Payé
     if "Payé" in df.columns:
         df["Payé"] = _to_num(df["Payé"])
     else:
         src_paye = _first_col(df, ["TotalAcomptes", "Acomptes", "Paye", "Paid"])
         df["Payé"] = _to_num(df[src_paye]) if src_paye else 0.0
 
+    # Reste
     if "Reste" in df.columns:
         df["Reste"] = _to_num(df["Reste"])
     else:
@@ -91,24 +96,31 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def looks_like_reference(df: pd.DataFrame) -> bool:
-    """
-    Détecte un onglet de référence (ex: feuille 'Visa' avec colonnes
-    'Categories', 'Visa', 'Definition') qui n'est pas une liste de dossiers.
-    """
+    """Détecte un onglet de référence (ex: 'Visa' avec Categories/Visa/Definition)."""
     cols = set(map(str.lower, df.columns.astype(str)))
-    # Présence d'un trio typique de dictionnaire et absence de colonnes montants
     has_ref = {"categories", "visa"} <= cols
     no_money = not ({"montant", "honoraires", "acomptes", "payé", "reste", "solde"} & cols)
     return has_ref and no_money
 
+# ---------------- Cache: on stocke des BYTES sérialisables ----------------
 @st.cache_data
-def read_excel(xlsx_obj):
-    xls = pd.ExcelFile(xlsx_obj)
-    return xls.sheet_names, xls  # retourne aussi l'ExcelFile pour charger la feuille choisie
+def load_excel_bytes(xlsx_input):
+    """
+    Retourne (sheet_names, data_bytes) pour un chemin ou un fichier uploadé.
+    - Sérialisable par Streamlit (pas d'objets ExcelFile en cache)
+    """
+    if hasattr(xlsx_input, "read"):  # UploadedFile
+        data = xlsx_input.read()
+    else:  # chemin
+        data = Path(xlsx_input).read_bytes()
+    xls = pd.ExcelFile(io.BytesIO(data))
+    return xls.sheet_names, data  # liste (serialisable) + bytes (serialisable)
 
-@st.cache_data
-def load_sheet(xls: pd.ExcelFile, sheet_name: str, normalize: bool):
+def read_sheet_from_bytes(data_bytes: bytes, sheet_name: str, normalize: bool) -> pd.DataFrame:
+    """Recrée un ExcelFile à la demande, lit la feuille, normalise si nécessaire."""
+    xls = pd.ExcelFile(io.BytesIO(data_bytes))
     df = pd.read_excel(xls, sheet_name=sheet_name)
+    # Si c'est une table de référence, on ne normalise pas
     if normalize and not looks_like_reference(df):
         df = normalize_dataframe(df)
     return df
@@ -128,31 +140,33 @@ if source_mode == "Fichier par défaut":
         st.sidebar.error("Aucun fichier par défaut trouvé. Importez un fichier.")
         st.stop()
     st.sidebar.success(f"Fichier: {path}")
-    sheet_names, xls = read_excel(path)
+    sheet_names, data_bytes = load_excel_bytes(path)
 else:
     up = st.sidebar.file_uploader("Dépose un Excel (.xlsx, .xls)", type=["xlsx", "xls"])
     if not up:
         st.info("Importe un fichier pour commencer.")
         st.stop()
-    sheet_names, xls = read_excel(up)
+    sheet_names, data_bytes = load_excel_bytes(up)
 
-# Choix explicite de la feuille (oui, y compris 'Visa')
+# Choix explicite de la feuille (inclut 'Visa')
 preferred_order = ["Données normalisées", "Clients", "Visa"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
 sheet_choice = st.sidebar.selectbox("Feuille", sheet_names, index=sheet_names.index(default_sheet))
 
-# Charger. Si la feuille ressemble à un dictionnaire de références, on **normalize=False**
-df_raw = load_sheet(xls, sheet_choice, normalize=not looks_like_reference(pd.read_excel(xls, sheet_name=sheet_choice, nrows=5)))
-is_ref = looks_like_reference(df_raw)
+# Lecture de la feuille
+# On fait un petit échantillon pour décider si c'est une table de référence
+sample_df = read_sheet_from_bytes(data_bytes, sheet_choice, normalize=False).head(5)
+is_ref = looks_like_reference(sample_df)
 
 if is_ref:
-    st.info("ℹ️ Cette feuille ressemble à une **table de référence** (ex: correspondance Catégories ↔ Visa). "
-            "Elle s'affiche telle quelle. Pour analyser des dossiers, sélectionnez l'onglet **Clients** ou "
-            "**Données normalisées** dans la sidebar.")
-    st.dataframe(df_raw, use_container_width=True)
+    st.info("ℹ️ Cette feuille ressemble à une **table de référence** (ex: Catégories ↔ Visa). "
+            "Elle s'affiche telle quelle. Pour analyser des dossiers, sélectionne l'onglet "
+            "**Clients** ou **Données normalisées**.")
+    full_ref_df = read_sheet_from_bytes(data_bytes, sheet_choice, normalize=False)
+    st.dataframe(full_ref_df, use_container_width=True)
     st.stop()
 
-df = df_raw  # déjà normalisé
+df = read_sheet_from_bytes(data_bytes, sheet_choice, normalize=True)
 
 # ---------------- Filtres ----------------
 with st.container():
@@ -205,5 +219,5 @@ st.dataframe(
     use_container_width=True
 )
 
-st.caption("Astuce : choisissez l’onglet dans la sidebar. Si vous sélectionnez 'Visa' (table de référence), le programme l’affiche tel quel.")
-
+st.caption("Astuce : la lecture est mise en cache sous forme **d’octets** (sérialisables). "
+           "Choisis l’onglet dans la sidebar. L’onglet 'Visa' (référentiel) s’affiche tel quel.")
