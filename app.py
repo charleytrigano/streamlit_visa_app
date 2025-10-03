@@ -1,4 +1,4 @@
-# app.py — Version finale avec routage par vues, filtres avancés et structure corrigée (Corrigé 29)
+# app.py — Version finale avec routage par vues, filtres avancés et structure corrigée (Corrigé 30)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -173,7 +173,7 @@ def render_client_form(df, sel_row, action, original_index=None):
         
         # Logique de sécurité pour Honoraires
         honoraires_val = sel_row.get("Honoraires", 0.0)
-        # 💥 CORRECTION DE L'ERREUR float("")
+        # CORRECTION DE L'ERREUR float("")
         if honoraires_val == "" or pd.isna(honoraires_val):
             honoraires_default = 0.0
         else:
@@ -182,16 +182,16 @@ def render_client_form(df, sel_row, action, original_index=None):
         # Corps du formulaire CLIENTS
         cols1, cols2 = st.columns(2)
         with cols1:
-            # 💥 Clés explicites pour chaque widget
+            # Clés explicites pour chaque widget
             dossier_id = st.text_input("DossierID", value=sel_row.get("DossierID", ""), disabled=not is_add, key=f"dossier_id_{unique_form_key}")
             nom = st.text_input("Nom", value=sel_row.get("Nom", ""), key=f"nom_{unique_form_key}")
             typevisa = st.text_input("TypeVisa", value=sel_row.get("TypeVisa", ""), key=f"typevisa_{unique_form_key}")
             email = st.text_input("Email", value=sel_row.get("Email", ""), key=f"email_{unique_form_key}")
         with cols2:
-            # 💥 Clés explicites pour chaque widget
+            # Clés explicites pour chaque widget
             telephone = st.text_input("Telephone", value=sel_row.get("Telephone", ""), key=f"telephone_{unique_form_key}")
             
-            # --- LIGNE CORRIGÉE ---
+            # LIGNE CORRIGÉE (Honoraires)
             honoraires = st.number_input("Honoraires", value=honoraires_default, format="%.2f", key=f"honoraires_{unique_form_key}")
             
             notes = st.text_area("Notes", value=sel_row.get("Notes", ""), key=f"notes_{unique_form_key}")
@@ -208,15 +208,15 @@ def render_client_form(df, sel_row, action, original_index=None):
         rfe_val = bool(sel_row.get("RFE", False))
         
         with st_col1:
-            # 💥 Clés explicites pour chaque widget
+            # Clés explicites pour chaque widget
             dossier_envoye = st.checkbox("Dossier envoyé", value=envoye, key=f"envoye_{unique_form_key}")
             dossier_refuse = st.checkbox("Dossier refusé", value=refuse, key=f"refuse_{unique_form_key}")
         with st_col2:
-            # 💥 Clés explicites pour chaque widget
+            # Clés explicites pour chaque widget
             dossier_approuve = st.checkbox("Dossier approuvé", value=approuve, key=f"approuve_{unique_form_key}")
             dossier_annule = st.checkbox("DossierAnnule (annulé)", value=annule, key=f"annule_{unique_form_key}")
         with st_col3:
-            # 💥 Clés explicites pour chaque widget
+            # Clés explicites pour chaque widget
             rfe = st.checkbox("RFE (doit être combiné)", value=rfe_val, key=f"rfe_{unique_form_key}")
             date_envoi = st.date_input("DateEnvoi", value=get_date_for_input("DateEnvoi", sel_row), key=f"date_envoi_{unique_form_key}")
 
@@ -232,7 +232,19 @@ def render_client_form(df, sel_row, action, original_index=None):
         elif not isinstance(payments_list, list):
              payments_list = []
 
-        st.write("Paiements (Total encaissé: " + f"{sel_row.get('TotalAcomptes', 0.0):.2f} €" + ")")
+        # --- DÉBUT CORRECTION DE L'ERREUR VALUERROR SUR TotalAcomptes DANS LA VUE D'AJOUT ---
+        total_payed_val = sel_row.get('TotalAcomptes', 0.0)
+        try:
+            # S'assurer que même si c'est une chaîne vide ("") provenant du pd.Series, on utilise 0.0
+            if pd.isna(total_payed_val) or total_payed_val == "":
+                total_payed_safe = 0.0
+            else:
+                total_payed_safe = float(total_payed_val)
+        except (TypeError, ValueError):
+            total_payed_safe = 0.0
+            
+        st.write("Paiements (Total encaissé: " + f"{total_payed_safe:.2f} €" + ")")
+        # --- FIN CORRECTION ---
         
         for i, p in enumerate(payments_list):
             p_date = p.get('date', 'N/A')
@@ -255,7 +267,7 @@ def render_client_form(df, sel_row, action, original_index=None):
 
         # Boutons d'action
         col_buttons = st.columns(3)
-        # Le bouton est bien là, mais l'erreur ci-dessus l'empêchait d'être rendu
+        # Le bouton est bien là, et sera désormais atteint
         submitted = col_buttons[0].form_submit_button(button_label) 
         
         delete_button = None
