@@ -7,6 +7,14 @@ import pandas as pd
 
 st.set_page_config(page_title="📊 Visas — Simplifié", layout="wide")
 st.title("📊 Visas — Tableau simplifié")
+# --- KPI compacts (CSS) ---
+st.markdown("""
+<style>
+.small-kpi [data-testid="stMetricValue"] { font-size: 1.15rem; line-height: 1.1; }
+.small-kpi [data-testid="stMetricLabel"] { font-size: 0.80rem; opacity: 0.8; }
+</style>
+""", unsafe_allow_html=True)
+
 
 # ---------------- Utils ----------------
 def _first_col(df: pd.DataFrame, candidates) -> str | None:
@@ -484,3 +492,4 @@ st.dataframe(
 )
 
 st.caption("• Mois = MM (non affiché), Date sans heure • Reste = Montant − Payé • Onglet Visa éditable • ID_Client auto (Nom + Telephone + Date) • Jointure Categories→Visa.")
+
