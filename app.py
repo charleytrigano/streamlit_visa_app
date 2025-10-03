@@ -1,4 +1,4 @@
-# app.py — Version finale avec routage par vues, filtres avancés et structure corrigée (Corrigé 28)
+# app.py — Version finale avec routage par vues, filtres avancés et structure corrigée (Corrigé 29)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -171,6 +171,14 @@ def render_client_form(df, sel_row, action, original_index=None):
 
     with st.form(f"client_form_{unique_form_key}"):
         
+        # Logique de sécurité pour Honoraires
+        honoraires_val = sel_row.get("Honoraires", 0.0)
+        # 💥 CORRECTION DE L'ERREUR float("")
+        if honoraires_val == "" or pd.isna(honoraires_val):
+            honoraires_default = 0.0
+        else:
+            honoraires_default = float(honoraires_val)
+
         # Corps du formulaire CLIENTS
         cols1, cols2 = st.columns(2)
         with cols1:
@@ -182,7 +190,10 @@ def render_client_form(df, sel_row, action, original_index=None):
         with cols2:
             # 💥 Clés explicites pour chaque widget
             telephone = st.text_input("Telephone", value=sel_row.get("Telephone", ""), key=f"telephone_{unique_form_key}")
-            honoraires = st.number_input("Honoraires", value=float(sel_row.get("Honoraires", 0.0)), format="%.2f", key=f"honoraires_{unique_form_key}")
+            
+            # --- LIGNE CORRIGÉE ---
+            honoraires = st.number_input("Honoraires", value=honoraires_default, format="%.2f", key=f"honoraires_{unique_form_key}")
+            
             notes = st.text_area("Notes", value=sel_row.get("Notes", ""), key=f"notes_{unique_form_key}")
         
         st.markdown("---")
@@ -244,7 +255,8 @@ def render_client_form(df, sel_row, action, original_index=None):
 
         # Boutons d'action
         col_buttons = st.columns(3)
-        submitted = col_buttons[0].form_submit_button(button_label)
+        # Le bouton est bien là, mais l'erreur ci-dessus l'empêchait d'être rendu
+        submitted = col_buttons[0].form_submit_button(button_label) 
         
         delete_button = None
         if not is_add:
@@ -431,7 +443,6 @@ if page == "Clients":
         empty_row = pd.Series("", index=df.columns)
         empty_row["Paiements"] = [] 
         
-        # CET APPEL EST MAINTENANT SÉCURISÉ
         render_client_form(df, empty_row, action="add")
         st.markdown("---")
         st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
@@ -459,7 +470,6 @@ if page == "Clients":
 
             st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
             
-            # CET APPEL EST MAINTENANT SÉCURISÉ
             render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
             st.markdown("---")
             st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
@@ -660,7 +670,6 @@ elif page == "Visa":
     if current_view == "visa_add":
         st.subheader("Ajouter un nouveau type de visa")
         empty_row = pd.Series("", index=df.columns)
-        # CET APPEL EST MAINTENANT SÉCURISÉ
         render_visa_form(df, empty_row, action="add")
         st.markdown("---")
         st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
@@ -681,7 +690,6 @@ elif page == "Visa":
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
             
-            # CET APPEL EST MAINTENANT SÉCURISÉ
             render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
             st.markdown("---")
             st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
