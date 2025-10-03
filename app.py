@@ -1,4 +1,4 @@
-# app.py — Version finale avec routage par vues et filtres avancés (Corrigé 27)
+# app.py — Version finale avec routage par vues, filtres avancés et structure corrigée (Corrigé 28)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -156,326 +156,9 @@ page = st.selectbox("Page", ["Clients", "Visa"], index=0,
                     key="main_page_select", 
                     on_change=lambda: set_view("clients_list" if st.session_state.main_page_select == "Clients" else "visa_list"))
 
-# --- 3. RENDU DES PAGES (REFONTE TOTALE) ---
-
-if page == "Clients":
-    
-    st.header("👥 Clients — gestion & suivi")
-    df = st.session_state.clients_df
-    current_view = st.session_state.current_view
-
-    # --- CLIENTS : VUE AJOUT (add) ---
-    if current_view == "clients_add":
-        st.subheader("Ajouter un nouveau dossier client")
-        # Créer une ligne vide pour l'ajout
-        empty_row = pd.Series("", index=df.columns)
-        empty_row["Paiements"] = [] 
-        
-        render_client_form(df, empty_row, action="add")
-        st.markdown("---")
-        st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
-
-
-    # --- CLIENTS : VUE MODIFICATION (edit) ---
-    elif current_view == "clients_edit":
-        
-        # Récupérer les données filtrées si des filtres ont été appliqués avant l'édition
-        filtered = st.session_state.get("clients_filtered_df", df.copy())
-        max_idx = len(filtered) - 1
-
-        # Utilisation de l'index sélectionné avant le changement de vue
-        final_safe_index_filtered = st.session_state.get("client_sel_idx", 0)
-        
-        if final_safe_index_filtered < 0 or final_safe_index_filtered > max_idx:
-             # Index invalide après une suppression, on revient à la liste
-             set_view("clients_list")
-             st.rerun()
-
-        try:
-             # Accès aux données garanti
-            sel_row_filtered = filtered.iloc[final_safe_index_filtered] 
-            original_session_index = sel_row_filtered.name 
-
-            st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
-            
-            render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
-            st.markdown("---")
-            st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
-
-        except IndexError as e:
-            st.error("Dossier introuvable (IndexError). Retour à la liste.")
-            set_view("clients_list")
-            st.rerun()
-
-    
-    # --- CLIENTS : VUE LISTE (list) ---
-    else: # current_view == "clients_list"
-        
-        # KPI & ACTIONS
-        total_dossiers = len(df)
-        total_encaissé = df["TotalAcomptes"].sum()
-        total_honoraires = df["Honoraires"].sum()
-        total_solde = df["SoldeCalc"].sum()
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total dossiers", f"{total_dossiers:,}")
-        c2.metric("Total encaissé", f"{total_encaissé:,.2f} €")
-        c3.metric("Total honoraires", f"{total_honoraires:,.2f} €")
-        c4.metric("Solde total", f"{total_solde:,.2f} €")
-        
-        st.markdown("---")
-        st.button("➕ Ajouter un nouveau dossier", on_click=lambda: set_view("clients_add"))
-        st.markdown("---")
-
-        # FILTRES MIS À JOUR
-        with st.expander("Filtrer / Rechercher"):
-            q = st.text_input("Recherche (nom / dossier / email)")
-            
-            # --- NOUVEAUX FILTRES ---
-            col_date, col_visa = st.columns(2)
-            
-            # 1. Année/Mois (basé sur la DateCreation)
-            # Extrait les années et mois uniques pour les options
-            df_temp = df.copy() # Travailler sur une copie pour les colonnes temporaires
-            df_temp['Year'] = df_temp['DateCreation'].dt.year.fillna(0).astype(int)
-            df_temp['Month'] = df_temp['DateCreation'].dt.month.fillna(0).astype(int)
-            
-            years = sorted(df_temp['Year'].unique().tolist(), reverse=True)
-            months = {1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril", 5: "Mai", 6: "Juin",
-                      7: "Juillet", 8: "Août", 9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre"}
-            
-            with col_date:
-                selected_year = st.selectbox("Filtrer par Année de création", ["Toutes"] + [y for y in years if y > 0])
-                selected_month = st.selectbox("Filtrer par Mois de création", ["Tous"] + list(months.values()))
-            
-            # 2. Type de Visa
-            with col_visa:
-                visa_types = sorted(df_temp['TypeVisa'].dropna().unique().tolist())
-                selected_visa = st.multiselect("Filtrer par Type de Visa", visa_types)
-                
-            # 3. Statut (inchangé)
-            status_filter = st.selectbox("Filtrer par Statut", ["Tous", "Envoyé", "Approuvé", "Refusé", "Annulé", "RFE"])
-
-            st.markdown("---")
-            st.subheader("Filtres financiers (€)")
-            
-            # 4. Honoraires / Payé / Dû (LOGIQUE CORRIGÉE POUR st.slider)
-            
-            # Récupération des min/max sécurisée
-            min_h = int(df['Honoraires'].min()) if not df['Honoraires'].empty and df['Honoraires'].min() is not np.nan else 0
-            max_h = int(df['Honoraires'].max()) if not df['Honoraires'].empty and df['Honoraires'].max() is not np.nan else 0
-            min_p = int(df['TotalAcomptes'].min()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].min() is not np.nan else 0
-            max_p = int(df['TotalAcomptes'].max()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].max() is not np.nan else 0
-            min_d = int(df['SoldeCalc'].min()) if not df['SoldeCalc'].empty and df['SoldeCalc'].min() is not np.nan else 0
-            max_d = int(df['SoldeCalc'].max()) if not df['SoldeCalc'].empty and df['SoldeCalc'].max() is not np.nan else 0
-            
-            # --- CORRECTION DU BUG st.slider ---
-            # Si min_value == max_value, Streamlit lève une exception. On force max_value > min_value.
-            if min_h == max_h:
-                max_h = 1 if max_h == 0 else (max_h + 1)
-                
-            if min_p == max_p:
-                max_p = 1 if max_p == 0 else (max_p + 1)
-
-            if min_d == max_d:
-                # CORRECTION DE L'ERREUR À LA LIGNE 292
-                max_d = 1 if max_d == 0 else (max_d + 1)
-            # -----------------------------------
-
-            # Calcul des valeurs par défaut pour les sliders
-            h_range_default = (min_h, max_h)
-            p_range_default = (min_p, max_p)
-            d_range_default = (min_d, max_d)
-            
-            # Sécurité pour les cas extrêmes (même si la correction au-dessus rend cela presque inutile)
-            if min_h > max_h: h_range_default = (0, 0)
-            if min_p > max_p: p_range_default = (0, 0)
-            if min_d > max_d: d_range_default = (0, 0)
-            
-            
-            col_h, col_p, col_d = st.columns(3)
-
-            with col_h:
-                honoraires_range = st.slider("Honoraires (Total)", min_h, max_h, h_range_default)
-            with col_p:
-                paye_range = st.slider("Montant Payé", min_p, max_p, p_range_default)
-            with col_d:
-                du_range = st.slider("Montant Dû (Solde)", min_d, max_d, d_range_default)
-            # --- FIN NOUVEAUX FILTRES ---
-
-
-        # --- LOGIQUE D'APPLICATION DES FILTRES ---
-        filtered = df_temp.copy() # Utiliser la copie temporaire avec Year/Month
-        
-        # 1. Filtre Texte (inchangé)
-        if q:
-            mask = pd.Series(False, index=filtered.index)
-            for c in ["DossierID", "Nom", "Email", "TypeVisa"]:
-                if c in filtered.columns:
-                    mask = mask | filtered[c].astype(str).str.contains(q, case=False, na=False)
-            filtered = filtered[mask]
-        
-        # 2. Filtre Année
-        if selected_year != "Toutes":
-            filtered = filtered[filtered['Year'] == int(selected_year)]
-            
-        # 3. Filtre Mois
-        if selected_month != "Tous":
-            month_num = [k for k, v in months.items() if v == selected_month][0]
-            filtered = filtered[filtered['Month'] == month_num]
-            
-        # 4. Filtre Type de Visa
-        if selected_visa:
-            filtered = filtered[filtered['TypeVisa'].isin(selected_visa)]
-
-        # 5. Filtre Statut (inchangé)
-        if status_filter != "Tous":
-            col_map = {"Envoyé": "Dossier envoyé", "Approuvé": "Dossier approuvé", "Refusé": "Dossier refusé", "Annulé": "DossierAnnule", "RFE": "RFE"}
-            col_name = col_map.get(status_filter)
-            if col_name:
-                 filtered = filtered[filtered.get(col_name, False) == True]
-                 
-        # 6. Filtres Financiers
-        # Note: Les bornes utilisées ici sont celles corrigées (min_h, max_h...)
-        filtered = filtered[
-            (filtered['Honoraires'] >= honoraires_range[0]) & (filtered['Honoraires'] <= honoraires_range[1])
-        ]
-        filtered = filtered[
-            (filtered['TotalAcomptes'] >= paye_range[0]) & (filtered['TotalAcomptes'] <= paye_range[1])
-        ]
-        filtered = filtered[
-            (filtered['SoldeCalc'] >= du_range[0]) & (filtered['SoldeCalc'] <= du_range[1])
-        ]
-        
-        # Suppression des colonnes temporaires
-        filtered = filtered.drop(columns=['Year', 'Month'], errors='ignore')
-
-        # Affichage du DataFrame filtré
-        st.dataframe(filtered.reset_index(drop=True).drop(columns=['Paiements', 'TotalAcomptes', 'SoldeCalc'], errors='ignore'), use_container_width=True)
-        st.session_state.clients_filtered_df = filtered.copy() # Stocker la liste filtrée pour la vue d'édition
-
-        # Sélection et modification
-        if len(filtered) > 0: 
-            max_idx = len(filtered) - 1
-            
-            # 1. INITIALISATION ET CONTRÔLE D'INDEX CRITIQUE
-            current_index = st.session_state.get('client_sel_idx', 0)
-            
-            # Fix index if out of bounds 
-            if current_index > max_idx or current_index < 0:
-                current_index = 0
-            
-            final_safe_index = current_index
-
-            # 2. L'utilisateur choisit l'index affiché (Clé Statique)
-            sel_idx_float = st.number_input(
-                "Index du dossier à modifier", 
-                min_value=0, 
-                max_value=max_idx, 
-                value=final_safe_index, 
-                key="client_idx_input_static" 
-            )
-            
-            sel_idx = int(sel_idx_float) 
-            
-            # 3. Mettre à jour la session state
-            if sel_idx != final_safe_index:
-                st.session_state.client_sel_idx = sel_idx
-                st.rerun() 
-            else:
-                 st.session_state.client_sel_idx = final_safe_index
-
-            # 4. Bouton pour passer à la vue d'édition
-            st.button("✏️ Modifier le dossier sélectionné", on_click=lambda: set_view("clients_edit"))
-            
-        else:
-            st.info("Aucun dossier client ne correspond aux filtres.")
-
-
-elif page == "Visa":
-    st.header("🛂 Visa — Gestion des types")
-    df = st.session_state.visa_df
-    current_view = st.session_state.current_view
-    
-    # --- VISA : VUE AJOUT (add) ---
-    if current_view == "visa_add":
-        st.subheader("Ajouter un nouveau type de visa")
-        empty_row = pd.Series("", index=df.columns)
-        render_visa_form(df, empty_row, action="add")
-        st.markdown("---")
-        st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
-        
-    # --- VISA : VUE MODIFICATION (edit) ---
-    elif current_view == "visa_edit":
-        
-        max_idx = len(df) - 1
-        final_safe_index = st.session_state.get("visa_sel_idx", 0)
-
-        if final_safe_index < 0 or final_safe_index > max_idx:
-             set_view("visa_list")
-             st.rerun()
-             
-        try:
-            # Accès aux données garanti
-            sel_row = df.iloc[final_safe_index]
-            
-            st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
-            
-            render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
-            st.markdown("---")
-            st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
-        
-        except IndexError as e:
-            st.error("Type de visa introuvable (IndexError). Retour à la liste.")
-            set_view("visa_list")
-            st.rerun()
-            
-
-    # --- VISA : VUE LISTE (list) ---
-    else: # current_view == "visa_list"
-        
-        st.dataframe(df, use_container_width=True)
-        st.markdown("---")
-        st.button("➕ Ajouter un nouveau type", on_click=lambda: set_view("visa_add"))
-        st.markdown("---")
-        
-        if len(df) > 0: 
-            max_idx = len(df) - 1
-            
-            # 1. CONTRÔLE D'INDEX ET CORRECTION CRITIQUE
-            current_index = st.session_state.get('visa_sel_idx', 0)
-            
-            # Fix index if out of bounds
-            if current_index > max_idx or current_index < 0:
-                 current_index = 0
-                 
-            final_safe_index = current_index
-            
-            # Clé statique pour éviter les problèmes de recréation de widget
-            sel_idx_float = st.number_input(
-                "Index du visa à modifier", 
-                min_value=0, 
-                max_value=max_idx, 
-                value=final_safe_index,
-                key="visa_idx_input_static" 
-            )
-            
-            sel_idx = int(sel_idx_float)
-            
-            # 3. Mettre à jour la session state (si l'utilisateur a changé la valeur)
-            if sel_idx != final_safe_index:
-                st.session_state.visa_sel_idx = sel_idx
-                st.rerun()
-            else:
-                 st.session_state.visa_sel_idx = final_safe_index
-
-            # 4. Bouton pour passer à la vue d'édition
-            st.button("✏️ Modifier le type de visa sélectionné", on_click=lambda: set_view("visa_edit"))
-
-        else:
-            st.info("Aucun type de visa à gérer.")
-        
-# --- 4. DEFINITION DES FORMULAIRES (CRUD) ---
+# ----------------------------------------------------------------------
+# --- 3. DEFINITION DES FORMULAIRES (CRUD) - DÉPLACÉ EN HAUT DU RENDU ---
+# ----------------------------------------------------------------------
 
 def render_client_form(df, sel_row, action, original_index=None):
     """Rendu du formulaire d'ajout/modification/suppression pour un client."""
@@ -730,7 +413,329 @@ def render_visa_form(df, sel_row, action, original_index=None):
             st.success("Type de visa supprimé.")
             st.rerun()
             return 
+            
+# ----------------------------------------------------------------------
+# --- 4. RENDU DES PAGES (APPEL DES FONCTIONS) ---
+# ----------------------------------------------------------------------
 
+if page == "Clients":
+    
+    st.header("👥 Clients — gestion & suivi")
+    df = st.session_state.clients_df
+    current_view = st.session_state.current_view
+
+    # --- CLIENTS : VUE AJOUT (add) ---
+    if current_view == "clients_add":
+        st.subheader("Ajouter un nouveau dossier client")
+        # Créer une ligne vide pour l'ajout
+        empty_row = pd.Series("", index=df.columns)
+        empty_row["Paiements"] = [] 
+        
+        # CET APPEL EST MAINTENANT SÉCURISÉ
+        render_client_form(df, empty_row, action="add")
+        st.markdown("---")
+        st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
+
+
+    # --- CLIENTS : VUE MODIFICATION (edit) ---
+    elif current_view == "clients_edit":
+        
+        # Récupérer les données filtrées si des filtres ont été appliqués avant l'édition
+        filtered = st.session_state.get("clients_filtered_df", df.copy())
+        max_idx = len(filtered) - 1
+
+        # Utilisation de l'index sélectionné avant le changement de vue
+        final_safe_index_filtered = st.session_state.get("client_sel_idx", 0)
+        
+        if final_safe_index_filtered < 0 or final_safe_index_filtered > max_idx:
+             # Index invalide après une suppression, on revient à la liste
+             set_view("clients_list")
+             st.rerun()
+
+        try:
+             # Accès aux données garanti
+            sel_row_filtered = filtered.iloc[final_safe_index_filtered] 
+            original_session_index = sel_row_filtered.name 
+
+            st.subheader(f"Modifier Dossier: {sel_row_filtered.get('DossierID','(sans id)')} — {sel_row_filtered.get('Nom','')}")
+            
+            # CET APPEL EST MAINTENANT SÉCURISÉ
+            render_client_form(df, sel_row_filtered, action="update", original_index=original_session_index)
+            st.markdown("---")
+            st.button("↩️ Retour à la liste des clients", on_click=lambda: set_view("clients_list"))
+
+        except IndexError as e:
+            st.error("Dossier introuvable (IndexError). Retour à la liste.")
+            set_view("clients_list")
+            st.rerun()
+
+    
+    # --- CLIENTS : VUE LISTE (list) ---
+    else: # current_view == "clients_list"
+        
+        # KPI & ACTIONS
+        total_dossiers = len(df)
+        total_encaissé = df["TotalAcomptes"].sum()
+        total_honoraires = df["Honoraires"].sum()
+        total_solde = df["SoldeCalc"].sum()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total dossiers", f"{total_dossiers:,}")
+        c2.metric("Total encaissé", f"{total_encaissé:,.2f} €")
+        c3.metric("Total honoraires", f"{total_honoraires:,.2f} €")
+        c4.metric("Solde total", f"{total_solde:,.2f} €")
+        
+        st.markdown("---")
+        st.button("➕ Ajouter un nouveau dossier", on_click=lambda: set_view("clients_add"))
+        st.markdown("---")
+
+        # FILTRES MIS À JOUR
+        with st.expander("Filtrer / Rechercher"):
+            q = st.text_input("Recherche (nom / dossier / email)")
+            
+            # --- NOUVEAUX FILTRES ---
+            col_date, col_visa = st.columns(2)
+            
+            # 1. Année/Mois (basé sur la DateCreation)
+            # Extrait les années et mois uniques pour les options
+            df_temp = df.copy() # Travailler sur une copie pour les colonnes temporaires
+            df_temp['Year'] = df_temp['DateCreation'].dt.year.fillna(0).astype(int)
+            df_temp['Month'] = df_temp['DateCreation'].dt.month.fillna(0).astype(int)
+            
+            years = sorted(df_temp['Year'].unique().tolist(), reverse=True)
+            months = {1: "Janvier", 2: "Février", 3: "Mars", 4: "Avril", 5: "Mai", 6: "Juin",
+                      7: "Juillet", 8: "Août", 9: "Septembre", 10: "Octobre", 11: "Novembre", 12: "Décembre"}
+            
+            with col_date:
+                selected_year = st.selectbox("Filtrer par Année de création", ["Toutes"] + [y for y in years if y > 0])
+                selected_month = st.selectbox("Filtrer par Mois de création", ["Tous"] + list(months.values()))
+            
+            # 2. Type de Visa
+            with col_visa:
+                visa_types = sorted(df_temp['TypeVisa'].dropna().unique().tolist())
+                selected_visa = st.multiselect("Filtrer par Type de Visa", visa_types)
+                
+            # 3. Statut (inchangé)
+            status_filter = st.selectbox("Filtrer par Statut", ["Tous", "Envoyé", "Approuvé", "Refusé", "Annulé", "RFE"])
+
+            st.markdown("---")
+            st.subheader("Filtres financiers (€)")
+            
+            # 4. Honoraires / Payé / Dû (LOGIQUE CORRIGÉE POUR st.slider)
+            
+            # Récupération des min/max sécurisée
+            min_h = int(df['Honoraires'].min()) if not df['Honoraires'].empty and df['Honoraires'].min() is not np.nan else 0
+            max_h = int(df['Honoraires'].max()) if not df['Honoraires'].empty and df['Honoraires'].max() is not np.nan else 0
+            min_p = int(df['TotalAcomptes'].min()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].min() is not np.nan else 0
+            max_p = int(df['TotalAcomptes'].max()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].max() is not np.nan else 0
+            min_d = int(df['SoldeCalc'].min()) if not df['SoldeCalc'].empty and df['SoldeCalc'].min() is not np.nan else 0
+            max_d = int(df['SoldeCalc'].max()) if not df['SoldeCalc'].empty and df['SoldeCalc'].max() is not np.nan else 0
+            
+            # --- CORRECTION DU BUG st.slider ---
+            if min_h == max_h:
+                max_h = 1 if max_h == 0 else (max_h + 1)
+                
+            if min_p == max_p:
+                max_p = 1 if max_p == 0 else (max_p + 1)
+
+            if min_d == max_d:
+                max_d = 1 if max_d == 0 else (max_d + 1)
+            # -----------------------------------
+
+            # Calcul des valeurs par défaut pour les sliders
+            h_range_default = (min_h, max_h)
+            p_range_default = (min_p, max_p)
+            d_range_default = (min_d, max_d)
+            
+            # Sécurité pour les cas extrêmes
+            if min_h > max_h: h_range_default = (0, 0)
+            if min_p > max_p: p_range_default = (0, 0)
+            if min_d > max_d: d_range_default = (0, 0)
+            
+            
+            col_h, col_p, col_d = st.columns(3)
+
+            with col_h:
+                honoraires_range = st.slider("Honoraires (Total)", min_h, max_h, h_range_default)
+            with col_p:
+                paye_range = st.slider("Montant Payé", min_p, max_p, p_range_default)
+            with col_d:
+                du_range = st.slider("Montant Dû (Solde)", min_d, max_d, d_range_default)
+            # --- FIN NOUVEAUX FILTRES ---
+
+
+        # --- LOGIQUE D'APPLICATION DES FILTRES ---
+        filtered = df_temp.copy() # Utiliser la copie temporaire avec Year/Month
+        
+        # 1. Filtre Texte (inchangé)
+        if q:
+            mask = pd.Series(False, index=filtered.index)
+            for c in ["DossierID", "Nom", "Email", "TypeVisa"]:
+                if c in filtered.columns:
+                    mask = mask | filtered[c].astype(str).str.contains(q, case=False, na=False)
+            filtered = filtered[mask]
+        
+        # 2. Filtre Année
+        if selected_year != "Toutes":
+            filtered = filtered[filtered['Year'] == int(selected_year)]
+            
+        # 3. Filtre Mois
+        if selected_month != "Tous":
+            month_num = [k for k, v in months.items() if v == selected_month][0]
+            filtered = filtered[filtered['Month'] == month_num]
+            
+        # 4. Filtre Type de Visa
+        if selected_visa:
+            filtered = filtered[filtered['TypeVisa'].isin(selected_visa)]
+
+        # 5. Filtre Statut (inchangé)
+        if status_filter != "Tous":
+            col_map = {"Envoyé": "Dossier envoyé", "Approuvé": "Dossier approuvé", "Refusé": "Dossier refusé", "Annulé": "DossierAnnule", "RFE": "RFE"}
+            col_name = col_map.get(status_filter)
+            if col_name:
+                 filtered = filtered[filtered.get(col_name, False) == True]
+                 
+        # 6. Filtres Financiers
+        filtered = filtered[
+            (filtered['Honoraires'] >= honoraires_range[0]) & (filtered['Honoraires'] <= honoraires_range[1])
+        ]
+        filtered = filtered[
+            (filtered['TotalAcomptes'] >= paye_range[0]) & (filtered['TotalAcomptes'] <= paye_range[1])
+        ]
+        filtered = filtered[
+            (filtered['SoldeCalc'] >= du_range[0]) & (filtered['SoldeCalc'] <= du_range[1])
+        ]
+        
+        # Suppression des colonnes temporaires
+        filtered = filtered.drop(columns=['Year', 'Month'], errors='ignore')
+
+        # Affichage du DataFrame filtré
+        st.dataframe(filtered.reset_index(drop=True).drop(columns=['Paiements', 'TotalAcomptes', 'SoldeCalc'], errors='ignore'), use_container_width=True)
+        st.session_state.clients_filtered_df = filtered.copy() # Stocker la liste filtrée pour la vue d'édition
+
+        # Sélection et modification
+        if len(filtered) > 0: 
+            max_idx = len(filtered) - 1
+            
+            # 1. INITIALISATION ET CONTRÔLE D'INDEX CRITIQUE
+            current_index = st.session_state.get('client_sel_idx', 0)
+            
+            # Fix index if out of bounds 
+            if current_index > max_idx or current_index < 0:
+                current_index = 0
+            
+            final_safe_index = current_index
+
+            # 2. L'utilisateur choisit l'index affiché (Clé Statique)
+            sel_idx_float = st.number_input(
+                "Index du dossier à modifier", 
+                min_value=0, 
+                max_value=max_idx, 
+                value=final_safe_index, 
+                key="client_idx_input_static" 
+            )
+            
+            sel_idx = int(sel_idx_float) 
+            
+            # 3. Mettre à jour la session state
+            if sel_idx != final_safe_index:
+                st.session_state.client_sel_idx = sel_idx
+                st.rerun() 
+            else:
+                 st.session_state.client_sel_idx = final_safe_index
+
+            # 4. Bouton pour passer à la vue d'édition
+            st.button("✏️ Modifier le dossier sélectionné", on_click=lambda: set_view("clients_edit"))
+            
+        else:
+            st.info("Aucun dossier client ne correspond aux filtres.")
+
+
+elif page == "Visa":
+    st.header("🛂 Visa — Gestion des types")
+    df = st.session_state.visa_df
+    current_view = st.session_state.current_view
+    
+    # --- VISA : VUE AJOUT (add) ---
+    if current_view == "visa_add":
+        st.subheader("Ajouter un nouveau type de visa")
+        empty_row = pd.Series("", index=df.columns)
+        # CET APPEL EST MAINTENANT SÉCURISÉ
+        render_visa_form(df, empty_row, action="add")
+        st.markdown("---")
+        st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
+        
+    # --- VISA : VUE MODIFICATION (edit) ---
+    elif current_view == "visa_edit":
+        
+        max_idx = len(df) - 1
+        final_safe_index = st.session_state.get("visa_sel_idx", 0)
+
+        if final_safe_index < 0 or final_safe_index > max_idx:
+             set_view("visa_list")
+             st.rerun()
+             
+        try:
+            # Accès aux données garanti
+            sel_row = df.iloc[final_safe_index]
+            
+            st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
+            
+            # CET APPEL EST MAINTENANT SÉCURISÉ
+            render_visa_form(df, sel_row, action="update", original_index=final_safe_index) 
+            st.markdown("---")
+            st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
+        
+        except IndexError as e:
+            st.error("Type de visa introuvable (IndexError). Retour à la liste.")
+            set_view("visa_list")
+            st.rerun()
+            
+
+    # --- VISA : VUE LISTE (list) ---
+    else: # current_view == "visa_list"
+        
+        st.dataframe(df, use_container_width=True)
+        st.markdown("---")
+        st.button("➕ Ajouter un nouveau type", on_click=lambda: set_view("visa_add"))
+        st.markdown("---")
+        
+        if len(df) > 0: 
+            max_idx = len(df) - 1
+            
+            # 1. CONTRÔLE D'INDEX ET CORRECTION CRITIQUE
+            current_index = st.session_state.get('visa_sel_idx', 0)
+            
+            # Fix index if out of bounds
+            if current_index > max_idx or current_index < 0:
+                 current_index = 0
+                 
+            final_safe_index = current_index
+            
+            # Clé statique pour éviter les problèmes de recréation de widget
+            sel_idx_float = st.number_input(
+                "Index du visa à modifier", 
+                min_value=0, 
+                max_value=max_idx, 
+                value=final_safe_index,
+                key="visa_idx_input_static" 
+            )
+            
+            sel_idx = int(sel_idx_float)
+            
+            # 3. Mettre à jour la session state (si l'utilisateur a changé la valeur)
+            if sel_idx != final_safe_index:
+                st.session_state.visa_sel_idx = sel_idx
+                st.rerun()
+            else:
+                 st.session_state.visa_sel_idx = final_safe_index
+
+            # 4. Bouton pour passer à la vue d'édition
+            st.button("✏️ Modifier le type de visa sélectionné", on_click=lambda: set_view("visa_edit"))
+
+        else:
+            st.info("Aucun type de visa à gérer.")
+        
 # --- 5. LOGIQUE DE SAUVEGARDE GLOBALE (inchangé) ---
 
 if src and (page == "Clients" or page == "Visa"):
@@ -775,4 +780,3 @@ if src and (page == "Clients" or page == "Visa"):
                 st.warning("Renseignez un chemin local dans la sidebar.")
         elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
             st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
-
