@@ -76,10 +76,7 @@ def _sum_payments(pay_list) -> float:
     return total
 
 def _make_client_id_from_row(row) -> str:
-    """
-    ID stable depuis Nom + Telephone + Date (Email ignoré).
-    Exemple: CL-2F9A3C81
-    """
+    # ID stable depuis Nom + Telephone + Date (Email ignoré).
     base = "|".join([
         _safe_str(row.get("Nom")),
         _safe_str(row.get("Telephone")),
@@ -278,280 +275,426 @@ if "excel_bytes_current" not in st.session_state or st.session_state.get("excel_
 
 current_bytes = st.session_state["excel_bytes_current"]
 
-# choix onglet
+# choix onglet/feuille Excel
 preferred_order = ["Données normalisées", "Clients", "Visa"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
-sheet_choice = st.sidebar.selectbox("Feuille", sheet_names, index=sheet_names.index(default_sheet), key="sheet_choice")
+sheet_choice = st.sidebar.selectbox("Feuille Excel", sheet_names, index=sheet_names.index(default_sheet), key="sheet_choice")
 
-# détection référence
+# petite détection de référentiel (Visa)
 sample_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).head(5)
 is_ref = looks_like_reference(sample_df)
 
 # =========================
-# MODE Référence — Visa (CRUD)
+# TABS UI
 # =========================
 if is_ref and sheet_choice.lower() == "visa":
-    st.subheader("📚 Référentiel — Visa (éditable)")
-    st.caption("Ajoute / modifie / supprime des lignes. Bouton **Enregistrer** pour écrire dans l’Excel.")
-
-    full_ref_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).copy()
-    default_cols = ["Categories", "Visa", "Definition"]
-    for c in default_cols:
-        if c not in full_ref_df.columns:
-            full_ref_df[c] = ""
-    ordered_cols = [c for c in default_cols if c in full_ref_df.columns] + [c for c in full_ref_df.columns if c not in default_cols]
-    full_ref_df = full_ref_df[ordered_cols].copy()
-    for c in full_ref_df.columns:
-        if full_ref_df[c].dtype != "object":
-            full_ref_df[c] = full_ref_df[c].astype(str)
-        full_ref_df[c] = full_ref_df[c].fillna("")
-
-    edited_df = st.data_editor(
-        full_ref_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key="visa_editor",
-    )
-
-    st.divider()
-    col_save, col_dl, col_reset = st.columns([1,1,1])
-
-    if col_save.button("💾 Enregistrer (remplace la feuille 'Visa')", type="primary"):
-        try:
-            updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, edited_df)
-            st.session_state["excel_bytes_current"] = updated_bytes
-            if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
-                original_path = source_id.split("path:", 1)[1]
-                try:
-                    Path(original_path).write_bytes(updated_bytes)
-                    st.success(f"Fichier mis à jour : {original_path}")
-                except Exception as e:
-                    st.info(f"Écriture disque impossible. Téléchargez le fichier ci-dessous. Détail: {e}")
-            st.success("Modifications enregistrées.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Erreur à l’enregistrement : {e}")
-
-    col_dl.download_button(
-        "⬇️ Télécharger l’Excel mis à jour",
-        data=st.session_state["excel_bytes_current"],
-        file_name="visa_mis_a_jour.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    if col_reset.button("↩️ Réinitialiser (annuler les modifs non enregistrées)"):
-        st.session_state.pop("excel_bytes_current", None)
-        st.session_state["excel_bytes_current"] = data_bytes
-        st.success("Réinitialisé.")
-        st.rerun()
-
-    st.stop()
+    tabs = st.tabs(["Référentiel Visa (CRUD)"])
+else:
+    tabs = st.tabs(["Dashboard", "Clients (CRUD)"])
 
 # =========================
-# MODE Dossiers
+# TAB 1 : Référentiel Visa (CRUD) si feuille Visa
 # =========================
-# 1) lecture normalisée
-df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=True)
-
-# 2) jointure auto Categories -> Visa
-cat2visa = build_categories_to_visa_map(current_bytes, visa_sheet_name="Visa")
-df_enriched, nb_filled = enrich_visa_from_categories(df, cat2visa)
-
-if nb_filled > 0 and "Visa" in df_enriched.columns and sheet_choice.lower() in ["clients", "données normalisées", "donnees normalisees"]:
-    st.info(f"🔁 {nb_filled} valeur(s) 'Visa' complétée(s) depuis 'Categories' via l’onglet **Visa**.")
-    cols_top = st.columns([1,1])
-    if cols_top[0].button("💾 Écrire les 'Visa' complétés dans l’Excel", type="primary"):
-        try:
-            original_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False)
-            if "Visa" not in original_df.columns:
-                original_df["Visa"] = ""
-            original_df.loc[df_enriched.index, "Visa"] = df_enriched["Visa"].values
-            updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df)
-            st.session_state["excel_bytes_current"] = updated_bytes
-            if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
-                original_path = source_id.split("path:", 1)[1]
-                try:
-                    Path(original_path).write_bytes(updated_bytes)
-                    st.success(f"✅ Écrit dans le fichier : {original_path}")
-                except Exception as e:
-                    st.info(f"Impossible d’écrire sur le disque. Téléchargez le fichier. Détail: {e}")
-            st.success("✅ 'Visa' complétés enregistrés.")
+if is_ref and sheet_choice.lower() == "visa":
+    with tabs[0]:
+        st.subheader("📚 Référentiel — Visa (éditable)")
+        full_ref_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).copy()
+        default_cols = ["Categories", "Visa", "Definition"]
+        for c in default_cols:
+            if c not in full_ref_df.columns:
+                full_ref_df[c] = ""
+        ordered_cols = [c for c in default_cols if c in full_ref_df.columns] + [c for c in full_ref_df.columns if c not in default_cols]
+        full_ref_df = full_ref_df[ordered_cols].copy()
+        for c in full_ref_df.columns:
+            if full_ref_df[c].dtype != "object":
+                full_ref_df[c] = full_ref_df[c].astype(str)
+            full_ref_df[c] = full_ref_df[c].fillna("")
+        edited_df = st.data_editor(
+            full_ref_df, num_rows="dynamic", use_container_width=True, hide_index=True, key="visa_editor",
+        )
+        col_save, col_dl, col_reset = st.columns([1,1,1])
+        if col_save.button("💾 Enregistrer (remplace la feuille 'Visa')", type="primary"):
+            try:
+                updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, edited_df)
+                st.session_state["excel_bytes_current"] = updated_bytes
+                if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
+                    original_path = source_id.split("path:", 1)[1]
+                    try:
+                        Path(original_path).write_bytes(updated_bytes)
+                        st.success(f"Fichier mis à jour : {original_path}")
+                    except Exception as e:
+                        st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
+                st.success("Modifications enregistrées.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erreur à l’enregistrement : {e}")
+        col_dl.download_button(
+            "⬇️ Télécharger l’Excel mis à jour",
+            data=st.session_state["excel_bytes_current"],
+            file_name="visa_mis_a_jour.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        if col_reset.button("↩️ Réinitialiser"):
+            st.session_state.pop("excel_bytes_current", None)
+            st.session_state["excel_bytes_current"] = data_bytes
+            st.success("Réinitialisé.")
             st.rerun()
-        except Exception as e:
-            st.error(f"Erreur à l’écriture : {e}")
 
-    cols_top[1].download_button(
-        "⬇️ Télécharger l’Excel avec 'Visa' complétés",
-        data=st.session_state.get("excel_bytes_current", current_bytes),
-        file_name="clients_visa_completes.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+# =========================
+# MODE Dossiers (feuille non Visa)
+# =========================
+if not (is_ref and sheet_choice.lower() == "visa"):
+    # 1) lecture normalisée
+    df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=True)
 
-df = df_enriched
+    # 2) jointure auto Categories -> Visa
+    cat2visa = build_categories_to_visa_map(current_bytes, visa_sheet_name="Visa")
+    df_enriched, nb_filled = enrich_visa_from_categories(df, cat2visa)
+    df = df_enriched
 
-# 3) ID_Client générés → proposer l’écriture
-if sheet_choice.lower() in ["clients", "données normalisées", "donnees normalisees"]:
-    original_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False)
-    had_id_col = "ID_Client" in original_df.columns
-    orig_ids = original_df["ID_Client"].astype(str).str.strip() if had_id_col else pd.Series([""] * len(original_df))
-    if len(orig_ids) == len(df):
-        missing_before = orig_ids.eq("") | orig_ids.isna()
-        new_ids = df["ID_Client"].astype(str).str.strip()
-        newly_filled = (missing_before) & new_ids.ne("")
-        if newly_filled.any():
-            st.info(f"🆔 {newly_filled.sum()} ID_Client générés automatiquement.")
-            cols_id = st.columns([1,1])
-            if cols_id[0].button("💾 Écrire les ID_Client dans l’Excel", type="primary"):
+    # ----- TAB Dashboard -----
+    with tabs[0]:
+        # Filtres
+        with st.container():
+            c1, c2, c3 = st.columns(3)
+            years = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
+            months_present = sorted(df["Mois"].dropna().unique()) if "Mois" in df.columns else []
+            visas = sorted(df["Visa"].dropna().astype(str).unique()) if "Visa" in df.columns else []
+
+            year_sel = c1.multiselect("Année", years, default=years or None)
+            month_sel = c2.multiselect("Mois (MM)", months_present, default=months_present or None)
+            visa_sel  = c3.multiselect("Type de visa", visas, default=visas or None)
+
+            c4, c5 = st.columns(2)
+            pay_min, pay_max = (float(df["Payé"].min()), float(df["Payé"].max())) if "Payé" in df.columns and not df["Payé"].empty else (0.0, 0.0)
+            reste_min, reste_max = (float(df["Reste"].min()), float(df["Reste"].max())) if "Reste" in df.columns and not df["Reste"].empty else (0.0, 0.0)
+            pay_range = c4.slider("Payé (min-max)", min_value=float(pay_min), max_value=float(pay_max), value=(float(pay_min), float(pay_max)))
+            solde_range = c5.slider("Solde / Reste (min-max)", min_value=float(reste_min), max_value=float(reste_max), value=(float(reste_min), float(reste_max)))
+
+        # Appliquer filtres
+        f = df.copy()
+        if "Date" in f.columns and year_sel:
+            f = f[f["Date"].apply(lambda x: pd.notna(x) and x.year in year_sel)]
+        if "Mois" in f.columns and month_sel:
+            f = f[f["Mois"].isin(month_sel)]
+        if "Visa" in f.columns and visa_sel:
+            f = f[f["Visa"].astype(str).isin(visa_sel)]
+        if "Payé" in f.columns:
+            f = f[(f["Payé"] >= pay_range[0]) & (f["Payé"] <= pay_range[1])]
+        if "Reste" in f.columns:
+            f = f[(f["Reste"] >= solde_range[0]) & (f["Reste"] <= solde_range[1])]
+
+        # KPI compacts
+        st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Dossiers", f"{len(f)}")
+        k2.metric("Montant total", _fmt_money_us(float(f["Montant"].sum())) if "Montant" in f.columns else "—")
+        k3.metric("Payé",         _fmt_money_us(float(f["Payé"].sum()))     if "Payé" in f.columns else "—")
+        k4.metric("Reste",        _fmt_money_us(float(f["Reste"].sum()))    if "Reste" in f.columns else "—")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.divider()
+
+        # Graph par Mois (MM)
+        st.subheader("📈 Nombre de dossiers par mois (MM)")
+        if "Mois" in f.columns:
+            counts = (
+                f.dropna(subset=["Mois"])
+                 .groupby("Mois")
+                 .size()
+                 .rename("Dossiers")
+                 .reset_index()
+                 .sort_values("Mois")
+            )
+            st.bar_chart(counts.set_index("Mois"))
+        else:
+            st.info("Aucune colonne 'Mois' exploitable.")
+
+        # Ajout d'acompte (US $)
+        st.subheader("➕ Ajouter un acompte (US $)")
+        pending = df[df["Reste"] > 0.0005].copy() if "Reste" in df.columns else pd.DataFrame()
+        if pending.empty:
+            st.success("Tous les dossiers sont soldés ✅")
+        else:
+            pending["_label"] = pending.apply(
+                lambda r: f'{r.get("ID_Client","")} — {r.get("Nom","")} — Reste {_fmt_money_us(float(r.get("Reste",0)))}',
+                axis=1
+            )
+            csel, camt, cdate, cmode = st.columns([2,1,1,1])
+            selected_label = csel.selectbox("Dossier à créditer", pending["_label"].tolist())
+            amount = camt.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f")
+            pay_date = cdate.date_input("Date", value=date.today())
+            mode = cmode.selectbox("Mode", ["CB", "Virement", "Espèces", "Chèque", "Autre"])
+            note = st.text_input("Note (facultatif)", "")
+            if st.button("💾 Ajouter l’acompte"):
+                if amount <= 0:
+                    st.warning("Montant invalide.")
+                else:
+                    try:
+                        target_idx = pending.loc[pending["_label"] == selected_label].index[0]
+                        original_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False)
+                        if "Paiements" not in original_df.columns:
+                            original_df["Paiements"] = ""
+                        raw = original_df.at[target_idx, "Paiements"]
+                        try:
+                            pay_list = json.loads(raw) if isinstance(raw, str) and raw.strip() else []
+                            if not isinstance(pay_list, list):
+                                pay_list = []
+                        except Exception:
+                            pay_list = []
+                        pay_list.append({"date": str(pay_date), "amount": float(amount), "mode": mode, "note": note})
+                        original_df.at[target_idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+                        updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df)
+                        st.session_state["excel_bytes_current"] = updated_bytes
+                        if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
+                            original_path = source_id.split("path:", 1)[1]
+                            try:
+                                Path(original_path).write_bytes(updated_bytes)
+                                st.success(f"Acompte ajouté et écrit dans : {original_path}")
+                            except Exception as e:
+                                st.info(f"Écriture disque impossible, fichier mémoire à jour. Détail: {e}")
+                        st.success(f"Acompte {_fmt_money_us(amount)} ajouté.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erreur lors de l’ajout : {e}")
+
+        # Tableau final (Année/Mois non affichées)
+        st.subheader("📋 Données")
+        cols_show = [c for c in ["ID_Client","Nom","Telephone","Email","Date","Visa","Statut","Montant","Payé","Reste"] if c in f.columns]
+        table = f.copy()
+        for col in ["Montant","Payé","Reste"]:
+            if col in table.columns:
+                table[col] = table[col].map(_fmt_money_us)
+        if "Date" in table.columns:
+            table["Date"] = table["Date"].astype(str)
+        st.dataframe(
+            table[cols_show].sort_values(by=[c for c in ["Date","Visa","Statut"] if c in table.columns], na_position="last"),
+            use_container_width=True
+        )
+
+    # ----- TAB Clients (CRUD) -----
+    with tabs[1]:
+        st.subheader("👤 Clients — Créer / Modifier / Supprimer")
+        st.caption("Cette fiche utilise **toutes les colonnes présentes** dans la feuille sélectionnée.")
+
+        # DataFrame original (sans normalisation) pour conserver toutes les colonnes telles quelles
+        original_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).copy()
+
+        # Détection colonnes "connues" (pour widgets spécialisés)
+        bool_cols = [c for c in original_df.columns if c.lower() in {
+            "rfe","dossier envoyé","dossier approuvé","dossier refusé","dossier annulé"
+        }]
+        date_cols = [c for c in original_df.columns if c.lower() in {"date"}]
+        money_cols = [c for c in original_df.columns if c.lower() in {"honoraires","acomptes","solde","montant","payé","reste"}]
+        json_cols  = [c for c in original_df.columns if c.lower() in {"paiements"}]
+
+        # Sélecteur d'action
+        action = st.radio("Action", ["Créer", "Modifier", "Supprimer"], horizontal=True)
+
+        # Liste d’identification clients (par défaut via ID_Client, sinon Nom)
+        id_col = "ID_Client" if "ID_Client" in original_df.columns else None
+        name_col = "Nom" if "Nom" in original_df.columns else None
+
+        def _row_label(idx, row):
+            parts = []
+            if id_col: parts.append(_safe_str(row.get(id_col)))
+            if name_col: parts.append(_safe_str(row.get(name_col)))
+            if "Telephone" in original_df.columns: parts.append(_safe_str(row.get("Telephone")))
+            return " — ".join([p for p in parts if p])
+
+        # ---- Créer ----
+        if action == "Créer":
+            st.markdown("### ➕ Nouveau client")
+            col_left, col_right = st.columns(2)
+
+            # Préparer valeurs par défaut vides
+            form_values = {}
+            with st.form("create_form", clear_on_submit=False):
+                # Champs colonne par colonne (dynamiques)
+                for c in original_df.columns:
+                    label = c
+                    if c in bool_cols:
+                        form_values[c] = st.checkbox(label, value=False)
+                    elif c in date_cols:
+                        form_values[c] = st.date_input(label, value=date.today())
+                    elif c in money_cols:
+                        form_values[c] = st.number_input(label, value=0.0, step=10.0, format="%.2f")
+                    elif c in json_cols:
+                        form_values[c] = st.text_area(label, value="", placeholder='[{"date":"2025-10-03","amount":100}]')
+                    else:
+                        form_values[c] = st.text_input(label, value="")
+
+                submitted = st.form_submit_button("💾 Créer le client", type="primary")
+
+            if submitted:
+                # Assurer ID_Client (auto si vide)
+                if "ID_Client" in original_df.columns:
+                    id_val = _safe_str(form_values.get("ID_Client"))
+                else:
+                    # Ajouter la colonne si manquante
+                    original_df["ID_Client"] = ""
+                    id_val = ""
+                if not id_val:
+                    # construire sur Nom/Tel/Date
+                    base_row = {"Nom": form_values.get("Nom",""), "Telephone": form_values.get("Telephone",""), "Date": form_values.get("Date","")}
+                    gen_id = _make_client_id_from_row(base_row)
+                    # éviter collisions
+                    existing_ids = set(original_df["ID_Client"].astype(str))
+                    tmp = gen_id; n=1
+                    while tmp in existing_ids:
+                        n += 1
+                        tmp = f"{gen_id}-{n:02d}"
+                    form_values["ID_Client"] = tmp
+
+                # Normaliser types avant écriture
+                new_row = {}
+                for c in original_df.columns:
+                    v = form_values.get(c, "")
+                    if c in date_cols:
+                        new_row[c] = str(v) if v else ""
+                    elif c in money_cols:
+                        new_row[c] = float(v or 0)
+                    elif c in bool_cols:
+                        new_row[c] = bool(v)
+                    elif c in json_cols:
+                        # le laisser texte, mais valider min.
+                        try:
+                            if _safe_str(v):
+                                parsed = json.loads(v)
+                                if not isinstance(parsed, list): parsed = []
+                                new_row[c] = json.dumps(parsed, ensure_ascii=False)
+                            else:
+                                new_row[c] = ""
+                        except Exception:
+                            new_row[c] = ""
+                    else:
+                        new_row[c] = _safe_str(v)
+
+                # Append et écrire
+                original_df = pd.concat([original_df, pd.DataFrame([new_row])], ignore_index=True)
                 try:
-                    original_upd = original_df.copy()
-                    if "ID_Client" not in original_upd.columns:
-                        original_upd["ID_Client"] = ""
-                    original_upd.loc[newly_filled.index, "ID_Client"] = df.loc[newly_filled.index, "ID_Client"].values
-                    updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_upd)
+                    updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df)
                     st.session_state["excel_bytes_current"] = updated_bytes
                     if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
                         original_path = source_id.split("path:", 1)[1]
                         try:
                             Path(original_path).write_bytes(updated_bytes)
-                            st.success(f"✅ Écrit dans le fichier : {original_path}")
+                            st.success(f"Client créé et écrit dans : {original_path}")
                         except Exception as e:
-                            st.info(f"Impossible d’écrire sur le disque. Téléchargez le fichier. Détail: {e}")
-                    st.success("✅ ID_Client enregistrés.")
+                            st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
+                    st.success("✅ Client créé.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur à l’écriture : {e}")
 
-            cols_id[1].download_button(
-                "⬇️ Télécharger l’Excel avec ID_Client",
-                data=st.session_state.get("excel_bytes_current", current_bytes),
-                file_name="clients_avec_id.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        # ---- Modifier ----
+        if action == "Modifier":
+            st.markdown("### ✏️ Modifier un client")
+            if original_df.empty:
+                st.info("Aucun client à modifier.")
+            else:
+                # Sélection
+                options = [(idx, _row_label(idx, row)) for idx, row in original_df.iterrows()]
+                sel_label = st.selectbox("Sélection", [lab for _, lab in options])
+                sel_idx = [i for i, lab in options if lab == sel_label][0]
 
-# --------- AJOUT D'ACOMPTE (US $) POUR DOSSIERS NON SOLDÉS ----------
-st.subheader("➕ Ajouter un acompte (US $)")
-pending = df[df["Reste"] > 0.0005].copy() if "Reste" in df.columns else pd.DataFrame()
-if pending.empty:
-    st.success("Tous les dossiers sont soldés ✅")
-else:
-    pending["_label"] = pending.apply(
-        lambda r: f'{r.get("ID_Client","")} — {r.get("Nom","")} — Reste {_fmt_money_us(float(r.get("Reste",0)))}',
-        axis=1
-    )
-    csel, camt, cdate, cmode = st.columns([2,1,1,1])
-    selected_label = csel.selectbox("Dossier à créditer", pending["_label"].tolist())
-    amount = camt.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f")
-    pay_date = cdate.date_input("Date", value=date.today())
-    mode = cmode.selectbox("Mode", ["CB", "Virement", "Espèces", "Chèque", "Autre"])
-    note = st.text_input("Note (facultatif)", "")
+                # Valeurs initiales
+                init = original_df.loc[sel_idx].to_dict()
 
-    if st.button("💾 Ajouter l’acompte"):
-        if amount <= 0:
-            st.warning("Montant invalide.")
-        else:
-            try:
-                target_idx = pending.loc[pending["_label"] == selected_label].index[0]
-                original_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False)
-                if "Paiements" not in original_df.columns:
-                    original_df["Paiements"] = ""
-                raw = original_df.at[target_idx, "Paiements"]
-                try:
-                    pay_list = json.loads(raw) if isinstance(raw, str) and raw.strip() else []
-                    if not isinstance(pay_list, list):
-                        pay_list = []
-                except Exception:
-                    pay_list = []
-                pay_list.append({"date": str(pay_date), "amount": float(amount), "mode": mode, "note": note})
-                original_df.at[target_idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+                form_values = {}
+                with st.form("edit_form", clear_on_submit=False):
+                    for c in original_df.columns:
+                        v = init.get(c, "")
+                        if c in bool_cols:
+                            form_values[c] = st.checkbox(c, value=bool(v))
+                        elif c in date_cols:
+                            # cast vers date
+                            try:
+                                d = pd.to_datetime(v).date() if _safe_str(v) else date.today()
+                            except Exception:
+                                d = date.today()
+                            form_values[c] = st.date_input(c, value=d)
+                        elif c in money_cols:
+                            try:
+                                fv = float(v) if _safe_str(v) else 0.0
+                            except Exception:
+                                fv = 0.0
+                            form_values[c] = st.number_input(c, value=fv, step=10.0, format="%.2f")
+                        elif c in json_cols:
+                            form_values[c] = st.text_area(c, value=_safe_str(v), height=120)
+                        else:
+                            form_values[c] = st.text_input(c, value=_safe_str(v))
+                    submitted = st.form_submit_button("💾 Enregistrer les modifications", type="primary")
 
-                updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df)
-                st.session_state["excel_bytes_current"] = updated_bytes
+                if submitted:
+                    # ID_Client auto si vide
+                    if "ID_Client" in original_df.columns and not _safe_str(form_values.get("ID_Client")):
+                        base_row = {"Nom": form_values.get("Nom",""), "Telephone": form_values.get("Telephone",""), "Date": form_values.get("Date","")}
+                        form_values["ID_Client"] = _make_client_id_from_row(base_row)
 
-                if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
-                    original_path = source_id.split("path:", 1)[1]
+                    # Écriture des types + mise à jour de la ligne
+                    for c in original_df.columns:
+                        v = form_values.get(c, "")
+                        if c in date_cols:
+                            original_df.at[sel_idx, c] = str(v) if v else ""
+                        elif c in money_cols:
+                            try: original_df.at[sel_idx, c] = float(v or 0)
+                            except Exception: original_df.at[sel_idx, c] = 0.0
+                        elif c in bool_cols:
+                            original_df.at[sel_idx, c] = bool(v)
+                        elif c in json_cols:
+                            try:
+                                if _safe_str(v):
+                                    parsed = json.loads(v)
+                                    if not isinstance(parsed, list): parsed = []
+                                    original_df.at[sel_idx, c] = json.dumps(parsed, ensure_ascii=False)
+                                else:
+                                    original_df.at[sel_idx, c] = ""
+                            except Exception:
+                                original_df.at[sel_idx, c] = ""
+                        else:
+                            original_df.at[sel_idx, c] = _safe_str(v)
+
                     try:
-                        Path(original_path).write_bytes(updated_bytes)
-                        st.success(f"Acompte ajouté et écrit dans : {original_path}")
+                        updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df)
+                        st.session_state["excel_bytes_current"] = updated_bytes
+                        if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
+                            original_path = source_id.split("path:", 1)[1]
+                            try:
+                                Path(original_path).write_bytes(updated_bytes)
+                                st.success(f"Client modifié et écrit dans : {original_path}")
+                            except Exception as e:
+                                st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
+                        st.success("✅ Modifications enregistrées.")
+                        st.rerun()
                     except Exception as e:
-                        st.info(f"Écriture disque impossible, mais l’Excel mémoire est à jour. Détail: {e}")
+                        st.error(f"Erreur à l’écriture : {e}")
 
-                st.success(f"Acompte {_fmt_money_us(amount)} ajouté. Le solde va se mettre à jour.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erreur lors de l’ajout : {e}")
-
-# =========================
-# Filtres & KPI & Affichages
-# =========================
-# Filtres : Année, Mois=MM, Type Visa, Payé (min-max), Reste (min-max)
-with st.container():
-    c1, c2, c3 = st.columns(3)
-    years = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
-    months_present = sorted(df["Mois"].dropna().unique()) if "Mois" in df.columns else []
-    visas = sorted(df["Visa"].dropna().astype(str).unique()) if "Visa" in df.columns else []
-
-    year_sel = c1.multiselect("Année", years, default=years or None)
-    month_sel = c2.multiselect("Mois (MM)", months_present, default=months_present or None)
-    visa_sel  = c3.multiselect("Type de visa", visas, default=visas or None)
-
-    c4, c5 = st.columns(2)
-    pay_min, pay_max = (float(df["Payé"].min()), float(df["Payé"].max())) if "Payé" in df.columns and not df["Payé"].empty else (0.0, 0.0)
-    reste_min, reste_max = (float(df["Reste"].min()), float(df["Reste"].max())) if "Reste" in df.columns and not df["Reste"].empty else (0.0, 0.0)
-    pay_range = c4.slider("Payé (min-max)", min_value=float(pay_min), max_value=float(pay_max), value=(float(pay_min), float(pay_max)))
-    solde_range = c5.slider("Solde / Reste (min-max)", min_value=float(reste_min), max_value=float(reste_max), value=(float(reste_min), float(reste_max)))
-
-# appliquer filtres
-f = df.copy()
-if "Date" in f.columns and year_sel:
-    f = f[f["Date"].apply(lambda x: pd.notna(x) and x.year in year_sel)]
-if "Mois" in f.columns and month_sel:
-    f = f[f["Mois"].isin(month_sel)]
-if "Visa" in f.columns and visa_sel:
-    f = f[f["Visa"].astype(str).isin(visa_sel)]
-if "Payé" in f.columns:
-    f = f[(f["Payé"] >= pay_range[0]) & (f["Payé"] <= pay_range[1])]
-if "Reste" in f.columns:
-    f = f[(f["Reste"] >= solde_range[0]) & (f["Reste"] <= solde_range[1])]
-
-# KPI compacts
-st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Dossiers", f"{len(f)}")
-k2.metric("Montant total", _fmt_money_us(float(f["Montant"].sum())) if "Montant" in f.columns else "—")
-k3.metric("Payé",         _fmt_money_us(float(f["Payé"].sum()))     if "Payé" in f.columns else "—")
-k4.metric("Reste",        _fmt_money_us(float(f["Reste"].sum()))    if "Reste" in f.columns else "—")
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.divider()
-
-# Graphique par Mois (MM) — agrège toutes années confondues
-st.subheader("📈 Nombre de dossiers par mois (MM)")
-if "Mois" in f.columns:
-    counts = (
-        f.dropna(subset=["Mois"])
-         .groupby("Mois")
-         .size()
-         .rename("Dossiers")
-         .reset_index()
-         .sort_values("Mois")
-    )
-    st.bar_chart(counts.set_index("Mois"))
-else:
-    st.info("Aucune colonne 'Mois' exploitable.")
-
-# Tableau (Année/Mois non affichées)
-st.subheader("📋 Données")
-cols_show = [c for c in ["ID_Client","Nom","Telephone","Email","Date","Visa","Statut","Montant","Payé","Reste"] if c in f.columns]
-table = f.copy()
-for col in ["Montant","Payé","Reste"]:
-    if col in table.columns:
-        table[col] = table[col].map(_fmt_money_us)
-if "Date" in table.columns:
-    table["Date"] = table["Date"].astype(str)  # YYYY-MM-DD
-
-st.dataframe(
-    table[cols_show].sort_values(by=[c for c in ["Date","Visa","Statut"] if c in table.columns], na_position="last"),
-    use_container_width=True
-)
+        # ---- Supprimer ----
+        if action == "Supprimer":
+            st.markdown("### 🗑️ Supprimer un client")
+            if original_df.empty:
+                st.info("Aucun client à supprimer.")
+            else:
+                options = [(idx, _row_label(idx, row)) for idx, row in original_df.iterrows()]
+                sel_label = st.selectbox("Sélection", [lab for _, lab in options])
+                sel_idx = [i for i, lab in options if lab == sel_label][0]
+                st.error("⚠️ Cette action est irréversible.")
+                confirm = st.checkbox("Je confirme la suppression définitive de ce client.")
+                if st.button("Supprimer", type="primary", disabled=not confirm):
+                    try:
+                        original_df = original_df.drop(index=sel_idx).reset_index(drop=True)
+                        updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df)
+                        st.session_state["excel_bytes_current"] = updated_bytes
+                        if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
+                            original_path = source_id.split("path:", 1)[1]
+                            try:
+                                Path(original_path).write_bytes(updated_bytes)
+                                st.success(f"Client supprimé et écrit dans : {original_path}")
+                            except Exception as e:
+                                st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
+                        st.success("✅ Client supprimé.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erreur à l’écriture : {e}")
 
