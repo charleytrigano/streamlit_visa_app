@@ -6,8 +6,7 @@ import pandas as pd
 st.set_page_config(page_title="📊 Visas — Simplifié", layout="wide")
 st.title("📊 Visas — Tableau simplifié")
 
-# ---------- Utilitaires internes (sans module externe) ----------
-
+# ---------------- Utils ----------------
 def _first_col(df: pd.DataFrame, candidates) -> str | None:
     for c in candidates:
         if c in df.columns:
@@ -21,7 +20,6 @@ def _to_date(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce")
 
 def _parse_paiements(x):
-    """Accepte liste ou chaîne JSON; renvoie liste de dicts ou nombres."""
     if isinstance(x, list):
         return x
     if pd.isna(x):
@@ -42,10 +40,9 @@ def _sum_payments(pay_list) -> float:
     return total
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Uniformise les colonnes clés: Date, Année, Mois, Visa, Statut, Montant, Payé, Reste."""
+    """Uniformise Date/Année/Mois/Visa/Statut/Montant/Payé/Reste si c'est un tableau 'dossiers'."""
     df = df.copy()
 
-    # --- Date / Année / Mois
     if "Date" in df.columns:
         df["Date"] = _to_date(df["Date"])
     else:
@@ -53,16 +50,12 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     if "Année" not in df.columns:
         df["Année"] = df["Date"].dt.year
-
     if "Mois" not in df.columns:
-        # format AAAA-MM pour un groupby simple
         df["Mois"] = df["Date"].dt.to_period("M").astype(str)
 
-    # --- Type de visa
     visa_col = _first_col(df, ["Visa", "Categories", "Catégorie", "TypeVisa"])
     df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
 
-    # --- Statut (optionnel)
     if "__Statut règlement__" in df.columns and "Statut" not in df.columns:
         df = df.rename(columns={"__Statut règlement__": "Statut"})
     if "Statut" not in df.columns:
@@ -70,27 +63,22 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Statut"] = df["Statut"].astype(str).fillna("Inconnu")
 
-    # --- Montant / Payé / Reste
-    # Montant
     if "Montant" in df.columns:
         df["Montant"] = _to_num(df["Montant"])
     else:
         src_montant = _first_col(df, ["Honoraires", "Total", "Amount"])
         df["Montant"] = _to_num(df[src_montant]) if src_montant else 0.0
 
-    # Paiements (JSON ou liste) -> TotalAcomptes
     if "Paiements" in df.columns:
         parsed = df["Paiements"].apply(_parse_paiements)
         df["TotalAcomptes"] = parsed.apply(_sum_payments)
 
-    # Payé
     if "Payé" in df.columns:
         df["Payé"] = _to_num(df["Payé"])
     else:
         src_paye = _first_col(df, ["TotalAcomptes", "Acomptes", "Paye", "Paid"])
         df["Payé"] = _to_num(df[src_paye]) if src_paye else 0.0
 
-    # Reste
     if "Reste" in df.columns:
         df["Reste"] = _to_num(df["Reste"])
     else:
@@ -102,42 +90,71 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def looks_like_reference(df: pd.DataFrame) -> bool:
+    """
+    Détecte un onglet de référence (ex: feuille 'Visa' avec colonnes
+    'Categories', 'Visa', 'Definition') qui n'est pas une liste de dossiers.
+    """
+    cols = set(map(str.lower, df.columns.astype(str)))
+    # Présence d'un trio typique de dictionnaire et absence de colonnes montants
+    has_ref = {"categories", "visa"} <= cols
+    no_money = not ({"montant", "honoraires", "acomptes", "payé", "reste", "solde"} & cols)
+    return has_ref and no_money
+
 @st.cache_data
-def load_excel_smart(xlsx_obj) -> pd.DataFrame:
-    """Choisit automatiquement la feuille: 'Données normalisées' > 'Clients' > 1ère."""
+def read_excel(xlsx_obj):
     xls = pd.ExcelFile(xlsx_obj)
-    names = xls.sheet_names
-    target = "Données normalisées" if "Données normalisées" in names else (
-        "Clients" if "Clients" in names else names[0]
-    )
-    base = pd.read_excel(xls, sheet_name=target)
-    return normalize_dataframe(base)
+    return xls.sheet_names, xls  # retourne aussi l'ExcelFile pour charger la feuille choisie
 
-# ---------- Source de données (très simple) ----------
+@st.cache_data
+def load_sheet(xls: pd.ExcelFile, sheet_name: str, normalize: bool):
+    df = pd.read_excel(xls, sheet_name=sheet_name)
+    if normalize and not looks_like_reference(df):
+        df = normalize_dataframe(df)
+    return df
 
+# ---------------- Source & Sélection feuille ----------------
 DEFAULT_CANDIDATES = [
-    "/mnt/data/Visa_Clients_20251001-114844.xlsx",  # fourni
-    "/mnt/data/visa_analytics_datecol.xlsx",        # fourni
+    "/mnt/data/Visa_Clients_20251001-114844.xlsx",
+    "/mnt/data/visa_analytics_datecol.xlsx",
 ]
 
 st.sidebar.header("Données")
-mode = st.sidebar.radio("Source", ["Fichier par défaut", "Importer un Excel"])
+source_mode = st.sidebar.radio("Source", ["Fichier par défaut", "Importer un Excel"])
 
-if mode == "Fichier par défaut":
+if source_mode == "Fichier par défaut":
     path = next((p for p in DEFAULT_CANDIDATES if Path(p).exists()), None)
     if not path:
-        st.sidebar.error("Aucun fichier par défaut trouvé. Merci d'en importer un.")
+        st.sidebar.error("Aucun fichier par défaut trouvé. Importez un fichier.")
         st.stop()
     st.sidebar.success(f"Fichier: {path}")
-    df = load_excel_smart(path)
+    sheet_names, xls = read_excel(path)
 else:
-    up = st.sidebar.file_uploader("Dépose un fichier Excel (.xlsx, .xls)", type=["xlsx", "xls"])
+    up = st.sidebar.file_uploader("Dépose un Excel (.xlsx, .xls)", type=["xlsx", "xls"])
     if not up:
         st.info("Importe un fichier pour commencer.")
         st.stop()
-    df = load_excel_smart(up)
+    sheet_names, xls = read_excel(up)
 
-# ---------- Filtres légers ----------
+# Choix explicite de la feuille (oui, y compris 'Visa')
+preferred_order = ["Données normalisées", "Clients", "Visa"]
+default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
+sheet_choice = st.sidebar.selectbox("Feuille", sheet_names, index=sheet_names.index(default_sheet))
+
+# Charger. Si la feuille ressemble à un dictionnaire de références, on **normalize=False**
+df_raw = load_sheet(xls, sheet_choice, normalize=not looks_like_reference(pd.read_excel(xls, sheet_name=sheet_choice, nrows=5)))
+is_ref = looks_like_reference(df_raw)
+
+if is_ref:
+    st.info("ℹ️ Cette feuille ressemble à une **table de référence** (ex: correspondance Catégories ↔ Visa). "
+            "Elle s'affiche telle quelle. Pour analyser des dossiers, sélectionnez l'onglet **Clients** ou "
+            "**Données normalisées** dans la sidebar.")
+    st.dataframe(df_raw, use_container_width=True)
+    st.stop()
+
+df = df_raw  # déjà normalisé
+
+# ---------------- Filtres ----------------
 with st.container():
     c1, c2, c3 = st.columns(3)
     years = sorted([int(y) for y in df["Année"].dropna().unique()]) if "Année" in df else []
@@ -156,7 +173,7 @@ if visa_sel:
 if stat_sel:
     f = f[f["Statut"].astype(str).isin(stat_sel)]
 
-# ---------- KPIs minimales ----------
+# ---------------- KPIs ----------------
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Dossiers", f"{len(f)}")
 k2.metric("Montant total", f"{f['Montant'].sum():,.2f} €")
@@ -165,7 +182,7 @@ k4.metric("Reste", f"{f['Reste'].sum():,.2f} €")
 
 st.divider()
 
-# ---------- Graphe simple : nombre par mois ----------
+# ---------------- Graphique ----------------
 st.subheader("📈 Nombre de dossiers par mois")
 if "Mois" in f.columns:
     counts = (
@@ -180,12 +197,13 @@ if "Mois" in f.columns:
 else:
     st.info("Aucune colonne 'Mois' exploitable.")
 
-# ---------- Tableau détaillé (toggle) ----------
+# ---------------- Tableau ----------------
 st.subheader("📋 Données")
+cols_show = [c for c in ["Date","Année","Mois","Visa","Statut","Montant","Payé","Reste"] if c in f.columns]
 st.dataframe(
-    f[["Date","Année","Mois","Visa","Statut","Montant","Payé","Reste"]]
-      .sort_values(by=["Date","Visa","Statut"], na_position="last"),
+    f[cols_show].sort_values(by=[c for c in ["Date","Visa","Statut"] if c in f.columns], na_position="last"),
     use_container_width=True
 )
 
-st.caption("Astuce : le programme détecte automatiquement les colonnes (Honoraires/Acomptes/Solde ou Montant/Payé/Reste) et lit aussi les Paiements JSON si présents.")
+st.caption("Astuce : choisissez l’onglet dans la sidebar. Si vous sélectionnez 'Visa' (table de référence), le programme l’affiche tel quel.")
+
