@@ -1,4 +1,4 @@
-# app.py — Version finale avec routage par vues, filtres avancés et structure corrigée (Corrigé 30)
+# app.py — Version finale avec routage par vues, filtres avancés et structure corrigée (Corrigé 31)
 import json
 from datetime import datetime, date
 import pandas as pd
@@ -70,13 +70,21 @@ def initialize_session_state(all_sheets):
                 default_val = pd.NaT if c.startswith("Date") else (0.0 if c == "Honoraires" else ([] if c == "Paiements" else ""))
                 clients_df_loaded[c] = default_val
 
-    # Finalisation des types de colonnes (Dates)
+    # 💥 CORRECTION MAJEURE: FORCER TOUTES LES COLONNES DE DATE EN DATETIME
     date_cols = [c for c in base_cols_clients if c.startswith("Date")]
     for col in date_cols:
+        # L'utilisation de to_datetime avec errors='coerce' est la méthode la plus robuste.
         clients_df_loaded[col] = pd.to_datetime(clients_df_loaded.get(col), errors='coerce')
-            
+        
+    # Remplacer les NaT (Not a Time) par None pour que les opérations suivantes fonctionnent mieux
+    # et pour préparer un type object si on veut ajouter des colonnes qui ne sont pas des dates.
+    # Pour 'DateCreation', il est plus sûr d'utiliser une date (ex: aujourd'hui) si elle manque.
+    clients_df_loaded['DateCreation'] = clients_df_loaded['DateCreation'].fillna(pd.Timestamp(date.today()))
+        
     st.session_state.clients_df = compute_finances(clients_df_loaded.copy())
+    # S'assurer que 'Paiements' est de type object pour contenir des listes
     st.session_state.clients_df = st.session_state.clients_df.astype({"Paiements": object})
+
 
     # ------------------- DONNÉES VISA -------------------
     visa_df_loaded = all_sheets.get("Visa")
@@ -104,8 +112,10 @@ def initialize_session_state(all_sheets):
 def get_date_for_input(col_name, row):
     """Fonction utilitaire pour formatter les dates pour les date_input de Streamlit."""
     dt = row.get(col_name)
+    # Assurer que dt est bien un objet datetime/Timestamp ou date avant de tenter .date()
     if pd.notna(dt) and isinstance(dt, (datetime, date, pd.Timestamp)):
         return dt.date()
+    # Si la colonne n'est pas une date valide (ex: NaT), retourner la date d'aujourd'hui
     return date.today()
 
 # --- 2. LOGIQUE PRINCIPALE DE L'APPLICATION ---
@@ -232,7 +242,7 @@ def render_client_form(df, sel_row, action, original_index=None):
         elif not isinstance(payments_list, list):
              payments_list = []
 
-        # --- DÉBUT CORRECTION DE L'ERREUR VALUERROR SUR TotalAcomptes DANS LA VUE D'AJOUT ---
+        # CORRECTION DE L'ERREUR VALUERROR SUR TotalAcomptes DANS LA VUE D'AJOUT
         total_payed_val = sel_row.get('TotalAcomptes', 0.0)
         try:
             # S'assurer que même si c'est une chaîne vide ("") provenant du pd.Series, on utilise 0.0
@@ -244,7 +254,6 @@ def render_client_form(df, sel_row, action, original_index=None):
             total_payed_safe = 0.0
             
         st.write("Paiements (Total encaissé: " + f"{total_payed_safe:.2f} €" + ")")
-        # --- FIN CORRECTION ---
         
         for i, p in enumerate(payments_list):
             p_date = p.get('date', 'N/A')
@@ -318,6 +327,9 @@ def render_client_form(df, sel_row, action, original_index=None):
 def update_client_data(df, sel_row, original_index, form_data, action):
     """Logique de mise à jour/ajout/suppression pour les clients."""
     
+    # Définition des colonnes de date pour le casting de type
+    date_cols_to_convert = ["DateCreation", "DateFacture", "DateEnvoi", "DateRetour", "DateAnnulation"]
+    
     if action == "delete":
         st.session_state.clients_df = st.session_state.clients_df.drop(original_index, axis=0)
         st.session_state.clients_df = compute_finances(st.session_state.clients_df)
@@ -334,6 +346,10 @@ def update_client_data(df, sel_row, original_index, form_data, action):
     for key, value in form_data.items():
         if not key.startswith("Paiements_New"):
             updated[key] = value
+
+    # Si c'est un ajout, initialiser DateCreation si elle n'est pas déjà présente
+    if action == "add" and "DateCreation" not in updated or pd.isna(updated.get("DateCreation")):
+        updated["DateCreation"] = date.today()
 
     # Gestion des paiements
     current_payments_list = updated.get("Paiements", [])
@@ -360,8 +376,18 @@ def update_client_data(df, sel_row, original_index, form_data, action):
         st.success("Modifications client enregistrées.")
     elif action == "add":
         new_row_df = pd.DataFrame([updated])
+        # 💥 CASTING OBLIGATOIRE des colonnes de date dans la nouvelle ligne
+        for col in date_cols_to_convert:
+            if col in new_row_df.columns:
+                 new_row_df[col] = pd.to_datetime(new_row_df[col], errors='coerce')
+        
         st.session_state.clients_df = pd.concat([st.session_state.clients_df, new_row_df], ignore_index=True)
         st.success("Nouveau dossier client ajouté.")
+
+    # 💥 RE-CASTING COMPLET APRÈS CONCAT pour sécuriser le type datetime pour les filtres
+    for col in date_cols_to_convert:
+        if col in st.session_state.clients_df.columns:
+            st.session_state.clients_df[col] = pd.to_datetime(st.session_state.clients_df[col], errors='coerce')
 
     # Recalculer les finances et FORCER LE RETOUR À LA VUE LISTE
     st.session_state.clients_df = compute_finances(st.session_state.clients_df)
@@ -521,6 +547,8 @@ if page == "Clients":
             # 1. Année/Mois (basé sur la DateCreation)
             # Extrait les années et mois uniques pour les options
             df_temp = df.copy() # Travailler sur une copie pour les colonnes temporaires
+            
+            # 💥 Le .dt est maintenant sûr car df['DateCreation'] est de type datetime
             df_temp['Year'] = df_temp['DateCreation'].dt.year.fillna(0).astype(int)
             df_temp['Month'] = df_temp['DateCreation'].dt.month.fillna(0).astype(int)
             
