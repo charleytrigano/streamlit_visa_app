@@ -1,5 +1,6 @@
-# app.py — Version finale avec routage par vues, filtres avancés et structure corrigée (Corrigé 31)
+# app.py — Version finale avec sauvegarde locale explicite (Corrigé 32)
 import json
+import os # Ajout pour les opérations de fichier
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
@@ -43,14 +44,12 @@ def initialize_session_state(all_sheets):
     clients_df_loaded = all_sheets.get("Clients")
     
     if clients_df_loaded is None:
-        # Recherche robuste pour "Clients"
         clients_key = next((k for k in all_sheets.keys() if "client" in str(k).lower()), None)
         if clients_key:
             clients_df_loaded = all_sheets.get(clients_key)
             if clients_df_loaded is not None:
                 st.info(f"Onglet 'Clients' non trouvé. Utilisation de l'onglet '{clients_key}'.")
 
-    # Colonnes de base pour les clients
     base_cols_clients = [
         "DossierID", "DateCreation", "Nom", "TypeVisa", "Telephone", "Email",
         "DateFacture", "Honoraires", "Solde", "DateEnvoi", "Dossier envoyé",
@@ -66,25 +65,19 @@ def initialize_session_state(all_sheets):
         clients_df_loaded = harmonize_clients_df(clients_df_loaded) 
         for c in base_cols_clients:
             if c not in clients_df_loaded.columns:
-                 # Initialisation par défaut basée sur le type attendu
                 default_val = pd.NaT if c.startswith("Date") else (0.0 if c == "Honoraires" else ([] if c == "Paiements" else ""))
                 clients_df_loaded[c] = default_val
 
-    # 💥 CORRECTION MAJEURE: FORCER TOUTES LES COLONNES DE DATE EN DATETIME
+    # FORCER TOUTES LES COLONNES DE DATE EN DATETIME
     date_cols = [c for c in base_cols_clients if c.startswith("Date")]
     for col in date_cols:
-        # L'utilisation de to_datetime avec errors='coerce' est la méthode la plus robuste.
         clients_df_loaded[col] = pd.to_datetime(clients_df_loaded.get(col), errors='coerce')
         
-    # Remplacer les NaT (Not a Time) par None pour que les opérations suivantes fonctionnent mieux
-    # et pour préparer un type object si on veut ajouter des colonnes qui ne sont pas des dates.
-    # Pour 'DateCreation', il est plus sûr d'utiliser une date (ex: aujourd'hui) si elle manque.
+    # S'assurer que 'DateCreation' est une date valide pour les filtres
     clients_df_loaded['DateCreation'] = clients_df_loaded['DateCreation'].fillna(pd.Timestamp(date.today()))
         
     st.session_state.clients_df = compute_finances(clients_df_loaded.copy())
-    # S'assurer que 'Paiements' est de type object pour contenir des listes
     st.session_state.clients_df = st.session_state.clients_df.astype({"Paiements": object})
-
 
     # ------------------- DONNÉES VISA -------------------
     visa_df_loaded = all_sheets.get("Visa")
@@ -96,15 +89,12 @@ def initialize_session_state(all_sheets):
             st.warning("Onglet Visa introuvable ou illisible. Création d'un DataFrame Visa vide.")
         st.session_state.visa_df = pd.DataFrame(columns=base_cols_visa)
     else:
-        # Nettoyage de colonnes pour Visa (norm_cols est déjà dans load_all_sheets)
         visa_df_loaded = visa_df_loaded.rename(columns={c:c for c in visa_df_loaded.columns if c in base_cols_visa})
-        # S'assurer que les colonnes existent
         for col in base_cols_visa:
             if col not in visa_df_loaded.columns:
                 visa_df_loaded[col] = ""
         st.session_state.visa_df = visa_df_loaded[base_cols_visa].copy()
 
-    # Initialisation de l'index pour le formulaire (utiliser un index propre)
     if not st.session_state.visa_df.index.name:
         st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
 
@@ -112,11 +102,40 @@ def initialize_session_state(all_sheets):
 def get_date_for_input(col_name, row):
     """Fonction utilitaire pour formatter les dates pour les date_input de Streamlit."""
     dt = row.get(col_name)
-    # Assurer que dt est bien un objet datetime/Timestamp ou date avant de tenter .date()
     if pd.notna(dt) and isinstance(dt, (datetime, date, pd.Timestamp)):
         return dt.date()
-    # Si la colonne n'est pas une date valide (ex: NaT), retourner la date d'aujourd'hui
     return date.today()
+    
+def get_export_data():
+    """Prépare les DataFrames pour l'exportation et la sauvegarde."""
+    clients_df_export = st.session_state.clients_df.copy()
+    # Sérialiser la colonne 'Paiements' en JSON pour l'enregistrement Excel
+    clients_df_export["Paiements"] = clients_df_export["Paiements"].apply(lambda x: json.dumps(x) if isinstance(x, list) else x)
+    
+    all_sheets_export = {
+        "Clients": clients_df_export,
+        "Visa": st.session_state.visa_df
+    }
+    return all_sheets_export
+
+def save_to_local_path(all_sheets_export, path):
+    """Écrit le fichier XLSX à l'emplacement local spécifié."""
+    if not path:
+        return False, "Le chemin de sauvegarde local n'est pas spécifié."
+        
+    try:
+        # Assurez-vous que le répertoire existe
+        dir_name = os.path.dirname(path)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name)
+            
+        xls_bytes = to_excel_bytes_multi(all_sheets_export)
+        with open(path, "wb") as f:
+            f.write(xls_bytes)
+        
+        return True, f"Fichier sauvegardé avec succès à : **{path}**"
+    except Exception as e:
+        return False, f"Erreur d'écriture locale. Vérifiez le chemin et les permissions : {e}"
 
 # --- 2. LOGIQUE PRINCIPALE DE L'APPLICATION ---
 
@@ -127,8 +146,23 @@ with st.sidebar:
     data_path = st.text_input("Ou chemin local vers le .xlsx (optionnel)") 
     st.markdown("---")
     st.subheader("Sauvegarde")
-    save_mode = st.selectbox("Mode de sauvegarde", ["Download (toujours disponible)", "Save to local path (serveur/PC)", "Google Drive (secrets req.)", "OneDrive (secrets req.)"])
-    save_path = st.text_input("Chemin local pour sauvegarde (si Save to local path)", value="data_sauvegardee.xlsx")
+    save_mode = st.selectbox("Mode de sauvegarde", ["Download (toujours disponible)", "Save to local path (serveur/PC)"])
+    
+    # 💥 CHEMIN LOCAL PAR DÉFAUT + INFO
+    default_save_path = os.path.join(os.getcwd(), "data_sauvegardee.xlsx")
+    save_path = st.text_input("Chemin local (ex: C:\\Users\\...\\data.xlsx)", value=default_save_path)
+    
+    # 💥 BOUTON DE SAUVEGARDE LOCALE EXPLICITE
+    if save_mode == "Save to local path (serveur/PC)":
+        if st.button("💾 SAUVEGARDER MAINTENANT (Local)"):
+            all_sheets_export = get_export_data()
+            success, message = save_to_local_path(all_sheets_export, save_path)
+            
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+
     st.markdown("---")
     st.info("Navigation : utilisez le menu en bas pour basculer entre Clients et Visa")
 
@@ -155,7 +189,6 @@ if "current_view" not in st.session_state:
 def set_view(view_name):
     """Callback pour changer la vue et relancer l'application."""
     st.session_state.current_view = view_name
-    # Optionnel: Réinitialiser l'index de sélection si on revient à la liste
     if view_name in ["clients_list", "visa_list"]:
         st.session_state.pop("client_sel_idx", None)
         st.session_state.pop("visa_sel_idx", None)
@@ -167,7 +200,7 @@ page = st.selectbox("Page", ["Clients", "Visa"], index=0,
                     on_change=lambda: set_view("clients_list" if st.session_state.main_page_select == "Clients" else "visa_list"))
 
 # ----------------------------------------------------------------------
-# --- 3. DEFINITION DES FORMULAIRES (CRUD) - DÉPLACÉ EN HAUT DU RENDU ---
+# --- 3. DEFINITION DES FORMULAIRES (CRUD) ---
 # ----------------------------------------------------------------------
 
 def render_client_form(df, sel_row, action, original_index=None):
@@ -176,41 +209,31 @@ def render_client_form(df, sel_row, action, original_index=None):
     is_add = (action == "add")
     button_label = "Ajouter le dossier" if is_add else "Enregistrer les modifications"
     
-    # 1. CLÉ DU FORMULAIRE : Unique par action et index
     unique_form_key = f"{action}_{original_index}" if action == 'update' and original_index is not None else f"{action}_new"
 
     with st.form(f"client_form_{unique_form_key}"):
         
-        # Logique de sécurité pour Honoraires
         honoraires_val = sel_row.get("Honoraires", 0.0)
-        # CORRECTION DE L'ERREUR float("")
         if honoraires_val == "" or pd.isna(honoraires_val):
             honoraires_default = 0.0
         else:
             honoraires_default = float(honoraires_val)
 
-        # Corps du formulaire CLIENTS
         cols1, cols2 = st.columns(2)
         with cols1:
-            # Clés explicites pour chaque widget
             dossier_id = st.text_input("DossierID", value=sel_row.get("DossierID", ""), disabled=not is_add, key=f"dossier_id_{unique_form_key}")
             nom = st.text_input("Nom", value=sel_row.get("Nom", ""), key=f"nom_{unique_form_key}")
             typevisa = st.text_input("TypeVisa", value=sel_row.get("TypeVisa", ""), key=f"typevisa_{unique_form_key}")
             email = st.text_input("Email", value=sel_row.get("Email", ""), key=f"email_{unique_form_key}")
         with cols2:
-            # Clés explicites pour chaque widget
             telephone = st.text_input("Telephone", value=sel_row.get("Telephone", ""), key=f"telephone_{unique_form_key}")
-            
-            # LIGNE CORRIGÉE (Honoraires)
             honoraires = st.number_input("Honoraires", value=honoraires_default, format="%.2f", key=f"honoraires_{unique_form_key}")
-            
             notes = st.text_area("Notes", value=sel_row.get("Notes", ""), key=f"notes_{unique_form_key}")
         
         st.markdown("---")
         st.write("Statuts / dates")
         st_col1, st_col2, st_col3 = st.columns(3)
         
-        # Récupération des valeurs booléennes
         envoye = bool(sel_row.get("Dossier envoyé", False))
         refuse = bool(sel_row.get("Dossier refusé", False))
         approuve = bool(sel_row.get("Dossier approuvé", False))
@@ -218,22 +241,18 @@ def render_client_form(df, sel_row, action, original_index=None):
         rfe_val = bool(sel_row.get("RFE", False))
         
         with st_col1:
-            # Clés explicites pour chaque widget
             dossier_envoye = st.checkbox("Dossier envoyé", value=envoye, key=f"envoye_{unique_form_key}")
             dossier_refuse = st.checkbox("Dossier refusé", value=refuse, key=f"refuse_{unique_form_key}")
         with st_col2:
-            # Clés explicites pour chaque widget
             dossier_approuve = st.checkbox("Dossier approuvé", value=approuve, key=f"approuve_{unique_form_key}")
             dossier_annule = st.checkbox("DossierAnnule (annulé)", value=annule, key=f"annule_{unique_form_key}")
         with st_col3:
-            # Clés explicites pour chaque widget
             rfe = st.checkbox("RFE (doit être combiné)", value=rfe_val, key=f"rfe_{unique_form_key}")
             date_envoi = st.date_input("DateEnvoi", value=get_date_for_input("DateEnvoi", sel_row), key=f"date_envoi_{unique_form_key}")
 
         st.markdown("---")
         
         payments_list = sel_row.get("Paiements", [])
-        # S'assurer que payments_list est une liste propre (au cas où ce serait un string/NaN)
         if isinstance(payments_list, str):
             try:
                 payments_list = json.loads(payments_list) if payments_list and pd.notna(payments_list) else []
@@ -242,10 +261,8 @@ def render_client_form(df, sel_row, action, original_index=None):
         elif not isinstance(payments_list, list):
              payments_list = []
 
-        # CORRECTION DE L'ERREUR VALUERROR SUR TotalAcomptes DANS LA VUE D'AJOUT
         total_payed_val = sel_row.get('TotalAcomptes', 0.0)
         try:
-            # S'assurer que même si c'est une chaîne vide ("") provenant du pd.Series, on utilise 0.0
             if pd.isna(total_payed_val) or total_payed_val == "":
                 total_payed_safe = 0.0
             else:
@@ -264,7 +281,6 @@ def render_client_form(df, sel_row, action, original_index=None):
         st.write("Ajouter un nouveau paiement")
         col_pay1, col_pay2 = st.columns(2)
         
-        # 2. CLÉS DE WIDGETS DE PAIEMENT : Utilisation de la clé unique du formulaire
         pay_date_key = f"pay_date_{unique_form_key}"
         pay_amount_key = f"pay_amount_{unique_form_key}"
         
@@ -274,9 +290,7 @@ def render_client_form(df, sel_row, action, original_index=None):
             new_pay_amount = st.number_input("Montant", value=0.0, min_value=0.0, format="%.2f", key=pay_amount_key)
 
 
-        # Boutons d'action
         col_buttons = st.columns(3)
-        # Le bouton est bien là, et sera désormais atteint
         submitted = col_buttons[0].form_submit_button(button_label) 
         
         delete_button = None
@@ -285,7 +299,6 @@ def render_client_form(df, sel_row, action, original_index=None):
 
         if submitted:
             
-            # Récupération des valeurs via session_state après soumission
             final_dossier_id = st.session_state.get(f"dossier_id_{unique_form_key}")
             final_nom = st.session_state.get(f"nom_{unique_form_key}")
             final_typevisa = st.session_state.get(f"typevisa_{unique_form_key}")
@@ -304,7 +317,6 @@ def render_client_form(df, sel_row, action, original_index=None):
             final_pay_amount = st.session_state.get(pay_amount_key, 0.0)
             final_pay_date = st.session_state.get(pay_date_key, date.today())
             
-            # Utiliser les valeurs de la ligne si la récupération par session state échoue (seulement pour les champs qui existaient)
             final_dossier_id = final_dossier_id if final_dossier_id is not None else sel_row.get("DossierID", "")
 
             if not final_dossier_id and is_add:
@@ -327,31 +339,26 @@ def render_client_form(df, sel_row, action, original_index=None):
 def update_client_data(df, sel_row, original_index, form_data, action):
     """Logique de mise à jour/ajout/suppression pour les clients."""
     
-    # Définition des colonnes de date pour le casting de type
     date_cols_to_convert = ["DateCreation", "DateFacture", "DateEnvoi", "DateRetour", "DateAnnulation"]
     
     if action == "delete":
         st.session_state.clients_df = st.session_state.clients_df.drop(original_index, axis=0)
         st.session_state.clients_df = compute_finances(st.session_state.clients_df)
-        # Réinitialiser la vue et l'index de sélection
         st.session_state.client_sel_idx = 0 
         set_view("clients_list") 
         st.success("Dossier client supprimé.")
         st.rerun()
         return 
 
-    # Préparation des données mises à jour
     updated = sel_row.copy()
     
     for key, value in form_data.items():
         if not key.startswith("Paiements_New"):
             updated[key] = value
 
-    # Si c'est un ajout, initialiser DateCreation si elle n'est pas déjà présente
     if action == "add" and "DateCreation" not in updated or pd.isna(updated.get("DateCreation")):
         updated["DateCreation"] = date.today()
 
-    # Gestion des paiements
     current_payments_list = updated.get("Paiements", [])
     if isinstance(current_payments_list, str): 
         current_payments_list = []
@@ -364,19 +371,16 @@ def update_client_data(df, sel_row, original_index, form_data, action):
 
     updated["Paiements"] = current_payments_list.copy()
     
-    # Validation
     ok, msg = validate_rfe_row(updated)
     if not ok:
         st.error(msg)
         return
 
-    # Enregistrement
     if action == "update":
         st.session_state.clients_df.loc[original_index, updated.index] = updated.astype(object)
         st.success("Modifications client enregistrées.")
     elif action == "add":
         new_row_df = pd.DataFrame([updated])
-        # 💥 CASTING OBLIGATOIRE des colonnes de date dans la nouvelle ligne
         for col in date_cols_to_convert:
             if col in new_row_df.columns:
                  new_row_df[col] = pd.to_datetime(new_row_df[col], errors='coerce')
@@ -384,14 +388,12 @@ def update_client_data(df, sel_row, original_index, form_data, action):
         st.session_state.clients_df = pd.concat([st.session_state.clients_df, new_row_df], ignore_index=True)
         st.success("Nouveau dossier client ajouté.")
 
-    # 💥 RE-CASTING COMPLET APRÈS CONCAT pour sécuriser le type datetime pour les filtres
     for col in date_cols_to_convert:
         if col in st.session_state.clients_df.columns:
             st.session_state.clients_df[col] = pd.to_datetime(st.session_state.clients_df[col], errors='coerce')
 
-    # Recalculer les finances et FORCER LE RETOUR À LA VUE LISTE
     st.session_state.clients_df = compute_finances(st.session_state.clients_df)
-    set_view("clients_list") # NEW REDIRECTION
+    set_view("clients_list") 
     st.rerun()
 
 
@@ -401,17 +403,14 @@ def render_visa_form(df, sel_row, action, original_index=None):
     is_add = (action == "add")
     button_label = "Ajouter le type" if is_add else "Enregistrer les modifications"
 
-    # 1. CLÉ DU FORMULAIRE : Unique par action et index
     unique_form_key = f"{action}_{original_index}" if action == 'update' and original_index is not None else f"{action}_new"
 
     with st.form(f"visa_form_{unique_form_key}"):
         
-        # Corps du formulaire VISAS - 💥 Clés explicites
         visa_code = st.text_input("Code Visa", value=sel_row.get("Visa", ""), disabled=not is_add, key=f"visa_code_{unique_form_key}")
         category = st.text_input("Catégorie", value=sel_row.get("Categories", ""), key=f"category_{unique_form_key}")
         definition = st.text_area("Définition", value=sel_row.get("Definition", ""), key=f"definition_{unique_form_key}")
 
-        # Boutons d'action
         col_buttons = st.columns(3)
         submitted = col_buttons[0].form_submit_button(button_label)
         
@@ -421,7 +420,6 @@ def render_visa_form(df, sel_row, action, original_index=None):
 
         if submitted:
             
-            # Récupération des valeurs via session_state après soumission
             final_visa_code = st.session_state.get(f"visa_code_{unique_form_key}")
             final_category = st.session_state.get(f"category_{unique_form_key}")
             final_definition = st.session_state.get(f"definition_{unique_form_key}")
@@ -436,13 +434,11 @@ def render_visa_form(df, sel_row, action, original_index=None):
                  st.error(f"Le code Visa '{final_visa_code}' existe déjà. Veuillez modifier l'entrée existante.")
                  return
 
-            # Préparation des données
             updated = sel_row.copy()
             updated["Visa"] = final_visa_code
             updated["Categories"] = final_category
             updated["Definition"] = final_definition
             
-            # Enregistrement
             if action == "update":
                 st.session_state.visa_df.loc[original_index, :] = updated
                 st.success("Type de visa modifié.")
@@ -451,15 +447,14 @@ def render_visa_form(df, sel_row, action, original_index=None):
                 st.session_state.visa_df = pd.concat([st.session_state.visa_df, new_row_df], ignore_index=True)
                 st.success("Nouveau type de visa ajouté.")
             
-            set_view("visa_list") # NEW REDIRECTION
+            set_view("visa_list") 
             st.rerun()
         
         if not is_add and delete_button:
             st.session_state.visa_df = st.session_state.visa_df.drop(original_index, axis=0)
             st.session_state.visa_df = st.session_state.visa_df.reset_index(drop=True)
-            # Réinitialiser l'index
             st.session_state.visa_sel_idx = 0 
-            set_view("visa_list") # NEW REDIRECTION
+            set_view("visa_list") 
             st.success("Type de visa supprimé.")
             st.rerun()
             return 
@@ -477,7 +472,6 @@ if page == "Clients":
     # --- CLIENTS : VUE AJOUT (add) ---
     if current_view == "clients_add":
         st.subheader("Ajouter un nouveau dossier client")
-        # Créer une ligne vide pour l'ajout
         empty_row = pd.Series("", index=df.columns)
         empty_row["Paiements"] = [] 
         
@@ -489,20 +483,16 @@ if page == "Clients":
     # --- CLIENTS : VUE MODIFICATION (edit) ---
     elif current_view == "clients_edit":
         
-        # Récupérer les données filtrées si des filtres ont été appliqués avant l'édition
         filtered = st.session_state.get("clients_filtered_df", df.copy())
         max_idx = len(filtered) - 1
 
-        # Utilisation de l'index sélectionné avant le changement de vue
         final_safe_index_filtered = st.session_state.get("client_sel_idx", 0)
         
         if final_safe_index_filtered < 0 or final_safe_index_filtered > max_idx:
-             # Index invalide après une suppression, on revient à la liste
              set_view("clients_list")
              st.rerun()
 
         try:
-             # Accès aux données garanti
             sel_row_filtered = filtered.iloc[final_safe_index_filtered] 
             original_session_index = sel_row_filtered.name 
 
@@ -521,7 +511,6 @@ if page == "Clients":
     # --- CLIENTS : VUE LISTE (list) ---
     else: # current_view == "clients_list"
         
-        # KPI & ACTIONS
         total_dossiers = len(df)
         total_encaissé = df["TotalAcomptes"].sum()
         total_honoraires = df["Honoraires"].sum()
@@ -534,21 +523,20 @@ if page == "Clients":
         c4.metric("Solde total", f"{total_solde:,.2f} €")
         
         st.markdown("---")
-        st.button("➕ Ajouter un nouveau dossier", on_click=lambda: set_view("clients_add"))
+        
+        col_buttons_list = st.columns([1, 4])
+        with col_buttons_list[0]:
+             st.button("➕ Ajouter un nouveau dossier", on_click=lambda: set_view("clients_add"))
+
         st.markdown("---")
 
         # FILTRES MIS À JOUR
         with st.expander("Filtrer / Rechercher"):
             q = st.text_input("Recherche (nom / dossier / email)")
             
-            # --- NOUVEAUX FILTRES ---
             col_date, col_visa = st.columns(2)
             
-            # 1. Année/Mois (basé sur la DateCreation)
-            # Extrait les années et mois uniques pour les options
-            df_temp = df.copy() # Travailler sur une copie pour les colonnes temporaires
-            
-            # 💥 Le .dt est maintenant sûr car df['DateCreation'] est de type datetime
+            df_temp = df.copy() 
             df_temp['Year'] = df_temp['DateCreation'].dt.year.fillna(0).astype(int)
             df_temp['Month'] = df_temp['DateCreation'].dt.month.fillna(0).astype(int)
             
@@ -560,20 +548,15 @@ if page == "Clients":
                 selected_year = st.selectbox("Filtrer par Année de création", ["Toutes"] + [y for y in years if y > 0])
                 selected_month = st.selectbox("Filtrer par Mois de création", ["Tous"] + list(months.values()))
             
-            # 2. Type de Visa
             with col_visa:
                 visa_types = sorted(df_temp['TypeVisa'].dropna().unique().tolist())
                 selected_visa = st.multiselect("Filtrer par Type de Visa", visa_types)
                 
-            # 3. Statut (inchangé)
             status_filter = st.selectbox("Filtrer par Statut", ["Tous", "Envoyé", "Approuvé", "Refusé", "Annulé", "RFE"])
 
             st.markdown("---")
             st.subheader("Filtres financiers (€)")
             
-            # 4. Honoraires / Payé / Dû (LOGIQUE CORRIGÉE POUR st.slider)
-            
-            # Récupération des min/max sécurisée
             min_h = int(df['Honoraires'].min()) if not df['Honoraires'].empty and df['Honoraires'].min() is not np.nan else 0
             max_h = int(df['Honoraires'].max()) if not df['Honoraires'].empty and df['Honoraires'].max() is not np.nan else 0
             min_p = int(df['TotalAcomptes'].min()) if not df['TotalAcomptes'].empty and df['TotalAcomptes'].min() is not np.nan else 0
@@ -581,43 +564,28 @@ if page == "Clients":
             min_d = int(df['SoldeCalc'].min()) if not df['SoldeCalc'].empty and df['SoldeCalc'].min() is not np.nan else 0
             max_d = int(df['SoldeCalc'].max()) if not df['SoldeCalc'].empty and df['SoldeCalc'].max() is not np.nan else 0
             
-            # --- CORRECTION DU BUG st.slider ---
-            if min_h == max_h:
-                max_h = 1 if max_h == 0 else (max_h + 1)
-                
-            if min_p == max_p:
-                max_p = 1 if max_p == 0 else (max_p + 1)
-
-            if min_d == max_d:
-                max_d = 1 if max_d == 0 else (max_d + 1)
-            # -----------------------------------
-
-            # Calcul des valeurs par défaut pour les sliders
+            if min_h == max_h: max_h = 1 if max_h == 0 else (max_h + 1)
+            if min_p == max_p: max_p = 1 if max_p == 0 else (max_p + 1)
+            if min_d == max_d: max_d = 1 if max_d == 0 else (max_d + 1)
+            
             h_range_default = (min_h, max_h)
             p_range_default = (min_p, max_p)
             d_range_default = (min_d, max_d)
             
-            # Sécurité pour les cas extrêmes
             if min_h > max_h: h_range_default = (0, 0)
             if min_p > max_p: p_range_default = (0, 0)
             if min_d > max_d: d_range_default = (0, 0)
             
-            
             col_h, col_p, col_d = st.columns(3)
 
-            with col_h:
-                honoraires_range = st.slider("Honoraires (Total)", min_h, max_h, h_range_default)
-            with col_p:
-                paye_range = st.slider("Montant Payé", min_p, max_p, p_range_default)
-            with col_d:
-                du_range = st.slider("Montant Dû (Solde)", min_d, max_d, d_range_default)
-            # --- FIN NOUVEAUX FILTRES ---
+            with col_h: honoraires_range = st.slider("Honoraires (Total)", min_h, max_h, h_range_default)
+            with col_p: paye_range = st.slider("Montant Payé", min_p, max_p, p_range_default)
+            with col_d: du_range = st.slider("Montant Dû (Solde)", min_d, max_d, d_range_default)
 
 
         # --- LOGIQUE D'APPLICATION DES FILTRES ---
-        filtered = df_temp.copy() # Utiliser la copie temporaire avec Year/Month
+        filtered = df_temp.copy() 
         
-        # 1. Filtre Texte (inchangé)
         if q:
             mask = pd.Series(False, index=filtered.index)
             for c in ["DossierID", "Nom", "Email", "TypeVisa"]:
@@ -625,27 +593,19 @@ if page == "Clients":
                     mask = mask | filtered[c].astype(str).str.contains(q, case=False, na=False)
             filtered = filtered[mask]
         
-        # 2. Filtre Année
-        if selected_year != "Toutes":
-            filtered = filtered[filtered['Year'] == int(selected_year)]
+        if selected_year != "Toutes": filtered = filtered[filtered['Year'] == int(selected_year)]
             
-        # 3. Filtre Mois
         if selected_month != "Tous":
             month_num = [k for k, v in months.items() if v == selected_month][0]
             filtered = filtered[filtered['Month'] == month_num]
             
-        # 4. Filtre Type de Visa
-        if selected_visa:
-            filtered = filtered[filtered['TypeVisa'].isin(selected_visa)]
+        if selected_visa: filtered = filtered[filtered['TypeVisa'].isin(selected_visa)]
 
-        # 5. Filtre Statut (inchangé)
         if status_filter != "Tous":
             col_map = {"Envoyé": "Dossier envoyé", "Approuvé": "Dossier approuvé", "Refusé": "Dossier refusé", "Annulé": "DossierAnnule", "RFE": "RFE"}
             col_name = col_map.get(status_filter)
-            if col_name:
-                 filtered = filtered[filtered.get(col_name, False) == True]
+            if col_name: filtered = filtered[filtered.get(col_name, False) == True]
                  
-        # 6. Filtres Financiers
         filtered = filtered[
             (filtered['Honoraires'] >= honoraires_range[0]) & (filtered['Honoraires'] <= honoraires_range[1])
         ]
@@ -656,27 +616,18 @@ if page == "Clients":
             (filtered['SoldeCalc'] >= du_range[0]) & (filtered['SoldeCalc'] <= du_range[1])
         ]
         
-        # Suppression des colonnes temporaires
         filtered = filtered.drop(columns=['Year', 'Month'], errors='ignore')
 
-        # Affichage du DataFrame filtré
         st.dataframe(filtered.reset_index(drop=True).drop(columns=['Paiements', 'TotalAcomptes', 'SoldeCalc'], errors='ignore'), use_container_width=True)
-        st.session_state.clients_filtered_df = filtered.copy() # Stocker la liste filtrée pour la vue d'édition
+        st.session_state.clients_filtered_df = filtered.copy() 
 
-        # Sélection et modification
         if len(filtered) > 0: 
             max_idx = len(filtered) - 1
-            
-            # 1. INITIALISATION ET CONTRÔLE D'INDEX CRITIQUE
             current_index = st.session_state.get('client_sel_idx', 0)
             
-            # Fix index if out of bounds 
-            if current_index > max_idx or current_index < 0:
-                current_index = 0
-            
+            if current_index > max_idx or current_index < 0: current_index = 0
             final_safe_index = current_index
 
-            # 2. L'utilisateur choisit l'index affiché (Clé Statique)
             sel_idx_float = st.number_input(
                 "Index du dossier à modifier", 
                 min_value=0, 
@@ -687,14 +638,12 @@ if page == "Clients":
             
             sel_idx = int(sel_idx_float) 
             
-            # 3. Mettre à jour la session state
             if sel_idx != final_safe_index:
                 st.session_state.client_sel_idx = sel_idx
                 st.rerun() 
             else:
                  st.session_state.client_sel_idx = final_safe_index
 
-            # 4. Bouton pour passer à la vue d'édition
             st.button("✏️ Modifier le dossier sélectionné", on_click=lambda: set_view("clients_edit"))
             
         else:
@@ -706,7 +655,6 @@ elif page == "Visa":
     df = st.session_state.visa_df
     current_view = st.session_state.current_view
     
-    # --- VISA : VUE AJOUT (add) ---
     if current_view == "visa_add":
         st.subheader("Ajouter un nouveau type de visa")
         empty_row = pd.Series("", index=df.columns)
@@ -714,7 +662,6 @@ elif page == "Visa":
         st.markdown("---")
         st.button("↩️ Retour à la liste des visas", on_click=lambda: set_view("visa_list"))
         
-    # --- VISA : VUE MODIFICATION (edit) ---
     elif current_view == "visa_edit":
         
         max_idx = len(df) - 1
@@ -725,7 +672,6 @@ elif page == "Visa":
              st.rerun()
              
         try:
-            # Accès aux données garanti
             sel_row = df.iloc[final_safe_index]
             
             st.subheader(f"Modifier Visa: {sel_row.get('Visa', 'N/A')}")
@@ -740,7 +686,6 @@ elif page == "Visa":
             st.rerun()
             
 
-    # --- VISA : VUE LISTE (list) ---
     else: # current_view == "visa_list"
         
         st.dataframe(df, use_container_width=True)
@@ -750,17 +695,12 @@ elif page == "Visa":
         
         if len(df) > 0: 
             max_idx = len(df) - 1
-            
-            # 1. CONTRÔLE D'INDEX ET CORRECTION CRITIQUE
             current_index = st.session_state.get('visa_sel_idx', 0)
             
-            # Fix index if out of bounds
-            if current_index > max_idx or current_index < 0:
-                 current_index = 0
+            if current_index > max_idx or current_index < 0: current_index = 0
                  
             final_safe_index = current_index
             
-            # Clé statique pour éviter les problèmes de recréation de widget
             sel_idx_float = st.number_input(
                 "Index du visa à modifier", 
                 min_value=0, 
@@ -771,60 +711,44 @@ elif page == "Visa":
             
             sel_idx = int(sel_idx_float)
             
-            # 3. Mettre à jour la session state (si l'utilisateur a changé la valeur)
             if sel_idx != final_safe_index:
                 st.session_state.visa_sel_idx = sel_idx
                 st.rerun()
             else:
                  st.session_state.visa_sel_idx = final_safe_index
 
-            # 4. Bouton pour passer à la vue d'édition
             st.button("✏️ Modifier le type de visa sélectionné", on_click=lambda: set_view("visa_edit"))
 
         else:
             st.info("Aucun type de visa à gérer.")
         
-# --- 5. LOGIQUE DE SAUVEGARDE GLOBALE (inchangé) ---
+# --- 5. LOGIQUE DE SAUVEGARDE GLOBALE (Téléchargement) ---
 
 if src and (page == "Clients" or page == "Visa"):
     
     st.markdown("---")
-    st.subheader("Exporter et Sauvegarder les Données")
+    st.subheader("Exporter et Télécharger les Données")
     
-    exp_col1, exp_col2, exp_col3 = st.columns(3)
+    exp_col1, exp_col2 = st.columns(2)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     
-    # Préparation du DataFrame pour l'export (Paiements en JSON string)
-    clients_df_export = st.session_state.clients_df.copy()
-    clients_df_export["Paiements"] = clients_df_export["Paiements"].apply(json.dumps)
+    all_sheets_export = get_export_data()
+    xls_bytes = to_excel_bytes_multi(all_sheets_export)
     
-    # Création du dictionnaire d'onglets pour l'export XLSX
-    all_sheets_export = {
-        "Clients": clients_df_export,
-        "Visa": st.session_state.visa_df
-    }
-
     with exp_col1:
-        # Téléchargement CSV Clients
-        csv_bytes = clients_df_export.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Télécharger CSV — Clients", data=csv_bytes, file_name=f"Clients_{stamp}.csv", mime="text/csv")
+        # Téléchargement XLSX Classeur
+        st.download_button("⬇️ Télécharger XLSX — Classeur", 
+                           data=xls_bytes, 
+                           file_name=f"Visa_Clients_Sauvegarde_{stamp}.xlsx", 
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           help="Télécharge l'intégralité du classeur mis à jour.")
     
     with exp_col2:
-        # Téléchargement XLSX Classeur
-        xls_bytes = to_excel_bytes_multi(all_sheets_export)
-        st.download_button("⬇️ Télécharger XLSX — Classeur", data=xls_bytes, file_name=f"Visa_Clients_{stamp}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    
-    with exp_col3:
-        if save_mode == "Save to local path (serveur/PC)":
-            if save_path:
-                try:
-                    xls_bytes = to_excel_bytes_multi(all_sheets_export)
-                    with open(save_path, "wb") as f:
-                        f.write(xls_bytes)
-                    st.success(f"Fichier écrit: {save_path}")
-                except Exception as e:
-                    st.error(f"Erreur écriture locale: {e}")
-            else:
-                st.warning("Renseignez un chemin local dans la sidebar.")
-        elif save_mode in ["Google Drive (secrets req.)", "OneDrive (secrets req.)"]:
-            st.info("Les modes de sauvegarde avancés nécessitent une configuration spécifique des secrets/API.")
+        # Téléchargement CSV Clients
+        clients_df_export = all_sheets_export.get("Clients").copy()
+        csv_bytes = clients_df_export.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Télécharger CSV — Clients", 
+                           data=csv_bytes, 
+                           file_name=f"Clients_{stamp}.csv", 
+                           mime="text/csv",
+                           help="Télécharge seulement la liste des clients mise à jour au format CSV.")
