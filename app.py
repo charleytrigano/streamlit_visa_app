@@ -17,7 +17,6 @@ def pick_workdir() -> Path | None:
     for p in candidates:
         try:
             p.mkdir(parents=True, exist_ok=True)
-            # test d'écriture
             t = p / ".write_test"
             t.write_text("ok", encoding="utf-8")
             t.unlink(missing_ok=True)
@@ -49,7 +48,7 @@ def save_workspace_path(p: Path):
         pass
 
 def copy_upload_to_workspace(upload) -> Path:
-    """Copie l'upload dans le WORK_DIR (ou, si indisponible, dans /tmp), sans écraser par défaut."""
+    """Copie l'upload dans le WORK_DIR (ou /tmp à défaut), sans écraser par défaut."""
     base_dir = WORK_DIR if WORK_DIR else Path("/tmp")
     base_dir.mkdir(parents=True, exist_ok=True)
     name = getattr(upload, "name", "donnees_visa_clients.xlsx")
@@ -195,7 +194,17 @@ def write_sheet_inplace(path: Path, sheet_to_replace: str, new_df: pd.DataFrame)
                 if dfw[c].dtype == "object":
                     dfw[c] = dfw[c].astype(str).fillna("")
             dfw.to_excel(writer, sheet_name=sheet_to_replace, index=False)
-    path.write_bytes(out.getvalue())
+
+    # ECRITURE DIRECTE sur le même fichier
+    bytes_out = out.getvalue()
+    path.write_bytes(bytes_out)
+
+    # NEW: snapshot pour téléchargement (évite toute relecture bloquante)
+    try:
+        st.session_state["download_bytes"] = bytes_out
+        st.session_state["download_name"] = path.name
+    except Exception:
+        pass
 
 # ---------- Source : dernier fichier auto + remplacement ----------
 st.sidebar.header("Source")
@@ -204,7 +213,6 @@ current_path = load_workspace_path()
 if current_path and current_path.exists():
     st.sidebar.success(f"Fichier courant : {current_path.name}")
 else:
-    # première ouverture : essayer un défaut, sinon demander un upload
     DEFAULTS = [
         "/mnt/data/Visa_Clients_20251001-114844.xlsx",
         "/mnt/data/visa_analytics_datecol.xlsx",
@@ -220,17 +228,33 @@ else:
         else:
             st.sidebar.warning("Aucun fichier trouvé. Importez un Excel pour démarrer.")
 
-# Uploader pour CHANGER de fichier (copie en workspace et devient la source)
+# Uploader pour CHANGER de fichier
 up = st.sidebar.file_uploader("Remplacer par un autre Excel (.xlsx, .xls)", type=["xlsx","xls"])
 if up is not None:
     new_path = copy_upload_to_workspace(up)
     save_workspace_path(new_path)
+    # NEW: snapshot de téléchargement pour le nouveau fichier
+    try:
+        st.session_state["download_bytes"] = new_path.read_bytes()
+        st.session_state["download_name"] = new_path.name
+    except Exception:
+        st.session_state["download_bytes"] = b""
+        st.session_state["download_name"] = new_path.name
     st.sidebar.success(f"Nouveau fichier chargé : {new_path.name}")
     st.rerun()
 
 # Si rien encore, on arrête proprement
 if current_path is None or not current_path.exists():
     st.stop()
+
+# NEW: init snapshot au démarrage si absent / différent
+if "download_bytes" not in st.session_state or st.session_state.get("download_name") != current_path.name:
+    try:
+        st.session_state["download_bytes"] = current_path.read_bytes()
+        st.session_state["download_name"] = current_path.name
+    except Exception:
+        st.session_state["download_bytes"] = b""
+        st.session_state["download_name"] = current_path.name
 
 # Liste des feuilles
 try:
@@ -249,9 +273,15 @@ client_target_sheet = st.sidebar.selectbox("Feuille *Clients* (cible CRUD)", she
 
 ws_info = f"`{current_path}`" + ("" if WORK_DIR else "  \n(Mémorisation du dernier fichier indisponible : espace non réinscriptible)")
 st.sidebar.caption(f"Édition **directe** dans : {ws_info}")
-st.sidebar.download_button("⬇️ Télécharger une copie", data=current_path.read_bytes(),
-                           file_name=current_path.name,
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# NEW: bouton de téléchargement -> snapshot mémoire (plus de spinner)
+st.sidebar.download_button(
+    "⬇️ Télécharger une copie",
+    data=st.session_state.get("download_bytes", b""),
+    file_name=st.session_state.get("download_name", current_path.name),
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Télécharge le snapshot en mémoire (toujours à jour)."
+)
 
 # ---------- TABS ----------
 tabs = st.tabs(["Dashboard", "Clients (CRUD)"])
@@ -473,7 +503,7 @@ with tabs[1]:
 
             live_after = pd.concat([live_raw.drop(columns=["_RowID"]), pd.DataFrame([new_row])], ignore_index=True)
             write_sheet_inplace(current_path, client_target_sheet, live_after)
-            save_workspace_path(current_path)  # mémorise ce fichier comme dernier
+            save_workspace_path(current_path)
             st.success("Client créé **dans le fichier**. ✅")
             st.rerun()
 
