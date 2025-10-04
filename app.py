@@ -189,18 +189,31 @@ def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_
     return out.read()
 
 # =========================
-# Chargement source (cache) + état courant en mémoire
+# Chargement source (SANS CACHE, ID basé sur le contenu)
 # =========================
-@st.cache_data
 def load_excel_bytes(xlsx_input):
+    """
+    Charge l'Excel et retourne (sheet_names, data_bytes, source_id) sans cache.
+    Identifiant de source basé sur le CONTENU (hash + taille) pour éviter toute confusion.
+    """
+    import hashlib
     if hasattr(xlsx_input, "read"):  # upload
         data = xlsx_input.read()
-        src_id = f"upload:{getattr(xlsx_input, 'name', 'uploaded')}"
-    else:  # chemin sur disque
-        data = Path(xlsx_input).read_bytes()
-        src_id = f"path:{xlsx_input}"
+        name = getattr(xlsx_input, "name", "uploaded.xlsx")
+        kind = "upload"
+        path = None
+    else:  # chemin disque
+        p = Path(xlsx_input)
+        data = p.read_bytes()
+        name = p.name
+        kind = "path"
+        path = str(p)
+
+    # ID basé sur contenu
+    h = hashlib.sha1(data).hexdigest()[:10]
+    src_id = f"{kind}:{name}:{len(data)}:{h}"
     xls = pd.ExcelFile(io.BytesIO(data))
-    return xls.sheet_names, data, src_id
+    return xls.sheet_names, data, src_id, kind, name, path
 
 def read_sheet_from_bytes(data_bytes: bytes, sheet_name: str, normalize: bool) -> pd.DataFrame:
     xls = pd.ExcelFile(io.BytesIO(data_bytes))
@@ -217,7 +230,7 @@ DEFAULT_CANDIDATES = [
     "/mnt/data/visa_analytics_datecol.xlsx",
 ]
 
-# === Sidebar: Source & Sauvegarde simple ===
+# === Sidebar: Source & Sauvegarde simple (même nom)
 st.sidebar.header("Données")
 source_mode = st.sidebar.radio("Source", ["Fichier par défaut", "Importer un Excel"])
 
@@ -226,32 +239,26 @@ if source_mode == "Fichier par défaut":
     if not path:
         st.sidebar.error("Aucun fichier par défaut trouvé. Importez un fichier.")
         st.stop()
-    sheet_names0, data_bytes, source_id = load_excel_bytes(path)
-    source_kind = "path"
-    source_name = Path(path).name
-    source_path = path
+    sheet_names0, data_bytes, source_id, source_kind, source_name, source_path = load_excel_bytes(path)
 else:
     up = st.sidebar.file_uploader("Dépose un Excel (.xlsx, .xls)", type=["xlsx", "xls"])
     if not up:
         st.info("Importe un fichier pour commencer.")
         st.stop()
-    sheet_names0, data_bytes, source_id = load_excel_bytes(up)
-    source_kind = "upload"
-    source_name = getattr(up, "name", "donnees.xlsx")
-    source_path = None
+    sheet_names0, data_bytes, source_id, source_kind, source_name, source_path = load_excel_bytes(up)
 
-# état courant en mémoire (octets Excel live)
+# État courant en mémoire (octets Excel live)
 if "excel_bytes_current" not in st.session_state or st.session_state.get("excel_source_id") != source_id:
     st.session_state["excel_bytes_current"] = data_bytes
     st.session_state["excel_source_id"] = source_id
-    st.session_state["excel_source_kind"] = source_kind
+    st.session_state["excel_source_kind"] = source_kind  # "upload" ou "path"
     st.session_state["excel_source_name"] = source_name
-    st.session_state["excel_source_path"] = source_path
+    st.session_state["excel_source_path"] = source_path  # None en mode upload
 
 current_bytes = st.session_state["excel_bytes_current"]
 sheet_names_current = pd.ExcelFile(io.BytesIO(current_bytes)).sheet_names
 
-# Affichage et sauvegarde (même nom)
+# Affichage + sauvegarde même nom
 st.sidebar.caption(f"Fichier courant : **{st.session_state['excel_source_name']}**")
 
 if st.session_state["excel_source_kind"] == "path":
@@ -262,7 +269,6 @@ if st.session_state["excel_source_kind"] == "path":
         except Exception as e:
             st.sidebar.error(f"Échec écriture : {e}")
 
-# Toujours proposer le téléchargement avec le **même nom**
 st.sidebar.download_button(
     "💾 Sauvegarder (même nom)",
     data=st.session_state["excel_bytes_current"],
@@ -337,12 +343,11 @@ if is_ref and sheet_choice.lower() == "visa":
         edited_df = st.data_editor(
             full_ref_df, num_rows="dynamic", use_container_width=True, hide_index=True, key="visa_editor",
         )
-        col_save, _, _ = st.columns([1,1,1])
-        if col_save.button("💾 Enregistrer (remplace la feuille 'Visa')", type="primary"):
+        if st.button("💾 Enregistrer (remplace la feuille 'Visa')", type="primary"):
             try:
                 updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, edited_df)
                 st.session_state["excel_bytes_current"] = updated_bytes
-                st.success("Modifications enregistrées en mémoire. Utilise la **Sauvegarde (même nom)** dans la sidebar pour récupérer le fichier.")
+                st.success("Modifications enregistrées en mémoire. Utilise **Sauvegarder (même nom)** dans la sidebar pour récupérer le fichier.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erreur à l’enregistrement : {e}")
@@ -354,7 +359,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
     df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=True)
 
     with tabs[0]:
-        st.info(f"ℹ️ CRUD Clients cible : **{client_target_sheet}**. Utilise la **Sauvegarde (même nom)** (sidebar) pour récupérer le fichier final.")
+        st.info(f"ℹ️ CRUD Clients cible : **{client_target_sheet}**. Utilise **Sauvegarder (même nom)** (sidebar) pour récupérer le fichier final.")
 
         def make_range_slider(df_src: pd.DataFrame, col: str, label: str, container, fmt=lambda x: f"{x:,.2f}"):
             if col not in df_src.columns or df_src[col].dropna().empty:
@@ -468,7 +473,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                     original_df_dash.at[target_row_idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
                     updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df_dash)
                     st.session_state["excel_bytes_current"] = updated_bytes
-                    st.success(f"Acompte {_fmt_money_us(amount)} ajouté. N'oublie pas **Sauvegarder (même nom)** dans la sidebar.")
+                    st.success(f"Acompte {_fmt_money_us(amount)} ajouté. Pense à **Sauvegarder (même nom)** dans la sidebar.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur lors de l’ajout : {e}")
@@ -652,13 +657,12 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                     if live.empty:
                         st.error("Feuille cible introuvable.")
                     else:
-                        # on retrouve la ligne par ID_Client si possible, sinon par (Nom, Telephone, Date)
+                        # on retrouve la ligne par ID_Client si possible, sinon par (Nom, Telephone)
                         target_idx = None
                         if "ID_Client" in live.columns and _safe_str(init.get("ID_Client")):
                             hits = live.index[live["ID_Client"].astype(str) == _safe_str(init.get("ID_Client"))]
                             if len(hits) > 0: target_idx = hits[0]
                         if target_idx is None:
-                            # fallback heuristique
                             mask = (live.get("Nom","").astype(str) == _safe_str(init.get("Nom"))) & \
                                    (live.get("Telephone","").astype(str) == _safe_str(init.get("Telephone")))
                             hit2 = live.index[mask]
