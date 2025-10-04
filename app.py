@@ -292,7 +292,7 @@ if "pending_sheet_choice" in st.session_state:
     if pending in sheet_names:
         st.session_state["sheet_choice"] = pending
 
-# bouton refresh (pas de callback)
+# bouton refresh
 if st.sidebar.button("🔄 Rafraîchir"):
     st.rerun()
 
@@ -470,12 +470,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
         if pending.empty:
             st.success("Tous les dossiers sont soldés ✅")
         else:
-            # On expose aussi ID_Client pour pointer la bonne ligne au moment de l'écriture
-            show_cols = []
-            if "ID_Client" in pending.columns: show_cols.append("ID_Client")
-            if "Nom" in pending.columns: show_cols.append("Nom")
-            if "Reste" in pending.columns: show_cols.append("Reste")
-
             pending["_label"] = pending.apply(
                 lambda r: f'{r.get("ID_Client","")} — {r.get("Nom","")} — Reste {_fmt_money_us(float(r.get("Reste",0)))}',
                 axis=1
@@ -488,7 +482,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
             pay_date = cdate.date_input("Date", value=date.today())
             mode = cmode.selectbox("Mode", ["CB", "Virement", "Espèces", "Chèque", "Autre"])
             note = st.text_input("Note (facultatif)", "")
-
             if st.button("💾 Ajouter l’acompte"):
                 if amount <= 0:
                     st.warning("Montant invalide.")
@@ -505,9 +498,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                                 hits = original_df_dash.index[original_df_dash["ID_Client"].astype(str) == str(target_id)]
                                 if len(hits) > 0:
                                     target_row_idx = hits[0]
-                        # fallback (peu probable) : même index
                         if target_row_idx is None:
-                            # On récupère l'index d'origine du df normalisé via la position dans pending
                             target_row_idx = pending.loc[pending["_label"] == selected_label].index[0]
 
                         raw = original_df_dash.at[target_row_idx, "Paiements"] if target_row_idx in original_df_dash.index else ""
@@ -559,7 +550,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
     with tabs[1]:
         st.subheader("👤 Clients — Créer / Modifier / Supprimer")
         st.caption(f"Feuille cible : **{client_target_sheet}** — toutes les colonnes existantes sont proposées.")
-        # bouton refresh (sans callback no-op)
         if st.button("🔄 Rafraîchir"):
             st.rerun()
 
@@ -612,7 +602,8 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                     else:
                         default_val = "" if c != "Statut" else "Inconnu"
                         form_values[c] = st.text_input(label, value=default_val)
-                submitted = st.form_submit_button("💾 Créer le client", type="primary")
+                # ▼▼▼ libellé changé ici ▼▼▼
+                submitted = st.form_submit_button("💾 Sauvegarder", type="primary")
 
             if submitted:
                 # Colonnes essentielles si absentes
@@ -687,7 +678,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                             st.success(f"Client créé et écrit dans : {original_path}")
                         except Exception as e:
                             st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
-                    st.success("✅ Client créé.")
+                    st.success("✅ Client sauvegardé.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erreur à l’écriture : {e}")
@@ -818,3 +809,4 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erreur à l’écriture : {e}")
+
