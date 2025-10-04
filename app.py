@@ -221,19 +221,16 @@ def write_analyses_sheet(path: Path, blocks: list[tuple[str, pd.DataFrame]]):
         # Nouvelle feuille 'Analyses'
         startrow = 0
         for title, df in blocks:
-            # Titre (ligne seule)
             pd.DataFrame({title: []}).to_excel(writer, sheet_name="Analyses", index=False, startrow=startrow)
             startrow += 1
-            # Table
             df_to_write = df.copy()
             if isinstance(df_to_write, pd.Series):
                 df_to_write = df_to_write.to_frame()
             df_to_write.to_excel(writer, sheet_name="Analyses", index=True, startrow=startrow)
-            startrow += (len(df_to_write) + 3)  # espace
+            startrow += (len(df_to_write) + 3)
 
     bytes_out = out.getvalue()
     path.write_bytes(bytes_out)
-    # snapshot pour téléchargement
     try:
         st.session_state["download_bytes"] = bytes_out
         st.session_state["download_name"] = path.name
@@ -267,7 +264,6 @@ up = st.sidebar.file_uploader("Remplacer par un autre Excel (.xlsx, .xls)", type
 if up is not None:
     new_path = copy_upload_to_workspace(up)
     save_workspace_path(new_path)
-    # snapshot de téléchargement
     try:
         st.session_state["download_bytes"] = new_path.read_bytes()
         st.session_state["download_name"] = new_path.name
@@ -308,7 +304,6 @@ client_target_sheet = st.sidebar.selectbox("Feuille *Clients* (cible CRUD)", she
 ws_info = f"`{current_path}`" + ("" if WORK_DIR else "  \n(Mémorisation du dernier fichier indisponible : espace non réinscriptible)")
 st.sidebar.caption(f"Édition **directe** dans : {ws_info}")
 
-# bouton de téléchargement -> snapshot mémoire
 st.sidebar.download_button(
     "⬇️ Télécharger une copie",
     data=st.session_state.get("download_bytes", b""),
@@ -324,7 +319,6 @@ tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses"])
 with tabs[0]:
     df = read_sheet(current_path, sheet_choice, normalize=True)
 
-    # Filtres OFF par défaut
     with st.container():
         c1, c2, c3 = st.columns(3)
         years = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
@@ -414,6 +408,7 @@ with tabs[0]:
                     raise RuntimeError("Dossier introuvable.")
                 idx = idxs[0]
 
+                # Récup reste initial depuis todo (normalisé)
                 reste = float(todo.set_index("_label").loc[sel_label, "Reste"])
                 add = float(amount or 0.0)
                 if add <= 0:
@@ -482,7 +477,6 @@ with tabs[1]:
     # ---- CREER ----
     if action == "Créer":
         st.markdown("### ➕ Nouveau client")
-        # Cols minimales si besoin
         for must in ["ID_Client","Nom","Telephone","Email","Date","Visa","Montant","Payé","Reste","Paiements",
                      "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]:
             if must not in live_raw.columns:
@@ -591,7 +585,7 @@ with tabs[1]:
                     st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché.")
                     st.stop()
                 live = live_raw.drop(columns=["_RowID"]).copy()
-                # Retrouver la ligne par ID si possible
+                # Retrouver la ligne
                 t_idx = None
                 if "ID_Client" in live.columns and _safe_str(init.get("ID_Client")):
                     hits = live.index[live["ID_Client"].astype(str) == _safe_str(init.get("ID_Client"))]
@@ -673,7 +667,6 @@ with tabs[2]:
     # Filtre plage de dates
     with st.container():
         d1, d2 = st.columns([1,1])
-        # bornes par défaut : min/max des dates dispos
         if dfA["Date"].notna().any():
             dmin = min([d for d in dfA["Date"] if pd.notna(d)])
             dmax = max([d for d in dfA["Date"] if pd.notna(d)])
@@ -702,7 +695,6 @@ with tabs[2]:
         mask_month = fA["Mois"].isin(sel_months)
         if include_na_dates: mask_month = mask_month | fA["Mois"].isna()
         fA = fA[mask_month]
-    # Plage de dates
     if "Date" in fA.columns and (date_from or date_to):
         mask_range = fA["Date"].apply(lambda x: pd.notna(x) and (x >= date_from) and (x <= date_to))
         if include_na_dates:
@@ -723,7 +715,7 @@ with tabs[2]:
         if col in fA.columns:
             fA[col] = pd.to_numeric(fA[col], errors="coerce").fillna(0.0)
 
-    # ---- Statut dérivé par dossier (pour les détails) ----
+    # Statut dérivé (pour tableau de détails)
     def derive_statut(row) -> str:
         appr = bool(row.get("Dossier approuvé")) if "Dossier approuvé" in fA.columns else False
         refu = bool(row.get("Dossier refusé"))   if "Dossier refusé"   in fA.columns else False
@@ -736,7 +728,8 @@ with tabs[2]:
     details = fA.copy()
     details["Statut"] = details.apply(derive_statut, axis=1)
     details_display_cols = [c for c in ["Periode","ID_Client","Nom","Visa","Date","Montant","Payé","Reste","Statut"] if c in details.columns]
-    # KPI
+
+    # KPI globaux (filtrés)
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Dossiers (filtrés)", f"{len(fA)}")
     k2.metric("Chiffre d’affaires", _fmt_money_us(float(fA.get("Montant", pd.Series(dtype=float)).sum())))
@@ -796,28 +789,6 @@ with tabs[2]:
 
     st.divider()
 
-    # Camembert statuts globaux
-    st.markdown("### 🥧 Répartition des statuts (camembert)")
-    count_app = int(fA.get("Dossier approuvé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if "Dossier approuvé" in fA.columns else 0
-    count_ref = int(fA.get("Dossier refusé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())     if "Dossier refusé" in fA.columns else 0
-    count_ann = int(fA.get("Dossier annulé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())     if "Dossier annulé" in fA.columns else 0
-    mask_att = pd.Series([True]*len(fA))
-    if "Dossier approuvé" in fA.columns: mask_att &= ~fA["Dossier approuvé"].fillna(False).astype(bool)
-    if "Dossier refusé"  in fA.columns: mask_att &= ~fA["Dossier refusé"].fillna(False).astype(bool)
-    if "Dossier annulé"  in fA.columns: mask_att &= ~fA["Dossier annulé"].fillna(False).astype(bool)
-    count_att = int(mask_att.sum())
-    pie_labels = ["Approuvés", "Refusés", "Annulés", "En attente"]
-    pie_sizes = [count_app, count_ref, count_ann, count_att]
-    if sum(pie_sizes) == 0:
-        st.info("Aucun dossier dans l'échantillon pour le camembert.")
-    else:
-        fig, ax = plt.subplots()
-        ax.pie(pie_sizes, labels=pie_labels, autopct="%1.1f%%", startangle=90)
-        ax.axis("equal")
-        st.pyplot(fig, use_container_width=True)
-
-    st.divider()
-
     # Top visas
     st.markdown("### 🏷️ Top visas")
     top_vol = fA.groupby("Visa").size().sort_values(ascending=False).head(15).rename("Dossiers")
@@ -848,7 +819,6 @@ with tabs[2]:
 
     st.dataframe(details_to_show.sort_values(["Periode","Nom"]), use_container_width=True)
 
-    # Clients par période et par statut (tableaux compacts)
     with st.expander("Voir les tableaux 'Clients par période' et 'Clients par statut'"):
         clients_par_periode = details.groupby("Periode")["Nom"].apply(lambda s: ", ".join(sorted(set(map(str, s.dropna())))))
         clients_par_statut  = details.groupby("Statut")["Nom"].apply(lambda s: ", ".join(sorted(set(map(str, s.dropna())))))
@@ -859,7 +829,127 @@ with tabs[2]:
 
     st.divider()
 
-    # Export Analyses -> Excel (avec détails)
+    # ======= FICHE DÉTAILLÉE PAR CLIENT =======
+    st.markdown("### 🧾 Fiche détaillée — client")
+    # Options (uniques par ID_Client)
+    unique_clients = details_to_show.dropna(subset=["ID_Client"]).copy()
+    unique_clients["_opt"] = unique_clients.apply(
+        lambda r: f'{r.get("ID_Client","")} — {r.get("Nom","")} — {r.get("Visa","")} — {r.get("Date","")}', axis=1
+    )
+    opt = st.selectbox("Choisir un client", unique_clients["_opt"].tolist(), key="anal_client_select")
+    if opt:
+        sel_id = unique_clients.set_index("_opt").loc[opt, "ID_Client"]
+        # Relire la feuille brute pour récupérer Paiements JSON
+        live_all = read_sheet(current_path, client_target_sheet, normalize=False)
+        subset = live_all[live_all.get("ID_Client","").astype(str) == str(sel_id)].copy()
+        if subset.empty:
+            st.info("Client introuvable dans la feuille source.")
+        else:
+            r0 = subset.iloc[0].to_dict()
+            # KPI client
+            cA, cB, cC = st.columns(3)
+            try: m = float(r0.get("Montant", 0))
+            except Exception: m = 0.0
+            try: p = float(r0.get("Payé", 0))
+            except Exception: p = 0.0
+            rest = max(m - p, 0.0)
+            cA.metric("Montant", _fmt_money_us(m))
+            cB.metric("Payé", _fmt_money_us(p))
+            cC.metric("Reste", _fmt_money_us(rest))
+
+            # Statut "chips"
+            def _b(v, lab):
+                return f'<span style="padding:.2rem .5rem;border-radius:.6rem;border:1px solid #ddd;margin-right:.25rem">{lab}: {"✅" if v else "—"}</span>'
+            appr = bool(r0.get("Dossier approuvé")) if "Dossier approuvé" in r0 else False
+            refu = bool(r0.get("Dossier refusé"))   if "Dossier refusé"   in r0 else False
+            ann  = bool(r0.get("Dossier annulé"))   if "Dossier annulé"   in r0 else False
+            env  = bool(r0.get("Dossier envoyé"))   if "Dossier envoyé"   in r0 else False
+            rfe  = bool(r0.get("RFE"))              if "RFE"              in r0 else False
+            st.markdown(
+                _b(env,"Envoyé")+_b(appr,"Approuvé")+_b(refu,"Refusé")+_b(ann,"Annulé")+_b(rfe,"RFE"),
+                unsafe_allow_html=True
+            )
+
+            # Historique paiements
+            st.markdown("#### 💳 Paiements")
+            payments = _parse_paiements(r0.get("Paiements",""))
+            if payments:
+                pay_df = pd.DataFrame(payments)
+                # nettoyage / tri
+                if "date" in pay_df.columns:
+                    pay_df["date"] = pd.to_datetime(pay_df["date"], errors="coerce").dt.date
+                    pay_df = pay_df.sort_values("date")
+                st.dataframe(pay_df.rename(columns={"date":"Date","amount":"Montant ($)","mode":"Mode","note":"Note"}), use_container_width=True)
+            else:
+                st.info("Aucun paiement encore enregistré.")
+
+            # Ajouter un paiement depuis la fiche
+            with st.form("add_payment_from_detail"):
+                c1, c2, c3, c4 = st.columns([1,1,1,2])
+                np_amount = c1.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f", key="anal_cli_pay_amt")
+                np_date   = c2.date_input("Date", value=date.today(), key="anal_cli_pay_date")
+                np_mode   = c3.selectbox("Mode", ["CB","Chèque","Espèces","Virement","Autre"], key="anal_cli_pay_mode")
+                np_note   = c4.text_input("Note", "", key="anal_cli_pay_note")
+                ok_add = st.form_submit_button("💾 Ajouter le paiement (fiche)", type="primary")
+            if ok_add:
+                try:
+                    # Chercher l'index de la première ligne correspondante
+                    live = live_all.copy()
+                    idxs = live.index[live.get("ID_Client","").astype(str) == str(sel_id)]
+                    if len(idxs)==0:
+                        st.error("Dossier introuvable.")
+                    else:
+                        idx = idxs[0]
+                        pay_list = _parse_paiements(live.at[idx, "Paiements"] if "Paiements" in live.columns else "")
+                        add = float(np_amount or 0.0)
+                        if add <= 0:
+                            st.warning("Le montant doit être > 0.")
+                            st.stop()
+                        # plafonner si on dépasse le reste courant
+                        try: m0 = float(live.at[idx,"Montant"])
+                        except Exception: m0 = 0.0
+                        try: p0 = float(live.at[idx,"Payé"])
+                        except Exception: p0 = 0.0
+                        reste0 = max(m0 - p0, 0.0)
+                        if add > reste0 + 1e-9:
+                            st.info(f"Le paiement dépasse le reste. Plafonné à {_fmt_money_us(reste0)}.")
+                            add = reste0
+
+                        pay_list.append({"date": str(np_date), "amount": float(add), "mode": np_mode, "note": np_note})
+                        live.at[idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+
+                        total_paid = _sum_payments(pay_list)
+                        live.at[idx, "Payé"]  = float(total_paid)
+                        live.at[idx, "Reste"] = max(m0 - float(total_paid), 0.0)
+
+                        write_sheet_inplace(current_path, client_target_sheet, live)
+                        st.success("Paiement ajouté **dans le fichier** depuis la fiche. ✅")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur: {e}")
+
+            # Export CSV de la fiche
+            stmt = {
+                "ID_Client": [r0.get("ID_Client","")],
+                "Nom": [r0.get("Nom","")],
+                "Visa": [r0.get("Visa","")],
+                "Date": [r0.get("Date","")],
+                "Montant": [m], "Payé": [p], "Reste":[rest]
+            }
+            stmt_df = pd.DataFrame(stmt)
+            csv_buf = io.StringIO()
+            stmt_df.to_csv(csv_buf, index=False, encoding="utf-8-sig")
+            st.download_button(
+                "⬇️ Télécharger fiche client (CSV)",
+                data=csv_buf.getvalue(),
+                file_name=f"fiche_{sel_id}.csv",
+                mime="text/csv",
+                key="anal_cli_export_csv"
+            )
+
+    st.divider()
+
+    # Export Analyses -> Excel (inclut détails/clients)
     st.markdown("### 📤 Export Excel")
     st.caption("Crée/Met à jour la feuille **'Analyses'** dans ton fichier courant (inclut les détails clients).")
     if st.button("Exporter vers l'Excel (feuille 'Analyses')", key="anal_export_btn"):
@@ -888,7 +978,6 @@ with tabs[2]:
             blocks.append(("Top visas — par nombre de dossiers", pd.DataFrame(top_vol)))
             blocks.append(("Top visas — par chiffre d'affaires", pd.DataFrame({"CA": top_ca})))
 
-            # Détails clients
             blocks.append(("Détails (clients)", details_to_show))
             blocks.append(("Clients par période (liste)", clients_par_periode.to_frame("Clients")))
             blocks.append(("Clients par statut (liste)", clients_par_statut.to_frame("Clients")))
@@ -899,14 +988,13 @@ with tabs[2]:
         except Exception as e:
             st.error(f"Échec export : {e}")
 
-    # Export Analyses -> ZIP CSV (avec détails)
+    # Export Analyses -> ZIP CSV (inclut détails/clients)
     st.markdown("### 📥 Export CSV (ZIP)")
     st.caption("Télécharge un ZIP contenant les principaux tableaux (y compris les détails clients).")
     if st.button("Préparer le ZIP des analyses (CSV)", key="anal_zip_btn"):
         try:
             mem = io.BytesIO()
             with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                # KPI
                 kpi_df = pd.DataFrame({
                     "KPI": ["Dossiers (filtrés)", "Chiffre d’affaires", "Encaissements", "Solde à encaisser"],
                     "Valeur": [
@@ -917,29 +1005,20 @@ with tabs[2]:
                     ],
                 })
                 zf.writestr("kpi_globaux.csv", kpi_df.to_csv(index=False, encoding="utf-8-sig"))
-
                 zf.writestr("volumes_ouverts_par_periode.csv", st_data1.to_csv(encoding="utf-8-sig"))
                 if vols_dict:
                     zf.writestr("volumes_statuts_par_periode.csv", st_data2.to_csv(encoding="utf-8-sig"))
                 zf.writestr("financier_par_periode.csv", sums.to_csv(encoding="utf-8-sig"))
-
-                # Taux & Encours
                 if not vol_env.empty and (vol_env > 0).any():
                     taux_app = (vol_app.reindex(vol_env.index).fillna(0) / vol_env.replace(0, pd.NA)) * 100
                     zf.writestr("taux_approbation_par_periode.csv", pd.DataFrame({"Taux (%)": taux_app.fillna(0.0)}).to_csv(encoding="utf-8-sig"))
                 zf.writestr("encours_moyen_par_dossier.csv", pd.DataFrame({"Encours moyen ($)": encours_moy}).to_csv(encoding="utf-8-sig"))
-
                 zf.writestr("top_visas_volume.csv", pd.DataFrame(top_vol).to_csv(encoding="utf-8-sig"))
                 zf.writestr("top_visas_ca.csv", pd.DataFrame({"CA": top_ca}).to_csv(encoding="utf-8-sig"))
-
-                # Détails clients + listes
                 zf.writestr("details_clients.csv", details_to_show.to_csv(index=False, encoding="utf-8-sig"))
                 zf.writestr("clients_par_periode.csv", clients_par_periode.to_frame("Clients").to_csv(encoding="utf-8-sig"))
                 zf.writestr("clients_par_statut.csv", clients_par_statut.to_frame("Clients").to_csv(encoding="utf-8-sig"))
-
-                # Dataset filtré complet (utile)
                 zf.writestr("dataset_filtre_complet.csv", fA.to_csv(index=False, encoding="utf-8-sig"))
-
             mem.seek(0)
             st.session_state["anal_zip_bytes"] = mem.read()
             st.success("ZIP des analyses prêt. Utilise le bouton ci-dessous pour télécharger.")
