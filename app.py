@@ -32,7 +32,6 @@ def _safe_str(x):
     return "" if pd.isna(x) else str(x).strip()
 
 def _to_num(s: pd.Series) -> pd.Series:
-    # Parse US: "$1,234.56" -> 1234.56
     cleaned = (
         s.astype(str)
          .str.replace("\u00a0", "", regex=False)
@@ -79,7 +78,6 @@ def _sum_payments(pay_list) -> float:
     return total
 
 def _make_client_id_from_row(row) -> str:
-    # ID stable depuis Nom + Telephone + Date
     base = "|".join([
         _safe_str(row.get("Nom")),
         _safe_str(row.get("Telephone")),
@@ -101,30 +99,24 @@ def _dedupe_ids(series: pd.Series) -> pd.Series:
     return s
 
 def looks_like_reference(df: pd.DataFrame) -> bool:
-    """Détecte un onglet de référence (ex: 'Visa' avec Categories/Visa/Definition)."""
     cols = set(map(str.lower, df.columns.astype(str)))
     has_ref = {"categories", "visa"} <= cols
     no_money = not ({"montant", "honoraires", "acomptes", "payé", "reste", "solde"} & cols)
     return has_ref and no_money
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Uniformise Date/Visa/Statut/Montant/Payé/Reste, génère ID_Client, calcule Mois=MM (interne)."""
     df = df.copy()
 
-    # Date (sans heure)
     if "Date" in df.columns:
         df["Date"] = _to_date(df["Date"])
     else:
         df["Date"] = pd.NaT
 
-    # Mois (MM) interne
     df["Mois"] = df["Date"].apply(lambda x: f"{x.month:02d}" if pd.notna(x) else pd.NA)
 
-    # Visa / Categories
     visa_col = _first_col(df, ["Visa", "Categories", "Catégorie", "TypeVisa"])
     df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
 
-    # Statut
     if "__Statut règlement__" in df.columns and "Statut" not in df.columns:
         df = df.rename(columns={"__Statut règlement__": "Statut"})
     if "Statut" not in df.columns:
@@ -132,29 +124,24 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Statut"] = df["Statut"].astype(str).fillna("Inconnu")
 
-    # Montant
     if "Montant" in df.columns:
         df["Montant"] = _to_num(df["Montant"])
     else:
         src_montant = _first_col(df, ["Honoraires", "Total", "Amount"])
         df["Montant"] = _to_num(df[src_montant]) if src_montant else 0.0
 
-    # Paiements JSON -> TotalAcomptes
     if "Paiements" in df.columns:
         parsed = df["Paiements"].apply(_parse_paiements)
         df["TotalAcomptes"] = parsed.apply(_sum_payments)
 
-    # Payé
     if "Payé" in df.columns:
         df["Payé"] = _to_num(df["Payé"])
     else:
         src_paye = _first_col(df, ["TotalAcomptes", "Acomptes", "Paye", "Paid"])
         df["Payé"] = _to_num(df[src_paye]) if src_paye else 0.0
 
-    # Reste (toujours calculé)
     df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
 
-    # ID client auto
     if "ID_Client" not in df.columns:
         df["ID_Client"] = ""
     need_id = df["ID_Client"].astype(str).str.strip().eq("") | df["ID_Client"].isna()
@@ -166,7 +153,6 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_df: pd.DataFrame) -> bytes:
-    """Remplace (ou crée) la feuille `sheet_to_replace` et conserve les autres."""
     xls = pd.ExcelFile(io.BytesIO(original_bytes))
     out = io.BytesIO()
     target_written = False
@@ -181,7 +167,6 @@ def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_
                 target_written = True
             else:
                 pd.read_excel(xls, sheet_name=name).to_excel(writer, sheet_name=name, index=False)
-        # si la feuille n'existait pas, on la crée
         if not target_written:
             dfw = new_df.copy()
             for c in dfw.columns:
@@ -191,50 +176,11 @@ def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_
     out.seek(0)
     return out.read()
 
-def build_categories_to_visa_map(data_bytes: bytes, visa_sheet_name: str = "Visa") -> dict:
-    """Construit un mapping {categories_normalisées: visa} depuis l’onglet 'Visa'."""
-    try:
-        xls = pd.ExcelFile(io.BytesIO(data_bytes))
-        if visa_sheet_name not in xls.sheet_names:
-            return {}
-        ref = pd.read_excel(xls, sheet_name=visa_sheet_name)
-        if "Categories" not in ref.columns or "Visa" not in ref.columns:
-            return {}
-        m = {}
-        for _, r in ref.iterrows():
-            cat = _safe_str(r.get("Categories")).lower()
-            vis = _safe_str(r.get("Visa"))
-            if cat:
-                m[cat] = vis
-        return m
-    except Exception:
-        return {}
-
-def enrich_visa_from_categories(df: pd.DataFrame, cat2visa: dict):
-    """Si Visa est vide mais Categories correspond dans le mapping, remplit Visa."""
-    if not cat2visa or "Categories" not in df.columns or "Visa" not in df.columns:
-        return df, 0
-    df = df.copy()
-    mask_empty_visa = df["Visa"].astype(str).str.strip().eq("") | df["Visa"].isna() | (df["Visa"] == "Inconnu")
-    to_fill = 0
-    def _fill(row):
-        nonlocal to_fill
-        if mask_empty_visa.loc[row.name]:
-            key = _safe_str(row.get("Categories")).lower()
-            if key in cat2visa and _safe_str(cat2visa[key]):
-                to_fill += 1
-                return cat2visa[key]
-        return row["Visa"]
-    if mask_empty_visa.any():
-        df.loc[mask_empty_visa, "Visa"] = df[mask_empty_visa].apply(_fill, axis=1)
-    return df, to_fill
-
 # =========================
-# Cache sérialisable
+# Chargement source (cache) + état courant en mémoire
 # =========================
 @st.cache_data
 def load_excel_bytes(xlsx_input):
-    """Retourne (sheet_names, data_bytes, source_id) pour un chemin ou un fichier uploadé."""
     if hasattr(xlsx_input, "read"):
         data = xlsx_input.read()
         src_id = f"upload:{getattr(xlsx_input, 'name', 'uploaded')}"
@@ -247,7 +193,6 @@ def load_excel_bytes(xlsx_input):
 def read_sheet_from_bytes(data_bytes: bytes, sheet_name: str, normalize: bool) -> pd.DataFrame:
     xls = pd.ExcelFile(io.BytesIO(data_bytes))
     if sheet_name not in xls.sheet_names:
-        # crée feuille vide avec colonnes de base
         base = pd.DataFrame(columns=["ID_Client","Nom","Telephone","Email","Date","Visa","Statut","Montant","Payé","Reste","Paiements"])
         return normalize_dataframe(base) if normalize else base
     df = pd.read_excel(xls, sheet_name=sheet_name)
@@ -255,9 +200,6 @@ def read_sheet_from_bytes(data_bytes: bytes, sheet_name: str, normalize: bool) -
         df = normalize_dataframe(df)
     return df
 
-# =========================
-# Source & Sélection feuille
-# =========================
 DEFAULT_CANDIDATES = [
     "/mnt/data/Visa_Clients_20251001-114844.xlsx",
     "/mnt/data/visa_analytics_datecol.xlsx",
@@ -272,54 +214,56 @@ if source_mode == "Fichier par défaut":
         st.sidebar.error("Aucun fichier par défaut trouvé. Importez un fichier.")
         st.stop()
     st.sidebar.success(f"Fichier: {path}")
-    sheet_names, data_bytes, source_id = load_excel_bytes(path)
+    _, data_bytes, source_id = load_excel_bytes(path)
 else:
     up = st.sidebar.file_uploader("Dépose un Excel (.xlsx, .xls)", type=["xlsx", "xls"])
     if not up:
         st.info("Importe un fichier pour commencer.")
         st.stop()
-    sheet_names, data_bytes, source_id = load_excel_bytes(up)
+    _, data_bytes, source_id = load_excel_bytes(up)
 
-# état courant
+# état courant en mémoire (octets Excel live)
 if "excel_bytes_current" not in st.session_state or st.session_state.get("excel_source_id") != source_id:
     st.session_state["excel_bytes_current"] = data_bytes
     st.session_state["excel_source_id"] = source_id
 current_bytes = st.session_state["excel_bytes_current"]
 
-# --- Redirection feuille (post-écriture) AVANT le selectbox ---
+# >>> IMPORTANT : recalculer les feuilles à partir de current_bytes (pas du cache) <<<
+sheet_names_current = pd.ExcelFile(io.BytesIO(current_bytes)).sheet_names
+
+# Redirection feuille (post-écriture) AVANT le selectbox
 if "pending_sheet_choice" in st.session_state:
     pending = st.session_state.pop("pending_sheet_choice")
-    if pending in sheet_names:
+    if pending in sheet_names_current:
         st.session_state["sheet_choice"] = pending
 
-# bouton refresh
 if st.sidebar.button("🔄 Rafraîchir"):
     st.rerun()
 
-# choix onglet (vue Dashboard)
+# Sélection de la feuille de vue (Dashboard)
 preferred_order = ["Données normalisées", "Clients", "Visa"]
-default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
+default_sheet = next((s for s in preferred_order if s in sheet_names_current), sheet_names_current[0])
 sheet_choice_default = st.session_state.get("sheet_choice", default_sheet)
-if sheet_choice_default not in sheet_names:
+if sheet_choice_default not in sheet_names_current:
     sheet_choice_default = default_sheet
 sheet_choice = st.sidebar.selectbox(
     "Feuille Excel (vue Dashboard)",
-    sheet_names,
-    index=sheet_names.index(sheet_choice_default),
+    sheet_names_current,
+    index=sheet_names_current.index(sheet_choice_default),
     key="sheet_choice"
 )
 
-# feuille cible CRUD Clients
+# Feuille cible CRUD Clients
 CLIENT_SHEET_DEFAULT = "Clients"
-client_sheet_exists = CLIENT_SHEET_DEFAULT in sheet_names
+client_sheet_exists = CLIENT_SHEET_DEFAULT in sheet_names_current
 client_target_sheet = st.sidebar.selectbox(
     "Feuille *Clients* (cible CRUD)",
-    sheet_names,
-    index=sheet_names.index(CLIENT_SHEET_DEFAULT) if client_sheet_exists else sheet_names.index(sheet_choice),
+    sheet_names_current,
+    index=sheet_names_current.index(CLIENT_SHEET_DEFAULT) if client_sheet_exists else sheet_names_current.index(sheet_choice),
     help="Toutes les opérations Créer/Modifier/Supprimer s’appliquent à cette feuille."
 )
 
-# détection référentiel
+# Détection référentiel
 sample_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).head(5)
 is_ref = looks_like_reference(sample_df)
 
@@ -332,7 +276,7 @@ else:
     tabs = st.tabs(["Dashboard", "Clients (CRUD)"])
 
 # =========================
-# TAB 1 : Référentiel Visa (CRUD)
+# TAB Visa (CRUD)
 # =========================
 if is_ref and sheet_choice.lower() == "visa":
     with tabs[0]:
@@ -357,42 +301,30 @@ if is_ref and sheet_choice.lower() == "visa":
             try:
                 updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, edited_df)
                 st.session_state["excel_bytes_current"] = updated_bytes
-                if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
-                    original_path = source_id.split("path:", 1)[1]
-                    try:
-                        Path(original_path).write_bytes(updated_bytes)
-                        st.success(f"Fichier mis à jour : {original_path}")
-                    except Exception as e:
-                        st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
                 st.success("Modifications enregistrées.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erreur à l’enregistrement : {e}")
         col_dl.download_button(
-            "⬇️ Télécharger l’Excel mis à jour",
+            "⬇️ Télécharger l’Excel en mémoire",
             data=st.session_state["excel_bytes_current"],
             file_name="visa_mis_a_jour.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        if col_reset.button("↩️ Réinitialiser"):
-            st.session_state.pop("excel_bytes_current", None)
+        if col_reset.button("↩️ Réinitialiser depuis la source"):
             st.session_state["excel_bytes_current"] = data_bytes
             st.success("Réinitialisé.")
             st.rerun()
 
 # =========================
-# MODE Dossiers — TAB Dashboard
+# TAB Dashboard
 # =========================
 if not (is_ref and sheet_choice.lower() == "visa"):
     df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=True)
-    cat2visa = build_categories_to_visa_map(current_bytes, visa_sheet_name="Visa")
-    df, nb_filled = enrich_visa_from_categories(df, cat2visa)
 
     with tabs[0]:
-        if sheet_choice != client_target_sheet:
-            st.info(f"ℹ️ Le CRUD Clients cible la feuille **{client_target_sheet}**.")
+        st.info(f"ℹ️ CRUD Clients cible : **{client_target_sheet}**.")
 
-        # --- helper sliders robustes ---
         def make_range_slider(df_src: pd.DataFrame, col: str, label: str, container, fmt=lambda x: f"{x:,.2f}"):
             if col not in df_src.columns or df_src[col].dropna().empty:
                 container.caption(f"{label} : aucune donnée")
@@ -406,16 +338,11 @@ if not (is_ref and sheet_choice.lower() == "visa"):
             step = 1.0 if span > 1000 else 0.1 if span > 10 else 0.01
             return container.slider(label, min_value=vmin, max_value=vmax, value=(vmin, vmax), step=step)
 
-        # Filtres
         with st.container():
             c1, c2, c3 = st.columns(3)
             years = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
             months_present = sorted(df["Mois"].dropna().unique()) if "Mois" in df.columns else []
             visas = sorted(df["Visa"].dropna().astype(str).unique()) if "Visa" in df.columns else []
-
-            # reset des filtres si on vient d'écrire
-            if st.session_state.get("reset_filters_after_write"):
-                st.session_state.pop("reset_filters_after_write", None)
 
             year_sel = c1.multiselect("Année", years, default=years or None)
             month_sel = c2.multiselect("Mois (MM)", months_present, default=months_present or None)
@@ -425,7 +352,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
             pay_range   = make_range_slider(df, "Payé", "Payé (min-max)", c4, fmt=lambda x: _fmt_money_us(x))
             solde_range = make_range_slider(df, "Reste", "Solde / Reste (min-max)", c5, fmt=lambda x: _fmt_money_us(x))
 
-        # Appliquer filtres
         f = df.copy()
         if "Date" in f.columns and year_sel:
             f = f[f["Date"].apply(lambda x: pd.notna(x) and x.year in year_sel)]
@@ -438,7 +364,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
         if "Reste" in f.columns and solde_range is not None:
             f = f[(f["Reste"] >= solde_range[0]) & (f["Reste"] <= solde_range[1])]
 
-        # KPI
         st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Dossiers", f"{len(f)}")
@@ -449,7 +374,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
 
         st.divider()
 
-        # Graph par Mois (MM)
         st.subheader("📈 Nombre de dossiers par mois (MM)")
         if "Mois" in f.columns:
             counts = (
@@ -464,9 +388,12 @@ if not (is_ref and sheet_choice.lower() == "visa"):
         else:
             st.info("Aucune colonne 'Mois' exploitable.")
 
-        # Ajout d'acompte (ID fiable)
+        # Ajout d'acompte
         st.subheader("➕ Ajouter un acompte (US $)")
-        pending = df[df["Reste"] > 0.0005].copy() if "Reste" in df.columns else pd.DataFrame()
+        if "Reste" in df.columns:
+            pending = df[df["Reste"] > 0.0005].copy()
+        else:
+            pending = pd.DataFrame()
         if pending.empty:
             st.success("Tous les dossiers sont soldés ✅")
         else:
@@ -483,51 +410,40 @@ if not (is_ref and sheet_choice.lower() == "visa"):
             mode = cmode.selectbox("Mode", ["CB", "Virement", "Espèces", "Chèque", "Autre"])
             note = st.text_input("Note (facultatif)", "")
             if st.button("💾 Ajouter l’acompte"):
-                if amount <= 0:
-                    st.warning("Montant invalide.")
-                else:
+                try:
+                    original_df_dash = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False)
+                    if "Paiements" not in original_df_dash.columns:
+                        original_df_dash["Paiements"] = ""
+
+                    target_row_idx = None
+                    if "ID_Client" in original_df_dash.columns and label_to_id:
+                        target_id = label_to_id.get(selected_label, "")
+                        if target_id:
+                            hits = original_df_dash.index[original_df_dash["ID_Client"].astype(str) == str(target_id)]
+                            if len(hits) > 0:
+                                target_row_idx = hits[0]
+                    if target_row_idx is None:
+                        target_row_idx = pending.loc[pending["_label"] == selected_label].index[0]
+
+                    raw = original_df_dash.at[target_row_idx, "Paiements"] if target_row_idx in original_df_dash.index else ""
                     try:
-                        original_df_dash = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False)
-                        if "Paiements" not in original_df_dash.columns:
-                            original_df_dash["Paiements"] = ""
-
-                        target_row_idx = None
-                        if "ID_Client" in original_df_dash.columns and label_to_id:
-                            target_id = label_to_id.get(selected_label, "")
-                            if target_id:
-                                hits = original_df_dash.index[original_df_dash["ID_Client"].astype(str) == str(target_id)]
-                                if len(hits) > 0:
-                                    target_row_idx = hits[0]
-                        if target_row_idx is None:
-                            target_row_idx = pending.loc[pending["_label"] == selected_label].index[0]
-
-                        raw = original_df_dash.at[target_row_idx, "Paiements"] if target_row_idx in original_df_dash.index else ""
-                        try:
-                            pay_list = json.loads(raw) if isinstance(raw, str) and raw.strip() else []
-                            if not isinstance(pay_list, list):
-                                pay_list = []
-                        except Exception:
+                        pay_list = json.loads(raw) if isinstance(raw, str) and raw.strip() else []
+                        if not isinstance(pay_list, list):
                             pay_list = []
-                        pay_list.append({"date": str(pay_date), "amount": float(amount), "mode": mode, "note": note})
+                    except Exception:
+                        pay_list = []
+                    pay_list.append({"date": str(pay_date), "amount": float(amount), "mode": mode, "note": note})
 
-                        if target_row_idx not in original_df_dash.index:
-                            raise RuntimeError("Ligne cible introuvable pour l’ajout d’acompte.")
+                    if target_row_idx not in original_df_dash.index:
+                        raise RuntimeError("Ligne cible introuvable pour l’ajout d’acompte.")
 
-                        original_df_dash.at[target_row_idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
-                        updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df_dash)
-                        st.session_state["excel_bytes_current"] = updated_bytes
-                        st.session_state["reset_filters_after_write"] = True
-                        if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
-                            original_path = source_id.split("path:", 1)[1]
-                            try:
-                                Path(original_path).write_bytes(updated_bytes)
-                                st.success(f"Acompte ajouté et écrit dans : {original_path}")
-                            except Exception as e:
-                                st.info(f"Écriture disque impossible, fichier mémoire à jour. Détail: {e}")
-                        st.success(f"Acompte {_fmt_money_us(amount)} ajouté.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Erreur lors de l’ajout : {e}")
+                    original_df_dash.at[target_row_idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+                    updated_bytes = write_updated_excel_bytes(current_bytes, sheet_choice, original_df_dash)
+                    st.session_state["excel_bytes_current"] = updated_bytes
+                    st.success(f"Acompte {_fmt_money_us(amount)} ajouté.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur lors de l’ajout : {e}")
 
         # Tableau
         st.subheader("📋 Données")
@@ -549,26 +465,21 @@ if not (is_ref and sheet_choice.lower() == "visa"):
 if not (is_ref and sheet_choice.lower() == "visa"):
     with tabs[1]:
         st.subheader("👤 Clients — Créer / Modifier / Supprimer")
-        st.caption(f"Feuille cible : **{client_target_sheet}** — toutes les colonnes existantes sont proposées.")
+        st.caption(f"Feuille cible : **{client_target_sheet}**")
         if st.button("🔄 Rafraîchir"):
             st.rerun()
 
-        # Lire la feuille cible; si absente, on crée un squelette
+        # Lire la feuille cible (brute)
         orig = read_sheet_from_bytes(current_bytes, client_target_sheet, normalize=False).copy()
-        if orig.empty and client_target_sheet not in pd.ExcelFile(io.BytesIO(current_bytes)).sheet_names:
-            orig = pd.DataFrame(columns=["ID_Client","Nom","Telephone","Email","Date","Visa","Statut","Montant","Payé","Reste","Paiements"])
-
-        # Colonne technique _RowID pour cibler exactement la bonne ligne
+        # _RowID technique pour sélectionner la bonne ligne
         orig = orig.copy()
         orig["_RowID"] = range(len(orig))
 
-        # Colonnes connues
         bool_cols = [c for c in orig.columns if c.lower() in {"rfe","dossier envoyé","dossier approuvé","dossier refusé","dossier annulé"}]
         date_cols = [c for c in orig.columns if c.lower() in {"date"}]
         money_cols = [c for c in orig.columns if c.lower() in {"honoraires","acomptes","solde","montant","payé","reste"}]
         json_cols  = [c for c in orig.columns if c.lower() in {"paiements"}]
 
-        # Actions
         action = st.radio("Action", ["Créer", "Modifier", "Supprimer"], horizontal=True)
 
         id_col = "ID_Client" if "ID_Client" in orig.columns else None
@@ -584,35 +495,34 @@ if not (is_ref and sheet_choice.lower() == "visa"):
         if action == "Créer":
             st.markdown("### ➕ Nouveau client")
 
-            if len(orig.columns) == 0:
-                orig = pd.DataFrame(columns=["ID_Client","Nom","Telephone","Email","Date","Visa","Statut","Montant","Payé","Reste","Paiements","_RowID"])
+            # Si feuille inexistante : squelette d’écriture
+            if len(orig.columns) == 1 and "_RowID" in orig.columns:
+                base_cols = ["ID_Client","Nom","Telephone","Email","Date","Visa","Statut","Montant","Payé","Reste","Paiements"]
+                orig = pd.DataFrame(columns=base_cols + ["_RowID"])
 
             form_values = {}
             with st.form("create_form", clear_on_submit=False):
                 for c in [col for col in orig.columns if col != "_RowID"]:
-                    label = c
                     if c in bool_cols:
-                        form_values[c] = st.checkbox(label, value=False)
+                        form_values[c] = st.checkbox(c, value=False)
                     elif c in date_cols or c == "Date":
-                        form_values[c] = st.date_input(label, value=date.today())
+                        form_values[c] = st.date_input(c, value=date.today())
                     elif c in money_cols or c in {"Montant","Payé","Reste"}:
-                        form_values[c] = st.number_input(label, value=0.0, step=10.0, format="%.2f")
+                        form_values[c] = st.number_input(c, value=0.0, step=10.0, format="%.2f")
                     elif c in json_cols or c == "Paiements":
-                        form_values[c] = st.text_area(label, value="", placeholder='[{"date":"2025-10-03","amount":100}]')
+                        form_values[c] = st.text_area(c, value="", placeholder='[{"date":"2025-10-03","amount":100}]')
                     else:
-                        default_val = "" if c != "Statut" else "Inconnu"
-                        form_values[c] = st.text_input(label, value=default_val)
-                # ▼▼▼ libellé changé ici ▼▼▼
+                        form_values[c] = st.text_input(c, value="" if c != "Statut" else "Inconnu")
                 submitted = st.form_submit_button("💾 Sauvegarder", type="primary")
 
             if submitted:
-                # Colonnes essentielles si absentes
+                before_count = len(orig)
                 essential = ["ID_Client","Nom","Telephone","Date","Montant","Payé","Reste","Paiements"]
                 for must in essential:
                     if must not in orig.columns:
                         orig[must] = "" if must not in {"Montant","Payé","Reste"} else 0.0
 
-                # ID si vide
+                # Génération ID si vide
                 id_val = _safe_str(form_values.get("ID_Client", ""))
                 if not id_val:
                     base_row = {
@@ -628,7 +538,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                         tmp = f"{gen_id}-{n:02d}"
                     form_values["ID_Client"] = tmp
 
-                # Normaliser types
+                # Normalisation
                 new_row = {}
                 for c in [col for col in orig.columns if col != "_RowID"]:
                     v = form_values.get(c, "")
@@ -652,34 +562,32 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                         new_row[c] = _safe_str(v)
 
                 # Calcul Reste
-                if "Montant" in orig.columns and "Payé" in orig.columns:
-                    try:
-                        m = float(new_row.get("Montant", 0))
-                        p = float(new_row.get("Payé", 0))
-                        new_row["Reste"] = m - p
-                    except Exception:
-                        new_row["Reste"] = 0.0
+                try:
+                    m = float(new_row.get("Montant", 0))
+                    p = float(new_row.get("Payé", 0))
+                    new_row["Reste"] = m - p
+                except Exception:
+                    new_row["Reste"] = 0.0
 
-                # append + nouveau _RowID
                 new_row["_RowID"] = (orig["_RowID"].max() + 1) if not orig["_RowID"].empty else 0
                 orig = pd.concat([orig, pd.DataFrame([new_row])], ignore_index=True)
 
                 try:
-                    # Écriture sans la colonne technique
                     to_write = orig.drop(columns=["_RowID"], errors="ignore")
                     updated_bytes = write_updated_excel_bytes(current_bytes, client_target_sheet, to_write)
+                    # Vérification d'écriture : relecture depuis updated_bytes
+                    after_df = read_sheet_from_bytes(updated_bytes, client_target_sheet, normalize=False)
+                    wrote_ok = (len(after_df) >= (before_count)) and (str(form_values["ID_Client"]) in after_df.get("ID_Client", pd.Series([], dtype=str)).astype(str).values)
+
                     st.session_state["excel_bytes_current"] = updated_bytes
                     st.session_state["pending_sheet_choice"] = client_target_sheet
-                    st.session_state["reset_filters_after_write"] = True
-                    if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
-                        original_path = source_id.split("path:", 1)[1]
-                        try:
-                            Path(original_path).write_bytes(updated_bytes)
-                            st.success(f"Client créé et écrit dans : {original_path}")
-                        except Exception as e:
-                            st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
-                    st.success("✅ Client sauvegardé.")
-                    st.rerun()
+
+                    if wrote_ok:
+                        st.success(f"✅ Client sauvegardé (ID: {form_values['ID_Client']}).")
+                        st.rerun()
+                    else:
+                        st.error("⚠️ Écriture non confirmée. Voir panneau Debug ci-dessous.")
+
                 except Exception as e:
                     st.error(f"Erreur à l’écriture : {e}")
 
@@ -689,10 +597,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
             if orig.drop(columns=["_RowID"]).empty:
                 st.info("Aucun client à modifier.")
             else:
-                options = [
-                    (int(r["_RowID"]), _row_label(r))
-                    for _, r in orig.iterrows()
-                ]
+                options = [(int(r["_RowID"]), f"{_safe_str(r.get('ID_Client'))} — {_safe_str(r.get('Nom'))}") for _, r in orig.iterrows()]
                 sel_label = st.selectbox("Sélection", [lab for _, lab in options])
                 sel_rowid = [rid for rid, lab in options if lab == sel_label][0]
                 sel_idx = orig.index[orig["_RowID"] == sel_rowid][0]
@@ -702,21 +607,21 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                 with st.form("edit_form", clear_on_submit=False):
                     for c in [col for col in orig.columns if col != "_RowID"]:
                         v = init.get(c, "")
-                        if c in bool_cols:
+                        if c.lower() in {"rfe","dossier envoyé","dossier approuvé","dossier refusé","dossier annulé"}:
                             form_values[c] = st.checkbox(c, value=bool(v))
-                        elif c in date_cols or c == "Date":
+                        elif c.lower() in {"date"} or c == "Date":
                             try:
                                 d = pd.to_datetime(v).date() if _safe_str(v) else date.today()
                             except Exception:
                                 d = date.today()
                             form_values[c] = st.date_input(c, value=d)
-                        elif c in money_cols or c in {"Montant","Payé","Reste"}:
+                        elif c.lower() in {"honoraires","acomptes","solde","montant","payé","reste"} or c in {"Montant","Payé","Reste"}:
                             try:
                                 fv = float(v) if _safe_str(v) else 0.0
                             except Exception:
                                 fv = 0.0
                             form_values[c] = st.number_input(c, value=fv, step=10.0, format="%.2f")
-                        elif c in json_cols or c == "Paiements":
+                        elif c.lower() in {"paiements"} or c == "Paiements":
                             form_values[c] = st.text_area(c, value=_safe_str(v), height=120)
                         else:
                             form_values[c] = st.text_input(c, value=_safe_str(v))
@@ -729,14 +634,14 @@ if not (is_ref and sheet_choice.lower() == "visa"):
 
                     for c in [col for col in orig.columns if col != "_RowID"]:
                         v = form_values.get(c, "")
-                        if c in date_cols or c == "Date":
+                        if c.lower() in {"date"} or c == "Date":
                             orig.at[sel_idx, c] = str(v) if v else str(date.today())
-                        elif c in money_cols or c in {"Montant","Payé","Reste"}:
+                        elif c.lower() in {"honoraires","acomptes","solde","montant","payé","reste"} or c in {"Montant","Payé","Reste"}:
                             try: orig.at[sel_idx, c] = float(v or 0)
                             except Exception: orig.at[sel_idx, c] = 0.0
-                        elif c in bool_cols:
+                        elif c.lower() in {"rfe","dossier envoyé","dossier approuvé","dossier refusé","dossier annulé"}:
                             orig.at[sel_idx, c] = bool(v)
-                        elif c in json_cols or c == "Paiements":
+                        elif c.lower() in {"paiements"} or c == "Paiements":
                             try:
                                 if _safe_str(v):
                                     parsed = json.loads(v)
@@ -749,7 +654,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                         else:
                             orig.at[sel_idx, c] = _safe_str(v)
 
-                    # recalcul Reste
                     if {"Montant","Payé"}.issubset(orig.columns):
                         try:
                             orig.at[sel_idx, "Reste"] = float(orig.at[sel_idx, "Montant"]) - float(orig.at[sel_idx, "Payé"])
@@ -760,15 +664,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                         to_write = orig.drop(columns=["_RowID"], errors="ignore")
                         updated_bytes = write_updated_excel_bytes(current_bytes, client_target_sheet, to_write)
                         st.session_state["excel_bytes_current"] = updated_bytes
-                        st.session_state["pending_sheet_choice"] = client_target_sheet
-                        st.session_state["reset_filters_after_write"] = True
-                        if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
-                            original_path = source_id.split("path:", 1)[1]
-                            try:
-                                Path(original_path).write_bytes(updated_bytes)
-                                st.success(f"Client modifié et écrit dans : {original_path}")
-                            except Exception as e:
-                                st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
                         st.success("✅ Modifications enregistrées.")
                         st.rerun()
                     except Exception as e:
@@ -780,10 +675,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
             if orig.drop(columns=["_RowID"]).empty:
                 st.info("Aucun client à supprimer.")
             else:
-                options = [
-                    (int(r["_RowID"]), _row_label(r))
-                    for _, r in orig.iterrows()
-                ]
+                options = [(int(r["_RowID"]), f"{_safe_str(r.get('ID_Client'))} — {_safe_str(r.get('Nom'))}") for _, r in orig.iterrows()]
                 sel_label = st.selectbox("Sélection", [lab for _, lab in options])
                 sel_rowid = [rid for rid, lab in options if lab == sel_label][0]
                 sel_idx = orig.index[orig["_RowID"] == sel_rowid][0]
@@ -796,17 +688,21 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                         to_write = orig.drop(columns=["_RowID"], errors="ignore")
                         updated_bytes = write_updated_excel_bytes(current_bytes, client_target_sheet, to_write)
                         st.session_state["excel_bytes_current"] = updated_bytes
-                        st.session_state["pending_sheet_choice"] = client_target_sheet
-                        st.session_state["reset_filters_after_write"] = True
-                        if source_mode == "Fichier par défaut" and source_id.startswith("path:"):
-                            original_path = source_id.split("path:", 1)[1]
-                            try:
-                                Path(original_path).write_bytes(updated_bytes)
-                                st.success(f"Client supprimé et écrit dans : {original_path}")
-                            except Exception as e:
-                                st.info(f"Écriture disque impossible. Téléchargez le fichier. Détail: {e}")
                         st.success("✅ Client supprimé.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Erreur à l’écriture : {e}")
 
+        # ----- Debug -----
+        with st.expander("🛠️ Debug"):
+            st.write("Source:", st.session_state.get("excel_source_id"))
+            try:
+                live_sheets = pd.ExcelFile(io.BytesIO(st.session_state["excel_bytes_current"])).sheet_names
+            except Exception:
+                live_sheets = []
+            st.write("Feuilles (mémoire):", live_sheets)
+            if "ID_Client" in orig.columns:
+                st.write("Nb lignes (feuille cible, avant event):", len(orig.drop(columns=["_RowID"], errors="ignore")))
+            else:
+                st.write("Feuille cible vide ou sans colonnes.")
+            st.caption("⚠️ Les modifications sont stockées **en mémoire** dans l’application. Utilisez le bouton de téléchargement si vous souhaitez récupérer l’Excel mis à jour.")
