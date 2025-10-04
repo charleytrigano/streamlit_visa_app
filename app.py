@@ -107,16 +107,20 @@ def looks_like_reference(df: pd.DataFrame) -> bool:
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
+    # Date (sans heure)
     if "Date" in df.columns:
         df["Date"] = _to_date(df["Date"])
     else:
         df["Date"] = pd.NaT
 
+    # Mois (MM) interne
     df["Mois"] = df["Date"].apply(lambda x: f"{x.month:02d}" if pd.notna(x) else pd.NA)
 
+    # Visa / Categories
     visa_col = _first_col(df, ["Visa", "Categories", "Catégorie", "TypeVisa"])
     df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
 
+    # Statut
     if "__Statut règlement__" in df.columns and "Statut" not in df.columns:
         df = df.rename(columns={"__Statut règlement__": "Statut"})
     if "Statut" not in df.columns:
@@ -124,24 +128,29 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Statut"] = df["Statut"].astype(str).fillna("Inconnu")
 
+    # Montant
     if "Montant" in df.columns:
         df["Montant"] = _to_num(df["Montant"])
     else:
         src_montant = _first_col(df, ["Honoraires", "Total", "Amount"])
         df["Montant"] = _to_num(df[src_montant]) if src_montant else 0.0
 
+    # Paiements JSON -> TotalAcomptes
     if "Paiements" in df.columns:
         parsed = df["Paiements"].apply(_parse_paiements)
         df["TotalAcomptes"] = parsed.apply(_sum_payments)
 
+    # Payé
     if "Payé" in df.columns:
         df["Payé"] = _to_num(df["Payé"])
     else:
         src_paye = _first_col(df, ["TotalAcomptes", "Acomptes", "Paye", "Paid"])
         df["Payé"] = _to_num(df[src_paye]) if src_paye else 0.0
 
+    # Reste (toujours calculé)
     df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
 
+    # ID client auto
     if "ID_Client" not in df.columns:
         df["ID_Client"] = ""
     need_id = df["ID_Client"].astype(str).str.strip().eq("") | df["ID_Client"].isna()
@@ -153,6 +162,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_df: pd.DataFrame) -> bytes:
+    """Remplace (ou crée) la feuille `sheet_to_replace` et conserve les autres."""
     xls = pd.ExcelFile(io.BytesIO(original_bytes))
     out = io.BytesIO()
     target_written = False
@@ -167,6 +177,7 @@ def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_
                 target_written = True
             else:
                 pd.read_excel(xls, sheet_name=name).to_excel(writer, sheet_name=name, index=False)
+        # si la feuille n'existait pas, on la crée
         if not target_written:
             dfw = new_df.copy()
             for c in dfw.columns:
@@ -228,7 +239,7 @@ if "excel_bytes_current" not in st.session_state or st.session_state.get("excel_
     st.session_state["excel_source_id"] = source_id
 current_bytes = st.session_state["excel_bytes_current"]
 
-# >>> IMPORTANT : recalculer les feuilles à partir de current_bytes (pas du cache) <<<
+# >>> Recalcule les feuilles à partir de current_bytes (live) <<<
 sheet_names_current = pd.ExcelFile(io.BytesIO(current_bytes)).sheet_names
 
 # Redirection feuille (post-écriture) AVANT le selectbox
@@ -236,6 +247,15 @@ if "pending_sheet_choice" in st.session_state:
     pending = st.session_state.pop("pending_sheet_choice")
     if pending in sheet_names_current:
         st.session_state["sheet_choice"] = pending
+
+# --- Téléchargement global (toujours visible) ---
+st.sidebar.download_button(
+    "⬇️ Télécharger l’Excel (mémoire)",
+    data=st.session_state["excel_bytes_current"],
+    file_name="donnees_visa_clients.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Récupère l’Excel avec toutes les feuilles, tel qu’il est en mémoire."
+)
 
 if st.sidebar.button("🔄 Rafraîchir"):
     st.rerun()
@@ -390,10 +410,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
 
         # Ajout d'acompte
         st.subheader("➕ Ajouter un acompte (US $)")
-        if "Reste" in df.columns:
-            pending = df[df["Reste"] > 0.0005].copy()
-        else:
-            pending = pd.DataFrame()
+        pending = df[df["Reste"] > 0.0005].copy() if "Reste" in df.columns else pd.DataFrame()
         if pending.empty:
             st.success("Tous les dossiers sont soldés ✅")
         else:
@@ -705,4 +722,20 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                 st.write("Nb lignes (feuille cible, avant event):", len(orig.drop(columns=["_RowID"], errors="ignore")))
             else:
                 st.write("Feuille cible vide ou sans colonnes.")
-            st.caption("⚠️ Les modifications sont stockées **en mémoire** dans l’application. Utilisez le bouton de téléchargement si vous souhaitez récupérer l’Excel mis à jour.")
+            st.caption("⚠️ Les modifications sont stockées **en mémoire** dans l’application. Utilise les boutons de téléchargement pour récupérer le fichier mis à jour.")
+
+        # ----- Export rapide Clients (CSV) -----
+        from io import StringIO
+        _clients_csv_buf = StringIO()
+        try:
+            _clients_df_live = read_sheet_from_bytes(st.session_state["excel_bytes_current"], client_target_sheet, normalize=False)
+            _clients_df_live.to_csv(_clients_csv_buf, index=False)
+            st.download_button(
+                "⬇️ Exporter la feuille Clients (CSV)",
+                data=_clients_csv_buf.getvalue(),
+                file_name=f"{client_target_sheet}.csv",
+                mime="text/csv",
+                help="Télécharge uniquement la feuille Clients en CSV."
+            )
+        except Exception:
+            pass
