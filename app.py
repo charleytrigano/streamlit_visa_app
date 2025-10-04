@@ -2,11 +2,13 @@
 import io
 import json
 import hashlib
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
+import zipfile
 
 import streamlit as st
 import pandas as pd
+import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="📊 Visas — Edition directe", layout="wide")
 st.title("📊 Visas — Edition DIRECTE du fichier")
@@ -306,7 +308,7 @@ client_target_sheet = st.sidebar.selectbox("Feuille *Clients* (cible CRUD)", she
 ws_info = f"`{current_path}`" + ("" if WORK_DIR else "  \n(Mémorisation du dernier fichier indisponible : espace non réinscriptible)")
 st.sidebar.caption(f"Édition **directe** dans : {ws_info}")
 
-# bouton de téléchargement -> snapshot mémoire (pas d'I/O disque au clic)
+# bouton de téléchargement -> snapshot mémoire
 st.sidebar.download_button(
     "⬇️ Télécharger une copie",
     data=st.session_state.get("download_bytes", b""),
@@ -668,12 +670,25 @@ with tabs[2]:
         sel_visa   = c3.multiselect("Type de visa", visasA, default=[], key="anal_visa")
         include_na_dates = c4.checkbox("Inclure lignes sans date", value=True, key="anal_na_dates")
 
-        c5, c6 = st.columns([1,1])
-        agg_with_year = c5.toggle(
+    # Filtre plage de dates
+    with st.container():
+        d1, d2 = st.columns([1,1])
+        # bornes par défaut : min/max des dates dispos
+        if dfA["Date"].notna().any():
+            dmin = min([d for d in dfA["Date"] if pd.notna(d)])
+            dmax = max([d for d in dfA["Date"] if pd.notna(d)])
+        else:
+            today = date.today()
+            dmin, dmax = today - timedelta(days=365), today
+        date_from = d1.date_input("Du", value=dmin, key="anal_date_from")
+        date_to   = d2.date_input("Au", value=dmax, key="anal_date_to")
+
+        c3a, c3b = st.columns([1,1])
+        agg_with_year = c3a.toggle(
             "Agrégation par Année-Mois (YYYY-MM)", value=False, key="anal_agg_with_year",
             help="Si OFF : agrégation par Mois (MM) toutes années confondues."
         )
-        show_tables = c6.toggle("Voir les tableaux en dessous des graphiques", value=False, key="anal_show_tables")
+        show_tables = c3b.toggle("Voir les tableaux en dessous des graphiques", value=False, key="anal_show_tables")
 
     # Application des filtres
     fA = dfA.copy()
@@ -687,6 +702,12 @@ with tabs[2]:
         mask_month = fA["Mois"].isin(sel_months)
         if include_na_dates: mask_month = mask_month | fA["Mois"].isna()
         fA = fA[mask_month]
+    # Plage de dates
+    if "Date" in fA.columns and (date_from or date_to):
+        mask_range = fA["Date"].apply(lambda x: pd.notna(x) and (x >= date_from) and (x <= date_to))
+        if include_na_dates:
+            mask_range = mask_range | fA["Date"].isna()
+        fA = fA[mask_range]
 
     # Période d'agrégation
     if agg_with_year:
@@ -711,7 +732,7 @@ with tabs[2]:
 
     st.divider()
 
-    # Volumes
+    # Volumes par période
     st.markdown("### 📦 Volumes par période")
     def _safe_bool_sum(series): return series.fillna(False).astype(bool).sum()
     vol_all = fA.groupby("Periode").size().reindex(ordre_periodes).fillna(0).astype(int)
@@ -745,7 +766,7 @@ with tabs[2]:
 
     st.divider()
 
-    # Financier
+    # Financier par période
     st.markdown("### 💵 Financier par période")
     sums = fA.groupby("Periode")[["Montant","Payé","Reste"]].sum().reindex(ordre_periodes).fillna(0.0)
     cfin1, cfin2 = st.columns(2)
@@ -754,9 +775,45 @@ with tabs[2]:
     cfin2.caption("Encaissements (Payé) & Solde à encaisser (Reste)")
     cfin2.bar_chart(sums[["Payé","Reste"]])
 
+    # Taux d'approbation & encours moyen
+    st.markdown("### 📈 Taux & Encours moyens")
+    add1, add2 = st.columns(2)
+    if not vol_env.empty and (vol_env > 0).any():
+        taux_app = (vol_app.reindex(vol_env.index).fillna(0) / vol_env.replace(0, pd.NA)) * 100
+        add1.line_chart(pd.DataFrame({"Taux d'approbation (%)": taux_app.fillna(0.0)}))
+    else:
+        add1.info("Pas assez d'informations pour calculer un taux d’approbation (nécessite 'Dossier envoyé').")
+    encours_moy = (sums["Reste"] / vol_all.replace(0, pd.NA)).fillna(0.0)
+    add2.line_chart(pd.DataFrame({"Encours moyen par dossier ($)": encours_moy}))
+
     if show_tables:
         with st.expander("Détail tableaux — Financier"):
             st.dataframe(sums)
+
+    st.divider()
+
+    # Camembert statuts globaux (sur l'échantillon filtré)
+    st.markdown("### 🥧 Répartition des statuts (camembert)")
+    # Comptages globaux
+    count_app = int(fA.get("Dossier approuvé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if "Dossier approuvé" in fA.columns else 0
+    count_ref = int(fA.get("Dossier refusé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if "Dossier refusé" in fA.columns else 0
+    count_ann = int(fA.get("Dossier annulé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if "Dossier annulé" in fA.columns else 0
+    # "En attente" = pas approuvé, pas refusé, pas annulé
+    mask_att = pd.Series([True]*len(fA))
+    if "Dossier approuvé" in fA.columns: mask_att &= ~fA["Dossier approuvé"].fillna(False).astype(bool)
+    if "Dossier refusé"  in fA.columns: mask_att &= ~fA["Dossier refusé"].fillna(False).astype(bool)
+    if "Dossier annulé"  in fA.columns: mask_att &= ~fA["Dossier annulé"].fillna(False).astype(bool)
+    count_att = int(mask_att.sum())
+
+    pie_labels = ["Approuvés", "Refusés", "Annulés", "En attente"]
+    pie_sizes = [count_app, count_ref, count_ann, count_att]
+    if sum(pie_sizes) == 0:
+        st.info("Aucun dossier dans l'échantillon pour le camembert.")
+    else:
+        fig, ax = plt.subplots()
+        ax.pie(pie_sizes, labels=pie_labels, autopct="%1.1f%%", startangle=90)
+        ax.axis("equal")
+        st.pyplot(fig, use_container_width=True)
 
     st.divider()
 
@@ -798,6 +855,13 @@ with tabs[2]:
             if vols_dict:
                 blocks.append(("Volumes — Statuts par période", st_data2))
             blocks.append(("Financier — Montant / Payé / Reste par période", sums))
+
+            # Taux & Encours
+            if not vol_env.empty and (vol_env > 0).any():
+                taux_app = (vol_app.reindex(vol_env.index).fillna(0) / vol_env.replace(0, pd.NA)) * 100
+                blocks.append(("Taux d'approbation (%) par période", pd.DataFrame({"Taux (%)": taux_app.fillna(0.0)})))
+            blocks.append(("Encours moyen par dossier", pd.DataFrame({"Encours moyen ($)": encours_moy})))
+
             blocks.append(("Top visas — par nombre de dossiers", pd.DataFrame(top_vol)))
             blocks.append(("Top visas — par chiffre d'affaires", pd.DataFrame({"CA": top_ca})))
 
@@ -806,3 +870,54 @@ with tabs[2]:
             st.success("Feuille **'Analyses'** exportée dans le fichier. ✅ (Téléchargement → sidebar)")
         except Exception as e:
             st.error(f"Échec export : {e}")
+
+    # Export Analyses -> ZIP CSV
+    st.markdown("### 📥 Export CSV (ZIP)")
+    st.caption("Télécharge un ZIP contenant les principaux tableaux au format CSV.")
+    if st.button("Préparer le ZIP des analyses (CSV)", key="anal_zip_btn"):
+        try:
+            mem = io.BytesIO()
+            with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # KPI
+                kpi_df = pd.DataFrame({
+                    "KPI": ["Dossiers (filtrés)", "Chiffre d’affaires", "Encaissements", "Solde à encaisser"],
+                    "Valeur": [
+                        len(fA),
+                        float(fA.get("Montant", pd.Series(dtype=float)).sum()),
+                        float(fA.get("Payé",    pd.Series(dtype=float)).sum()),
+                        float(fA.get("Reste",   pd.Series(dtype=float)).sum()),
+                    ],
+                })
+                zf.writestr("kpi_globaux.csv", kpi_df.to_csv(index=False, encoding="utf-8-sig"))
+
+                zf.writestr("volumes_ouverts_par_periode.csv", st_data1.to_csv(encoding="utf-8-sig"))
+                if vols_dict:
+                    zf.writestr("volumes_statuts_par_periode.csv", st_data2.to_csv(encoding="utf-8-sig"))
+                zf.writestr("financier_par_periode.csv", sums.to_csv(encoding="utf-8-sig"))
+
+                # Taux & Encours
+                if not vol_env.empty and (vol_env > 0).any():
+                    taux_app = (vol_app.reindex(vol_env.index).fillna(0) / vol_env.replace(0, pd.NA)) * 100
+                    zf.writestr("taux_approbation_par_periode.csv", pd.DataFrame({"Taux (%)": taux_app.fillna(0.0)}).to_csv(encoding="utf-8-sig"))
+                zf.writestr("encours_moyen_par_dossier.csv", pd.DataFrame({"Encours moyen ($)": encours_moy}).to_csv(encoding="utf-8-sig"))
+
+                zf.writestr("top_visas_volume.csv", pd.DataFrame(top_vol).to_csv(encoding="utf-8-sig"))
+                zf.writestr("top_visas_ca.csv", pd.DataFrame({"CA": top_ca}).to_csv(encoding="utf-8-sig"))
+
+                # Dataset filtré complet (utile)
+                zf.writestr("dataset_filtre_complet.csv", fA.to_csv(index=False, encoding="utf-8-sig"))
+
+            mem.seek(0)
+            st.session_state["anal_zip_bytes"] = mem.read()
+            st.success("ZIP des analyses prêt. Utilise le bouton ci-dessous pour télécharger.")
+        except Exception as e:
+            st.error(f"Échec création ZIP : {e}")
+
+    if "anal_zip_bytes" in st.session_state:
+        st.download_button(
+            "⬇️ Télécharger le ZIP des analyses (CSV)",
+            data=st.session_state["anal_zip_bytes"],
+            file_name="analyses_csv.zip",
+            mime="application/zip",
+            key="anal_zip_download"
+        )
