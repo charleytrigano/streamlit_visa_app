@@ -56,6 +56,27 @@ def _fmt_money_us(v: float) -> str:
     except Exception:
         return "$0.00"
 
+def _parse_paiements(x):
+    if isinstance(x, list):
+        return x
+    if pd.isna(x) or str(x).strip() == "":
+        return []
+    try:
+        v = json.loads(x)
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+def _sum_payments(pay_list) -> float:
+    total = 0.0
+    for p in (pay_list or []):
+        try:
+            amt = float(p.get("amount", 0) if isinstance(p, dict) else p)
+        except Exception:
+            amt = 0.0
+        total += amt
+    return total
+
 def _make_client_id_from_row(row) -> str:
     base = "|".join([
         _safe_str(row.get("Nom")),
@@ -93,10 +114,10 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Date"] = pd.NaT
 
-    # Mois (MM) interne (non affiché, mais utile pour les graphes)
+    # Mois (MM) interne (non affiché)
     df["Mois"] = df["Date"].apply(lambda x: f"{x.month:02d}" if pd.notna(x) else pd.NA)
 
-    # Visa / Categories
+    # Visa
     visa_col = _first_col(df, ["Visa", "Categories", "Catégorie", "TypeVisa"])
     df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
 
@@ -110,8 +131,12 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "Payé" in df.columns:
         df["Payé"] = _to_num(df["Payé"])
     else:
-        src_paye = _first_col(df, ["Acomptes", "Paye", "Paid"])
-        df["Payé"] = _to_num(df[src_paye]) if src_paye else 0.0
+        # Déduire Payé depuis Paiements s'il existe
+        if "Paiements" in df.columns:
+            parsed = df["Paiements"].apply(_parse_paiements)
+            df["Payé"] = parsed.apply(_sum_payments).astype(float)
+        else:
+            df["Payé"] = 0.0
 
     # Reste (toujours calculé)
     df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
@@ -178,8 +203,10 @@ def load_excel_bytes(xlsx_input):
 def read_sheet_from_bytes(data_bytes: bytes, sheet_name: str, normalize: bool) -> pd.DataFrame:
     xls = pd.ExcelFile(io.BytesIO(data_bytes))
     if sheet_name not in xls.sheet_names:
-        base = pd.DataFrame(columns=["ID_Client","Nom","Telephone","Email","Date","Visa","Montant","Payé","Reste",
-                                     "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"])
+        base = pd.DataFrame(columns=[
+            "ID_Client","Nom","Telephone","Email","Date","Visa","Montant","Payé","Reste",
+            "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé","Paiements"
+        ])
         return normalize_dataframe(base) if normalize else base
     df = pd.read_excel(xls, sheet_name=sheet_name)
     if normalize and not looks_like_reference(df):
@@ -269,10 +296,6 @@ client_target_sheet = st.sidebar.selectbox(
     help="Toutes les opérations Créer/Modifier/Supprimer s’appliquent à cette feuille."
 )
 
-# Référentiel Visa ?
-sample_df = read_sheet_from_bytes(current_bytes, sheet_choice, normalize=False).head(5)
-is_ref = looks_like_reference(sample_df)
-
 # =========================
 # TABS
 # =========================
@@ -360,6 +383,88 @@ with tabs[0]:
     else:
         st.info("Aucune colonne 'Mois' exploitable.")
 
+    # === Ajouter un paiement (US $) ===
+    st.subheader("➕ Ajouter un paiement (US $)")
+    clients_live_norm = read_sheet_from_bytes(current_bytes, client_target_sheet, normalize=True).copy()
+    pending = clients_live_norm[clients_live_norm["Reste"] > 0.004].copy() if "Reste" in clients_live_norm.columns else pd.DataFrame()
+    if pending.empty:
+        st.success("Tous les dossiers sont soldés ✅")
+    else:
+        pending["_label"] = pending.apply(
+            lambda r: f'{r.get("ID_Client","")} — {r.get("Nom","")} — Reste {_fmt_money_us(float(r.get("Reste",0)))}',
+            axis=1
+        )
+        label_to_id = pending.set_index("_label")["ID_Client"].to_dict()
+
+        csel, camt, cdate, cmode = st.columns([2,1,1,1])
+        selected_label = csel.selectbox("Dossier à créditer", pending["_label"].tolist())
+        amount = camt.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f")
+        pay_date = cdate.date_input("Date", value=date.today())
+        mode = cmode.selectbox("Mode", ["CB","Chèque","Espèces","Virement","Autre"])
+        note = st.text_input("Note (facultatif)", "")
+
+        if st.button("💾 Ajouter le paiement"):
+            try:
+                # Lire la feuille brute pour écrire dedans
+                live_raw = read_sheet_from_bytes(st.session_state["excel_bytes_current"], client_target_sheet, normalize=False).copy()
+                if "Paiements" not in live_raw.columns:
+                    live_raw["Paiements"] = ""  # crée la colonne au besoin
+
+                # Retrouver la ligne par ID_Client
+                target_id = label_to_id.get(selected_label, "")
+                if "ID_Client" in live_raw.columns and target_id:
+                    hits = live_raw.index[live_raw["ID_Client"].astype(str) == str(target_id)]
+                    if len(hits) == 0:
+                        raise RuntimeError("Impossible de retrouver le dossier dans la feuille Clients.")
+                    row_idx = hits[0]
+                else:
+                    # Fallback très rare
+                    row_idx = pending.loc[pending["_label"] == selected_label].index[0]
+
+                # Reste actuel (côté normalisé) pour plafonner
+                reste_actuel = float(pending.set_index("_label").loc[selected_label, "Reste"])
+                add_amt = float(amount or 0.0)
+                if add_amt <= 0:
+                    st.warning("Le montant doit être > 0.")
+                    st.stop()
+                if add_amt > reste_actuel + 1e-9:
+                    st.info(f"Le paiement dépasse le reste. Plafonné à {_fmt_money_us(reste_actuel)}.")
+                    add_amt = reste_actuel
+
+                # Mettre à jour la liste Paiements (JSON)
+                raw = live_raw.at[row_idx, "Paiements"] if row_idx in live_raw.index else ""
+                pay_list = _parse_paiements(raw)
+                pay_list.append({"date": str(pay_date), "amount": float(add_amt), "mode": mode, "note": note})
+                live_raw.at[row_idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+
+                # Mettre à jour Payé (somme des paiements) et Reste
+                if "Payé" not in live_raw.columns:
+                    live_raw["Payé"] = 0.0
+                total_paid = _sum_payments(pay_list)
+                live_raw.at[row_idx, "Payé"] = float(total_paid)
+
+                if "Montant" not in live_raw.columns:
+                    live_raw["Montant"] = 0.0
+                if "Reste" not in live_raw.columns:
+                    live_raw["Reste"] = 0.0
+                try:
+                    m = float(live_raw.at[row_idx, "Montant"])
+                except Exception:
+                    m = 0.0
+                live_raw.at[row_idx, "Reste"] = max(m - float(total_paid), 0.0)
+
+                # Écrire en mémoire
+                updated_bytes = write_updated_excel_bytes(
+                    st.session_state["excel_bytes_current"],
+                    client_target_sheet,
+                    live_raw
+                )
+                st.session_state["excel_bytes_current"] = updated_bytes
+                st.success(f"Paiement {_fmt_money_us(add_amt)} ajouté. Solde mis à jour. Pense à **Sauvegarder (même nom)**.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erreur lors de l’ajout : {e}")
+
     # Tableau principal
     st.subheader("📋 Données")
     cols_show = [c for c in ["ID_Client","Nom","Telephone","Email","Date","Visa","Montant","Payé","Reste",
@@ -413,7 +518,7 @@ with tabs[1]:
         # Squelette si feuille vide
         if len(orig.columns) == 1 and "_RowID" in orig.columns:
             base_cols = ["ID_Client","Nom","Telephone","Email","Date","Visa","Montant","Payé","Reste",
-                         "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]
+                         "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé","Paiements"]
             orig = pd.DataFrame(columns=base_cols + ["_RowID"])
 
         # --- Formulaire (sans Catégorie, sans Statut, sans Paiements) ---
@@ -424,7 +529,7 @@ with tabs[1]:
             c3, c4 = st.columns(2)
             email = c3.text_input("Email")
             d = c4.date_input("Date", value=date.today())
-            # Visa seul (si liste dispo -> selectbox, sinon champ texte)
+            # Visa seul (référentiel si dispo)
             if visa_options:
                 visa = st.selectbox("Visa", visa_options, index=0 if visa_options else None)
             else:
@@ -433,7 +538,7 @@ with tabs[1]:
             montant = c5.number_input("Montant (US $)", value=0.0, step=10.0, format="%.2f")
             paye    = c6.number_input("Payé (US $)", value=0.0, step=10.0, format="%.2f")
 
-            # Booléens (optionnels, affichés si colonnes existent dans l'Excel)
+            # Booléens
             if BOOL_ENVOYE or BOOL_REFUSE or BOOL_ANNULE or BOOL_APPROUVE or BOOL_RFE:
                 st.markdown("#### État du dossier")
             val_envoye  = st.checkbox("Dossier envoyé", value=False)  if BOOL_ENVOYE else False
@@ -445,7 +550,6 @@ with tabs[1]:
             submitted = st.form_submit_button("💾 Sauvegarder", type="primary")
 
         if submitted:
-            # Contrainte RFE : ne peut être True que si envoyé/refusé/annulé au moins un True
             if val_rfe and not (val_envoye or val_refuse or val_annule):
                 st.error("RFE ne peut être activé que si **Dossier envoyé** OU **Dossier refusé** OU **Dossier annulé** est coché.")
                 st.stop()
@@ -457,14 +561,20 @@ with tabs[1]:
             ).copy()
             if live_before.empty and client_target_sheet not in pd.ExcelFile(io.BytesIO(st.session_state["excel_bytes_current"])).sheet_names:
                 live_before = pd.DataFrame(columns=["ID_Client","Nom","Telephone","Email","Date","Visa","Montant","Payé","Reste",
-                                                    "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"])
+                                                    "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé","Paiements"])
 
             # Colonnes minimales
             for must in ["ID_Client","Nom","Telephone","Email","Date","Visa","Montant","Payé","Reste",
-                         "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]:
+                         "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé","Paiements"]:
                 if must not in live_before.columns:
-                    live_before[must] = "" if must not in {"Montant","Payé","Reste",
-                                                           "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"} else 0.0
+                    if must in {"Montant","Payé","Reste"}:
+                        live_before[must] = 0.0
+                    elif must in {"RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"}:
+                        live_before[must] = False
+                    elif must == "Paiements":
+                        live_before[must] = ""
+                    else:
+                        live_before[must] = ""
 
             # ID auto
             gen_id = _make_client_id_from_row({"Nom": nom, "Telephone": tel, "Date": d})
@@ -476,28 +586,25 @@ with tabs[1]:
             id_client = tmp
 
             # Nouvelle ligne
-            new_row = {}
-            for c in live_before.columns:
-                cl = c.lower()
-                if c == "ID_Client": new_row[c] = id_client
-                elif c == "Nom": new_row[c] = _safe_str(nom)
-                elif c == "Telephone": new_row[c] = _safe_str(tel)
-                elif c == "Email": new_row[c] = _safe_str(email)
-                elif c == "Date": new_row[c] = str(d) if d else ""
-                elif c == "Visa": new_row[c] = _safe_str(visa)
-                elif c == "Montant": new_row[c] = float(montant or 0)
-                elif c == "Payé": new_row[c] = float(paye or 0)
-                elif c == "Reste": new_row[c] = 0.0  # recalculé en dessous
-                elif cl == "rfe": new_row[c] = bool(val_rfe)
-                elif cl == "dossier envoyé": new_row[c] = bool(val_envoye)
-                elif cl == "dossier approuvé": new_row[c] = bool(val_approuve)
-                elif cl == "dossier refusé": new_row[c] = bool(val_refuse)
-                elif cl == "dossier annulé": new_row[c] = bool(val_annule)
-                else:
-                    new_row[c] = _safe_str("")  # champs annexes ignorés en création
+            new_row = {
+                "ID_Client": id_client,
+                "Nom": _safe_str(nom),
+                "Telephone": _safe_str(tel),
+                "Email": _safe_str(email),
+                "Date": str(d) if d else "",
+                "Visa": _safe_str(visa),
+                "Montant": float(montant or 0),
+                "Payé": float(paye or 0),
+                "Reste": 0.0,  # recalculé
+                "Paiements": "",  # historique vide au départ
+            }
+            if "RFE" in live_before.columns: new_row["RFE"] = bool(val_rfe)
+            if "Dossier envoyé" in live_before.columns: new_row["Dossier envoyé"] = bool(val_envoye)
+            if "Dossier approuvé" in live_before.columns: new_row["Dossier approuvé"] = bool(val_approuve)
+            if "Dossier refusé" in live_before.columns: new_row["Dossier refusé"] = bool(val_refuse)
+            if "Dossier annulé" in live_before.columns: new_row["Dossier annulé"] = bool(val_annule)
 
-            # Recalcul Reste
-            new_row["Reste"] = float(new_row.get("Montant", 0)) - float(new_row.get("Payé", 0))
+            new_row["Reste"] = float(new_row["Montant"]) - float(new_row["Payé"])
 
             live_after = pd.concat([live_before, pd.DataFrame([new_row])], ignore_index=True)
             try:
@@ -538,12 +645,14 @@ with tabs[1]:
                     d_init = date.today()
                 d = c4.date_input("Date", value=d_init)
                 # Visa
-                if visa_options:
+                if "Visa" in orig.columns and _safe_str(init.get("Visa")) and len(visa_options) > 0:
                     try:
                         idx = visa_options.index(_safe_str(init.get("Visa")))
                     except Exception:
-                        idx = 0 if visa_options else None
+                        idx = 0
                     visa = st.selectbox("Visa", visa_options, index=idx)
+                elif len(visa_options) > 0:
+                    visa = st.selectbox("Visa", visa_options, index=0)
                 else:
                     visa = st.text_input("Visa", value=_safe_str(init.get("Visa")))
                 c5, c6 = st.columns(2)
@@ -554,14 +663,12 @@ with tabs[1]:
                 montant = c5.number_input("Montant (US $)", value=montant, step=10.0, format="%.2f")
                 paye    = c6.number_input("Payé (US $)", value=paye,    step=10.0, format="%.2f")
 
-                # Booléens (affichés si colonnes existent)
-                if BOOL_ENVOYE or BOOL_REFUSE or BOOL_ANNULE or BOOL_APPROUVE or BOOL_RFE:
-                    st.markdown("#### État du dossier")
-                val_envoye   = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")))  if BOOL_ENVOYE else False
-                val_refuse   = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")))  if BOOL_REFUSE else False
-                val_annule   = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")))  if BOOL_ANNULE else False
-                val_approuve = st.checkbox("Dossier approuvé",value=bool(init.get("Dossier approuvé")))if BOOL_APPROUVE else False
-                val_rfe      = st.checkbox("RFE",             value=bool(init.get("RFE")))             if BOOL_RFE else False
+                # Booléens (si existants)
+                val_envoye   = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")))  if "Dossier envoyé" in orig.columns else False
+                val_refuse   = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")))  if "Dossier refusé" in orig.columns else False
+                val_annule   = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")))  if "Dossier annulé" in orig.columns else False
+                val_approuve = st.checkbox("Dossier approuvé",value=bool(init.get("Dossier approuvé")))if "Dossier approuvé" in orig.columns else False
+                val_rfe      = st.checkbox("RFE",             value=bool(init.get("RFE")))             if "RFE" in orig.columns else False
 
                 submitted = st.form_submit_button("💾 Enregistrer", type="primary")
 
@@ -595,15 +702,12 @@ with tabs[1]:
                         live.at[target_idx, "Visa"] = _safe_str(visa)
                         live.at[target_idx, "Montant"] = float(montant or 0)
                         live.at[target_idx, "Payé"] = float(paye or 0)
-                        # Recalcule Reste
                         live.at[target_idx, "Reste"] = float(live.at[target_idx, "Montant"]) - float(live.at[target_idx, "Payé"])
-
-                        # Booléens si présents
-                        if BOOL_ENVOYE:  live.at[target_idx, BOOL_ENVOYE[0]]  = bool(val_envoye)
-                        if BOOL_REFUSE:  live.at[target_idx, BOOL_REFUSE[0]]  = bool(val_refuse)
-                        if BOOL_ANNULE:  live.at[target_idx, BOOL_ANNULE[0]]  = bool(val_annule)
-                        if BOOL_APPROUVE:live.at[target_idx, BOOL_APPROUVE[0]]= bool(val_approuve)
-                        if BOOL_RFE:     live.at[target_idx, BOOL_RFE[0]]     = bool(val_rfe)
+                        if "Dossier envoyé" in live.columns:   live.at[target_idx, "Dossier envoyé"]   = bool(val_envoye)
+                        if "Dossier approuvé" in live.columns: live.at[target_idx, "Dossier approuvé"] = bool(val_approuve)
+                        if "Dossier refusé" in live.columns:   live.at[target_idx, "Dossier refusé"]   = bool(val_refuse)
+                        if "Dossier annulé" in live.columns:   live.at[target_idx, "Dossier annulé"]   = bool(val_annule)
+                        if "RFE" in live.columns:              live.at[target_idx, "RFE"]              = bool(val_rfe)
 
                         try:
                             updated_bytes = write_updated_excel_bytes(st.session_state["excel_bytes_current"], client_target_sheet, live)
