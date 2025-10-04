@@ -195,11 +195,45 @@ def write_sheet_inplace(path: Path, sheet_to_replace: str, new_df: pd.DataFrame)
                     dfw[c] = dfw[c].astype(str).fillna("")
             dfw.to_excel(writer, sheet_name=sheet_to_replace, index=False)
 
-    # ECRITURE DIRECTE sur le même fichier
+    # ECRITURE DIRECTE sur le même fichier + snapshot pour téléchargement
     bytes_out = out.getvalue()
     path.write_bytes(bytes_out)
+    try:
+        st.session_state["download_bytes"] = bytes_out
+        st.session_state["download_name"] = path.name
+    except Exception:
+        pass
 
-    # NEW: snapshot pour téléchargement (évite toute relecture bloquante)
+def write_analyses_sheet(path: Path, blocks: list[tuple[str, pd.DataFrame]]):
+    """
+    Écrit/Remplace la feuille 'Analyses' en plaçant chaque DataFrame à la suite
+    (avec un titre au-dessus). Ne modifie pas les autres feuilles.
+    """
+    xls = pd.ExcelFile(path)
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        # Copier toutes les feuilles sauf 'Analyses'
+        for name in xls.sheet_names:
+            if name == "Analyses":
+                continue
+            pd.read_excel(xls, sheet_name=name).to_excel(writer, sheet_name=name, index=False)
+
+        # Nouvelle feuille 'Analyses'
+        startrow = 0
+        for title, df in blocks:
+            # Titre
+            pd.DataFrame({title: []}).to_excel(writer, sheet_name="Analyses", index=False, startrow=startrow)
+            startrow += 1
+            # Table
+            df_to_write = df.copy()
+            if isinstance(df_to_write, pd.Series):
+                df_to_write = df_to_write.to_frame()
+            df_to_write.to_excel(writer, sheet_name="Analyses", index=True, startrow=startrow)
+            startrow += (len(df_to_write) + 3)  # espace
+
+    # ECRITURE + snapshot
+    bytes_out = out.getvalue()
+    path.write_bytes(bytes_out)
     try:
         st.session_state["download_bytes"] = bytes_out
         st.session_state["download_name"] = path.name
@@ -233,7 +267,7 @@ up = st.sidebar.file_uploader("Remplacer par un autre Excel (.xlsx, .xls)", type
 if up is not None:
     new_path = copy_upload_to_workspace(up)
     save_workspace_path(new_path)
-    # NEW: snapshot de téléchargement pour le nouveau fichier
+    # snapshot pour téléchargement
     try:
         st.session_state["download_bytes"] = new_path.read_bytes()
         st.session_state["download_name"] = new_path.name
@@ -247,7 +281,7 @@ if up is not None:
 if current_path is None or not current_path.exists():
     st.stop()
 
-# NEW: init snapshot au démarrage si absent / différent
+# snapshot au démarrage si absent
 if "download_bytes" not in st.session_state or st.session_state.get("download_name") != current_path.name:
     try:
         st.session_state["download_bytes"] = current_path.read_bytes()
@@ -274,7 +308,7 @@ client_target_sheet = st.sidebar.selectbox("Feuille *Clients* (cible CRUD)", she
 ws_info = f"`{current_path}`" + ("" if WORK_DIR else "  \n(Mémorisation du dernier fichier indisponible : espace non réinscriptible)")
 st.sidebar.caption(f"Édition **directe** dans : {ws_info}")
 
-# NEW: bouton de téléchargement -> snapshot mémoire (plus de spinner)
+# bouton de téléchargement -> snapshot mémoire
 st.sidebar.download_button(
     "⬇️ Télécharger une copie",
     data=st.session_state.get("download_bytes", b""),
@@ -284,7 +318,7 @@ st.sidebar.download_button(
 )
 
 # ---------- TABS ----------
-tabs = st.tabs(["Dashboard", "Clients (CRUD)"])
+tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses"])
 
 # ---------- DASHBOARD ----------
 with tabs[0]:
@@ -613,3 +647,186 @@ with tabs[1]:
                 save_workspace_path(current_path)
                 st.success("Client supprimé **dans le fichier**. ✅")
                 st.rerun()
+
+# ---------- ANALYSES ----------
+with tabs[2]:
+    st.subheader("📊 Analyses — Volumes & Financier")
+
+    # On travaille sur la feuille Clients cible (normalisée)
+    dfA = read_sheet(current_path, client_target_sheet, normalize=True).copy()
+
+    if dfA.empty:
+        st.info("Aucune donnée dans la feuille cible pour analyser.")
+        st.stop()
+
+    # Filtres (par défaut rien de sélectionné)
+    with st.container():
+        c1, c2, c3, c4 = st.columns([1,1,1,1])
+
+        yearsA  = sorted({d.year for d in dfA["Date"] if pd.notna(d)}) if "Date" in dfA.columns else []
+        monthsA = [f"{m:02d}" for m in range(1,13)]
+        visasA  = sorted(dfA["Visa"].dropna().astype(str).unique()) if "Visa" in dfA.columns else []
+
+        sel_years  = c1.multiselect("Année", yearsA, default=[])
+        sel_months = c2.multiselect("Mois (MM)", monthsA, default=[])
+        sel_visa   = c3.multiselect("Type de visa", visasA, default=[])
+        include_na_dates = c4.checkbox("Inclure lignes sans date", value=True)
+
+        c5, c6 = st.columns([1,1])
+        agg_with_year = c5.toggle("Agrégation par Année-Mois (YYYY-MM)", value=False,
+                                  help="Si OFF : agrégation par Mois (MM) toutes années confondues.")
+        show_tables   = c6.toggle("Voir les tableaux en dessous des graphiques", value=False)
+
+    # Application des filtres
+    fA = dfA.copy()
+    # Visa
+    if sel_visa:
+        fA = fA[fA["Visa"].astype(str).isin(sel_visa)]
+
+    # Année
+    if "Date" in fA.columns and sel_years:
+        mask_year = fA["Date"].apply(lambda x: (pd.notna(x) and x.year in sel_years))
+        if include_na_dates:
+            mask_year = mask_year | fA["Date"].isna()
+        fA = fA[mask_year]
+
+    # Mois (MM)
+    if "Mois" in fA.columns and sel_months:
+        mask_month = fA["Mois"].isin(sel_months)
+        if include_na_dates:
+            mask_month = mask_month | fA["Mois"].isna()
+        fA = fA[mask_month]
+
+    # Période d'agrégation
+    if agg_with_year:
+        # YYYY-MM (si date manquante -> "NA")
+        fA["Periode"] = fA["Date"].apply(lambda x: f"{x.year}-{x.month:02d}" if pd.notna(x) else "NA")
+        ordre_periodes = sorted([p for p in fA["Periode"].unique() if p != "NA"]) + (["NA"] if "NA" in fA["Periode"].values else [])
+    else:
+        # MM seulement (1..12), NA pour dates manquantes
+        fA["Periode"] = fA["Mois"].fillna("NA")
+        ordre_periodes = [f"{m:02d}" for m in range(1,13)]
+        if "NA" in fA["Periode"].values:
+            ordre_periodes = ordre_periodes + ["NA"]
+
+    # Conversions numériques sûres
+    for col in ["Montant","Payé","Reste"]:
+        if col in fA.columns:
+            try:
+                fA[col] = pd.to_numeric(fA[col], errors="coerce").fillna(0.0)
+            except Exception:
+                fA[col] = 0.0
+
+    # ===== KPI globaux (après filtres) =====
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Dossiers (filtrés)", f"{len(fA)}")
+    k2.metric("Chiffre d’affaires", _fmt_money_us(float(fA.get("Montant", pd.Series(dtype=float)).sum())))
+    k3.metric("Encaissements",       _fmt_money_us(float(fA.get("Payé",    pd.Series(dtype=float)).sum())))
+    k4.metric("Solde à encaisser",   _fmt_money_us(float(fA.get("Reste",   pd.Series(dtype=float)).sum())))
+
+    st.divider()
+
+    # ===== Volumes par période =====
+    st.markdown("### 📦 Volumes par période")
+
+    def _safe_bool_sum(series):
+        return series.fillna(False).astype(bool).sum()
+
+    vol_all = fA.groupby("Periode").size().reindex(ordre_periodes).fillna(0).astype(int)
+
+    vol_env = fA.groupby("Periode")["Dossier envoyé"].apply(_safe_bool_sum).reindex(ordre_periodes).fillna(0) if "Dossier envoyé" in fA.columns else pd.Series(dtype=int)
+    vol_app = fA.groupby("Periode")["Dossier approuvé"].apply(_safe_bool_sum).reindex(ordre_periodes).fillna(0) if "Dossier approuvé" in fA.columns else pd.Series(dtype=int)
+    vol_ref = fA.groupby("Periode")["Dossier refusé"].apply(_safe_bool_sum).reindex(ordre_periodes).fillna(0)   if "Dossier refusé" in fA.columns else pd.Series(dtype=int)
+    vol_ann = fA.groupby("Periode")["Dossier annulé"].apply(_safe_bool_sum).reindex(ordre_periodes).fillna(0)   if "Dossier annulé" in fA.columns else pd.Series(dtype=int)
+
+    cvol1, cvol2 = st.columns(2)
+    cvol1.caption("Dossiers ouverts")
+    st_data1 = pd.DataFrame({"Ouverts": vol_all})
+    cvol1.bar_chart(st_data1)
+
+    vols_dict = {}
+    if not vol_env.empty: vols_dict["Envoyés"] = vol_env
+    if not vol_app.empty: vols_dict["Approuvés"] = vol_app
+    if not vol_ref.empty: vols_dict["Refusés"]  = vol_ref
+    if not vol_ann.empty: vols_dict["Annulés"]  = vol_ann
+
+    if vols_dict:
+        st_data2 = pd.DataFrame(vols_dict)
+        cvol2.caption("Statuts par période")
+        cvol2.bar_chart(st_data2)
+        if show_tables:
+            with st.expander("Détail tableaux — Volumes"):
+                st.write("Ouverts")
+                st.dataframe(st_data1)
+                st.write("Statuts")
+                st.dataframe(st_data2)
+    else:
+        cvol2.info("Aucune colonne de statut trouvée (Envoyé/Approuvé/Refusé/Annulé).")
+
+    st.divider()
+
+    # ===== Financier par période =====
+    st.markdown("### 💵 Financier par période")
+
+    sums = fA.groupby("Periode")[["Montant","Payé","Reste"]].sum().reindex(ordre_periodes).fillna(0.0)
+    cfin1, cfin2 = st.columns(2)
+    cfin1.caption("Chiffre d'affaires (Montant)")
+    cfin1.bar_chart(sums[["Montant"]])
+    cfin2.caption("Encaissements (Payé) & Solde à encaisser (Reste)")
+    cfin2.bar_chart(sums[["Payé","Reste"]])
+
+    if show_tables:
+        with st.expander("Détail tableaux — Financier"):
+            st.dataframe(sums)
+
+    st.divider()
+
+    # ===== Top visas =====
+    st.markdown("### 🏷️ Top visas")
+    top_vol = fA.groupby("Visa").size().sort_values(ascending=False).head(15).rename("Dossiers")
+    top_ca = fA.groupby("Visa")["Montant"].sum().sort_values(ascending=False).head(15)
+
+    ctop1, ctop2 = st.columns(2)
+    ctop1.caption("Top visas par nombre de dossiers")
+    ctop1.bar_chart(pd.DataFrame(top_vol))
+    ctop2.caption("Top visas par chiffre d'affaires")
+    ctop2.bar_chart(pd.DataFrame({"CA": top_ca}))
+
+    if show_tables:
+        with st.expander("Détail tableaux — Top visas"):
+            st.write("Par dossiers")
+            st.dataframe(pd.DataFrame(top_vol))
+            st.write("Par CA")
+            st.dataframe(pd.DataFrame({"CA": top_ca}))
+
+    st.divider()
+
+    # ===== Export analyses -> Excel / feuille 'Analyses' =====
+    st.markdown("### 📤 Export Excel")
+    st.caption("Crée/Met à jour la feuille **'Analyses'** dans ton fichier courant avec l'ensemble des tableaux.")
+
+    if st.button("Exporter vers l'Excel (feuille 'Analyses')"):
+        try:
+            blocks = [("KPI Globaux (après filtres)",
+                       pd.DataFrame({
+                           "KPI": ["Dossiers (filtrés)", "Chiffre d’affaires", "Encaissements", "Solde à encaisser"],
+                           "Valeur": [
+                               len(fA),
+                               float(fA.get("Montant", pd.Series(dtype=float)).sum()),
+                               float(fA.get("Payé", pd.Series(dtype=float)).sum()),
+                               float(fA.get("Reste", pd.Series(dtype=float)).sum()),
+                           ],
+                       }))
+            ]
+            blocks.append(("Volumes — Dossiers ouverts par période", st_data1))
+            if vols_dict:
+                blocks.append(("Volumes — Statuts par période", st_data2))
+            blocks.append(("Financier — Montant / Payé / Reste par période", sums))
+            blocks.append(("Top visas — par nombre de dossiers", pd.DataFrame(top_vol)))
+            blocks.append(("Top visas — par chiffre d'affaires", pd.DataFrame({"CA": top_ca})))
+
+            write_analyses_sheet(current_path, blocks)
+            save_workspace_path(current_path)
+            st.success("Feuille **'Analyses'** exportée dans le fichier. ✅ (Téléchargement → sidebar)")
+        except Exception as e:
+            st.error(f"Échec export : {e}")
