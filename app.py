@@ -32,6 +32,7 @@ def _safe_str(x):
     return "" if pd.isna(x) else str(x).strip()
 
 def _to_num(s: pd.Series) -> pd.Series:
+    # Parse US: "$1,234.56" -> 1234.56
     cleaned = (
         s.astype(str)
          .str.replace("\u00a0", "", regex=False)
@@ -48,7 +49,7 @@ def _to_date(s: pd.Series) -> pd.Series:
         d = d.dt.tz_localize(None)
     except Exception:
         pass
-    return d.dt.normalize().dt.date
+    return d.dt.normalize().dt.date  # YYYY-MM-DD
 
 def _fmt_money_us(v: float) -> str:
     try:
@@ -78,6 +79,7 @@ def _sum_payments(pay_list) -> float:
     return total
 
 def _make_client_id_from_row(row) -> str:
+    # ID stable depuis Nom + Telephone + Date
     base = "|".join([
         _safe_str(row.get("Nom")),
         _safe_str(row.get("Telephone")),
@@ -99,12 +101,14 @@ def _dedupe_ids(series: pd.Series) -> pd.Series:
     return s
 
 def looks_like_reference(df: pd.DataFrame) -> bool:
+    """Détecte un onglet de référence (ex: 'Visa' avec Categories/Visa/Definition)."""
     cols = set(map(str.lower, df.columns.astype(str)))
     has_ref = {"categories", "visa"} <= cols
     no_money = not ({"montant", "honoraires", "acomptes", "payé", "reste", "solde"} & cols)
     return has_ref and no_money
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Uniformise Date/Visa/Statut/Montant/Payé/Reste, génère ID_Client, calcule Mois=MM (interne)."""
     df = df.copy()
 
     # Date (sans heure)
@@ -162,6 +166,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_df: pd.DataFrame) -> bytes:
+    """Recharge toutes les feuilles, remplace sheet_to_replace par new_df, renvoie les octets Excel."""
     xls = pd.ExcelFile(io.BytesIO(original_bytes))
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
@@ -178,6 +183,7 @@ def write_updated_excel_bytes(original_bytes: bytes, sheet_to_replace: str, new_
     return out.read()
 
 def build_categories_to_visa_map(data_bytes: bytes, visa_sheet_name: str = "Visa") -> dict:
+    """Construit un mapping {categories_normalisées: visa} depuis l’onglet 'Visa'."""
     try:
         xls = pd.ExcelFile(io.BytesIO(data_bytes))
         if visa_sheet_name not in xls.sheet_names:
@@ -196,6 +202,7 @@ def build_categories_to_visa_map(data_bytes: bytes, visa_sheet_name: str = "Visa
         return {}
 
 def enrich_visa_from_categories(df: pd.DataFrame, cat2visa: dict):
+    """Si Visa est vide mais Categories correspond dans le mapping, remplit Visa."""
     if not cat2visa or "Categories" not in df.columns or "Visa" not in df.columns:
         return df, 0
     df = df.copy()
@@ -218,6 +225,7 @@ def enrich_visa_from_categories(df: pd.DataFrame, cat2visa: dict):
 # =========================
 @st.cache_data
 def load_excel_bytes(xlsx_input):
+    """Retourne (sheet_names, data_bytes, source_id) pour un chemin ou un fichier uploadé."""
     if hasattr(xlsx_input, "read"):
         data = xlsx_input.read()
         src_id = f"upload:{getattr(xlsx_input, 'name', 'uploaded')}"
@@ -269,12 +277,13 @@ if "excel_bytes_current" not in st.session_state or st.session_state.get("excel_
     st.session_state["excel_source_id"] = source_id
 current_bytes = st.session_state["excel_bytes_current"]
 
-# --- Redirection de la feuille (post-écriture) AVANT de créer le selectbox ---
+# --- Redirection feuille (post-écriture) AVANT le selectbox ---
 if "pending_sheet_choice" in st.session_state:
     pending = st.session_state.pop("pending_sheet_choice")
     if pending in sheet_names:
         st.session_state["sheet_choice"] = pending
-# option "rafraîchir"
+
+# bouton refresh
 if st.sidebar.button("🔄 Rafraîchir"):
     st.rerun()
 
@@ -330,6 +339,7 @@ if is_ref and sheet_choice.lower() == "visa":
             if full_ref_df[c].dtype != "object":
                 full_ref_df[c] = full_ref_df[c].astype(str)
             full_ref_df[c] = full_ref_df[c].fillna("")
+
         edited_df = st.data_editor(
             full_ref_df, num_rows="dynamic", use_container_width=True, hide_index=True, key="visa_editor",
         )
@@ -373,6 +383,20 @@ if not (is_ref and sheet_choice.lower() == "visa"):
         if sheet_choice != client_target_sheet:
             st.info(f"ℹ️ Le CRUD Clients cible la feuille **{client_target_sheet}**.")
 
+        # --- helper sliders robustes ---
+        def make_range_slider(df_src: pd.DataFrame, col: str, label: str, container, fmt=lambda x: f"{x:,.2f}"):
+            if col not in df_src.columns or df_src[col].dropna().empty:
+                container.caption(f"{label} : aucune donnée")
+                return None
+            vmin = float(df_src[col].min())
+            vmax = float(df_src[col].max())
+            if not (vmin < vmax):
+                container.caption(f"{label} : valeur unique = {fmt(vmin)}")
+                return (vmin, vmax)
+            span = vmax - vmin
+            step = 1.0 if span > 1000 else 0.1 if span > 10 else 0.01
+            return container.slider(label, min_value=vmin, max_value=vmax, value=(vmin, vmax), step=step)
+
         # Filtres
         with st.container():
             c1, c2, c3 = st.columns(3)
@@ -380,26 +404,17 @@ if not (is_ref and sheet_choice.lower() == "visa"):
             months_present = sorted(df["Mois"].dropna().unique()) if "Mois" in df.columns else []
             visas = sorted(df["Visa"].dropna().astype(str).unique()) if "Visa" in df.columns else []
 
-            # si on vient d'écrire, on réinitialise les filtres pour voir la nouvelle ligne
+            # reset des filtres si on vient d'écrire
             if st.session_state.get("reset_filters_after_write"):
-                default_years = years
-                default_months = months_present
-                default_visas = visas
                 st.session_state.pop("reset_filters_after_write", None)
-            else:
-                default_years = years
-                default_months = months_present
-                default_visas = visas
 
-            year_sel = c1.multiselect("Année", years, default=default_years or None)
-            month_sel = c2.multiselect("Mois (MM)", months_present, default=default_months or None)
-            visa_sel  = c3.multiselect("Type de visa", visas, default=default_visas or None)
+            year_sel = c1.multiselect("Année", years, default=years or None)
+            month_sel = c2.multiselect("Mois (MM)", months_present, default=months_present or None)
+            visa_sel  = c3.multiselect("Type de visa", visas, default=visas or None)
 
             c4, c5 = st.columns(2)
-            pay_min, pay_max = (float(df["Payé"].min()), float(df["Payé"].max())) if "Payé" in df.columns and not df["Payé"].empty else (0.0, 0.0)
-            reste_min, reste_max = (float(df["Reste"].min()), float(df["Reste"].max())) if "Reste" in df.columns and not df["Reste"].empty else (0.0, 0.0)
-            pay_range = c4.slider("Payé (min-max)", min_value=float(pay_min), max_value=float(pay_max), value=(float(pay_min), float(pay_max)))
-            solde_range = c5.slider("Solde / Reste (min-max)", min_value=float(reste_min), max_value=float(reste_max), value=(float(reste_min), float(reste_max)))
+            pay_range   = make_range_slider(df, "Payé", "Payé (min-max)", c4, fmt=lambda x: _fmt_money_us(x))
+            solde_range = make_range_slider(df, "Reste", "Solde / Reste (min-max)", c5, fmt=lambda x: _fmt_money_us(x))
 
         # Appliquer filtres
         f = df.copy()
@@ -409,9 +424,9 @@ if not (is_ref and sheet_choice.lower() == "visa"):
             f = f[f["Mois"].isin(month_sel)]
         if "Visa" in f.columns and visa_sel:
             f = f[f["Visa"].astype(str).isin(visa_sel)]
-        if "Payé" in f.columns:
+        if "Payé" in f.columns and pay_range is not None:
             f = f[(f["Payé"] >= pay_range[0]) & (f["Payé"] <= pay_range[1])]
-        if "Reste" in f.columns:
+        if "Reste" in f.columns and solde_range is not None:
             f = f[(f["Reste"] >= solde_range[0]) & (f["Reste"] <= solde_range[1])]
 
         # KPI
@@ -539,7 +554,6 @@ if not (is_ref and sheet_choice.lower() == "visa"):
         if action == "Créer":
             st.markdown("### ➕ Nouveau client")
 
-            # Si la feuille n'a aucune colonne (Excel vierge), on propose un squelette minimal
             if len(orig.columns) == 0:
                 orig = pd.DataFrame(columns=["ID_Client","Nom","Telephone","Email","Date","Visa","Statut","Montant","Payé","Reste","Paiements"])
 
@@ -605,7 +619,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                     else:
                         new_row[c] = _safe_str(v)
 
-                # Calcul automatique Reste si colonnes présentes
+                # Calcul Reste
                 if "Montant" in orig.columns and "Payé" in orig.columns:
                     try:
                         m = float(new_row.get("Montant", 0))
@@ -695,7 +709,7 @@ if not (is_ref and sheet_choice.lower() == "visa"):
                         else:
                             orig.at[sel_idx, c] = _safe_str(v)
 
-                    # recalcul Reste si dispo
+                    # recalcul Reste
                     if {"Montant","Payé"}.issubset(orig.columns):
                         try:
                             orig.at[sel_idx, "Reste"] = float(orig.at[sel_idx, "Montant"]) - float(orig.at[sel_idx, "Payé"])
