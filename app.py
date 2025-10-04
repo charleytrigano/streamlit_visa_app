@@ -11,43 +11,61 @@ import pandas as pd
 st.set_page_config(page_title="📊 Visas — Edition directe", layout="wide")
 st.title("📊 Visas — Edition DIRECTE du fichier")
 
-WORK_DIR = Path("/mnt/data")
-WORK_DIR.mkdir(parents=True, exist_ok=True)
-WS_FILE = WORK_DIR / "_workspace.json"
+# ---------- Choix robuste d'un dossier de travail réinscriptible ----------
+def pick_workdir() -> Path | None:
+    candidates = [Path("/mnt/data"), Path("/tmp/visa_workspace"), Path.cwd() / "visa_workspace"]
+    for p in candidates:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            # test d'écriture
+            t = p / ".write_test"
+            t.write_text("ok", encoding="utf-8")
+            t.unlink(missing_ok=True)
+            return p
+        except Exception:
+            continue
+    return None
+
+WORK_DIR = pick_workdir()
+WS_FILE = (WORK_DIR / "_workspace.json") if WORK_DIR else None
 
 # ---------- Helpers persistance ----------
 def load_workspace_path() -> Path | None:
+    if WS_FILE is None or not WS_FILE.exists():
+        return None
     try:
-        if WS_FILE.exists():
-            obj = json.loads(WS_FILE.read_text(encoding="utf-8"))
-            p = Path(obj.get("last_path",""))
-            return p if p.exists() else None
+        obj = json.loads(WS_FILE.read_text(encoding="utf-8"))
+        p = Path(obj.get("last_path", ""))
+        return p if p.exists() else None
     except Exception:
-        pass
-    return None
+        return None
 
 def save_workspace_path(p: Path):
+    if WS_FILE is None:
+        return
     try:
         WS_FILE.write_text(json.dumps({"last_path": str(p)}), encoding="utf-8")
     except Exception:
         pass
 
 def copy_upload_to_workspace(upload) -> Path:
+    """Copie l'upload dans le WORK_DIR (ou, si indisponible, dans /tmp), sans écraser par défaut."""
+    base_dir = WORK_DIR if WORK_DIR else Path("/tmp")
+    base_dir.mkdir(parents=True, exist_ok=True)
     name = getattr(upload, "name", "donnees_visa_clients.xlsx")
-    # Eviter d'écraser un autre fichier involontairement
-    base = WORK_DIR / name
-    if base.exists():
-        stem, suf = base.stem, base.suffix
+    dest = base_dir / name
+    if dest.exists():
+        stem, suf = dest.stem, dest.suffix
         n = 1
         while True:
-            cand = WORK_DIR / f"{stem}_{n}{suf}"
+            cand = base_dir / f"{stem}_{n}{suf}"
             if not cand.exists():
-                base = cand
+                dest = cand
                 break
             n += 1
     data = upload.read()
-    base.write_bytes(data)
-    return base
+    dest.write_bytes(data)
+    return dest
 
 # ---------- Utils data ----------
 def _safe_str(x):
@@ -156,6 +174,7 @@ def read_sheet(path: Path, sheet: str, normalize: bool) -> pd.DataFrame:
     return df
 
 def write_sheet_inplace(path: Path, sheet_to_replace: str, new_df: pd.DataFrame):
+    """Réécrit le fichier Excel en remplaçant une feuille, puis écrase le fichier SOURCE (même nom)."""
     xls = pd.ExcelFile(path)
     out = io.BytesIO()
     target_written = False
@@ -176,7 +195,6 @@ def write_sheet_inplace(path: Path, sheet_to_replace: str, new_df: pd.DataFrame)
                 if dfw[c].dtype == "object":
                     dfw[c] = dfw[c].astype(str).fillna("")
             dfw.to_excel(writer, sheet_name=sheet_to_replace, index=False)
-    # ECRITURE DIRECTE sur le même fichier
     path.write_bytes(out.getvalue())
 
 # ---------- Source : dernier fichier auto + remplacement ----------
@@ -197,7 +215,10 @@ else:
         save_workspace_path(current_path)
         st.sidebar.success(f"Fichier courant : {current_path.name}")
     else:
-        st.sidebar.warning("Aucun fichier trouvé. Importe un Excel pour démarrer.")
+        if WORK_DIR is None:
+            st.sidebar.warning("Aucun workspace persistant disponible. Importez un fichier pour travailler (non mémorisé au redémarrage).")
+        else:
+            st.sidebar.warning("Aucun fichier trouvé. Importez un Excel pour démarrer.")
 
 # Uploader pour CHANGER de fichier (copie en workspace et devient la source)
 up = st.sidebar.file_uploader("Remplacer par un autre Excel (.xlsx, .xls)", type=["xlsx","xls"])
@@ -226,7 +247,8 @@ client_sheet_default = "Clients" if "Clients" in sheet_names else sheet_choice
 client_target_sheet = st.sidebar.selectbox("Feuille *Clients* (cible CRUD)", sheet_names,
                                            index=sheet_names.index(client_sheet_default))
 
-st.sidebar.caption(f"Edition **directe** dans : `{current_path}`")
+ws_info = f"`{current_path}`" + ("" if WORK_DIR else "  \n(Mémorisation du dernier fichier indisponible : espace non réinscriptible)")
+st.sidebar.caption(f"Édition **directe** dans : {ws_info}")
 st.sidebar.download_button("⬇️ Télécharger une copie", data=current_path.read_bytes(),
                            file_name=current_path.name,
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -422,8 +444,8 @@ with tabs[1]:
             val_envoye  = st.checkbox("Dossier envoyé",  value=False) if has_envoye else False
             val_refuse  = st.checkbox("Dossier refusé",  value=False) if has_refuse else False
             val_annule  = st.checkbox("Dossier annulé",  value=False) if has_annule else False
-            val_appr    = st.checkbox("Dossier approuvé",value=False) if has_appr else False
-            val_rfe     = st.checkbox("RFE",             value=False) if has_rfe  else False
+            val_appr    = st.checkbox("Dossier approuvé",value=False) if has_appr   else False
+            val_rfe     = st.checkbox("RFE",             value=False) if has_rfe    else False
 
             ok = st.form_submit_button("💾 Sauvegarder (dans le fichier)", type="primary")
 
@@ -451,6 +473,7 @@ with tabs[1]:
 
             live_after = pd.concat([live_raw.drop(columns=["_RowID"]), pd.DataFrame([new_row])], ignore_index=True)
             write_sheet_inplace(current_path, client_target_sheet, live_after)
+            save_workspace_path(current_path)  # mémorise ce fichier comme dernier
             st.success("Client créé **dans le fichier**. ✅")
             st.rerun()
 
@@ -491,11 +514,11 @@ with tabs[1]:
                 montant = c5.number_input("Montant (US $)", value=montant0, step=10.0, format="%.2f")
                 paye    = c6.number_input("Payé (US $)", value=paye0,    step=10.0, format="%.2f")
 
-                val_envoye  = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")))   if has_envoye else False
-                val_refuse  = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")))   if has_refuse else False
-                val_annule  = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")))   if has_annule else False
-                val_appr    = st.checkbox("Dossier approuvé",value=bool(init.get("Dossier approuvé"))) if has_appr   else False
-                val_rfe     = st.checkbox("RFE",             value=bool(init.get("RFE")))              if has_rfe    else False
+                val_envoye  = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")))   if "Dossier envoyé" in live_raw.columns else False
+                val_refuse  = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")))   if "Dossier refusé" in live_raw.columns else False
+                val_annule  = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")))   if "Dossier annulé" in live_raw.columns else False
+                val_appr    = st.checkbox("Dossier approuvé",value=bool(init.get("Dossier approuvé"))) if "Dossier approuvé" in live_raw.columns else False
+                val_rfe     = st.checkbox("RFE",             value=bool(init.get("RFE")))              if "RFE" in live_raw.columns else False
 
                 ok = st.form_submit_button("💾 Enregistrer (dans le fichier)", type="primary")
 
@@ -525,13 +548,14 @@ with tabs[1]:
                     live.at[t_idx,"Montant"]=float(montant or 0)
                     live.at[t_idx,"Payé"]=float(paye or 0)
                     live.at[t_idx,"Reste"]=float(live.at[t_idx,"Montant"])-float(live.at[t_idx,"Payé"])
-                    if has_envoye: live.at[t_idx,"Dossier envoyé"]=bool(val_envoye)
-                    if has_refuse: live.at[t_idx,"Dossier refusé"]=bool(val_refuse)
-                    if has_annule: live.at[t_idx,"Dossier annulé"]=bool(val_annule)
-                    if has_appr:   live.at[t_idx,"Dossier approuvé"]=bool(val_appr)
-                    if has_rfe:    live.at[t_idx,"RFE"]=bool(val_rfe)
+                    if "Dossier envoyé" in live.columns:   live.at[t_idx,"Dossier envoyé"]=bool(val_envoye)
+                    if "Dossier refusé" in live.columns:   live.at[t_idx,"Dossier refusé"]=bool(val_refuse)
+                    if "Dossier annulé" in live.columns:   live.at[t_idx,"Dossier annulé"]=bool(val_annule)
+                    if "Dossier approuvé" in live.columns: live.at[t_idx,"Dossier approuvé"]=bool(val_appr)
+                    if "RFE" in live.columns:              live.at[t_idx,"RFE"]=bool(val_rfe)
 
                     write_sheet_inplace(current_path, client_target_sheet, live)
+                    save_workspace_path(current_path)
                     st.success("Modifications enregistrées **dans le fichier**. ✅")
                     st.rerun()
 
@@ -556,5 +580,6 @@ with tabs[1]:
                     nom = _safe_str(live_raw.at[idx,"Nom"]); tel=_safe_str(live_raw.at[idx,"Telephone"])
                     live = live[~((live.get("Nom","").astype(str)==nom)&(live.get("Telephone","").astype(str)==tel))].reset_index(drop=True)
                 write_sheet_inplace(current_path, client_target_sheet, live)
+                save_workspace_path(current_path)
                 st.success("Client supprimé **dans le fichier**. ✅")
                 st.rerun()
