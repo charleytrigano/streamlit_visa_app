@@ -723,6 +723,19 @@ with tabs[2]:
         if col in fA.columns:
             fA[col] = pd.to_numeric(fA[col], errors="coerce").fillna(0.0)
 
+    # ---- Statut dérivé par dossier (pour les détails) ----
+    def derive_statut(row) -> str:
+        appr = bool(row.get("Dossier approuvé")) if "Dossier approuvé" in fA.columns else False
+        refu = bool(row.get("Dossier refusé"))   if "Dossier refusé"   in fA.columns else False
+        ann  = bool(row.get("Dossier annulé"))   if "Dossier annulé"   in fA.columns else False
+        if appr: return "Approuvé"
+        if refu: return "Refusé"
+        if ann:  return "Annulé"
+        return "En attente"
+
+    details = fA.copy()
+    details["Statut"] = details.apply(derive_statut, axis=1)
+    details_display_cols = [c for c in ["Periode","ID_Client","Nom","Visa","Date","Montant","Payé","Reste","Statut"] if c in details.columns]
     # KPI
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Dossiers (filtrés)", f"{len(fA)}")
@@ -736,7 +749,6 @@ with tabs[2]:
     st.markdown("### 📦 Volumes par période")
     def _safe_bool_sum(series): return series.fillna(False).astype(bool).sum()
     vol_all = fA.groupby("Periode").size().reindex(ordre_periodes).fillna(0).astype(int)
-
     vol_env = fA.groupby("Periode")["Dossier envoyé"].apply(_safe_bool_sum).reindex(ordre_periodes).fillna(0) if "Dossier envoyé" in fA.columns else pd.Series(dtype=int)
     vol_app = fA.groupby("Periode")["Dossier approuvé"].apply(_safe_bool_sum).reindex(ordre_periodes).fillna(0) if "Dossier approuvé" in fA.columns else pd.Series(dtype=int)
     vol_ref = fA.groupby("Periode")["Dossier refusé"].apply(_safe_bool_sum).reindex(ordre_periodes).fillna(0)   if "Dossier refusé" in fA.columns else pd.Series(dtype=int)
@@ -757,10 +769,6 @@ with tabs[2]:
         st_data2 = pd.DataFrame(vols_dict)
         cvol2.caption("Statuts par période")
         cvol2.bar_chart(st_data2)
-        if show_tables:
-            with st.expander("Détail tableaux — Volumes"):
-                st.write("Ouverts"); st.dataframe(st_data1)
-                st.write("Statuts"); st.dataframe(st_data2)
     else:
         cvol2.info("Aucune colonne de statut trouvée (Envoyé/Approuvé/Refusé/Annulé).")
 
@@ -786,25 +794,18 @@ with tabs[2]:
     encours_moy = (sums["Reste"] / vol_all.replace(0, pd.NA)).fillna(0.0)
     add2.line_chart(pd.DataFrame({"Encours moyen par dossier ($)": encours_moy}))
 
-    if show_tables:
-        with st.expander("Détail tableaux — Financier"):
-            st.dataframe(sums)
-
     st.divider()
 
-    # Camembert statuts globaux (sur l'échantillon filtré)
+    # Camembert statuts globaux
     st.markdown("### 🥧 Répartition des statuts (camembert)")
-    # Comptages globaux
     count_app = int(fA.get("Dossier approuvé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if "Dossier approuvé" in fA.columns else 0
-    count_ref = int(fA.get("Dossier refusé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if "Dossier refusé" in fA.columns else 0
-    count_ann = int(fA.get("Dossier annulé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if "Dossier annulé" in fA.columns else 0
-    # "En attente" = pas approuvé, pas refusé, pas annulé
+    count_ref = int(fA.get("Dossier refusé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())     if "Dossier refusé" in fA.columns else 0
+    count_ann = int(fA.get("Dossier annulé", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())     if "Dossier annulé" in fA.columns else 0
     mask_att = pd.Series([True]*len(fA))
     if "Dossier approuvé" in fA.columns: mask_att &= ~fA["Dossier approuvé"].fillna(False).astype(bool)
     if "Dossier refusé"  in fA.columns: mask_att &= ~fA["Dossier refusé"].fillna(False).astype(bool)
     if "Dossier annulé"  in fA.columns: mask_att &= ~fA["Dossier annulé"].fillna(False).astype(bool)
     count_att = int(mask_att.sum())
-
     pie_labels = ["Approuvés", "Refusés", "Annulés", "En attente"]
     pie_sizes = [count_app, count_ref, count_ann, count_att]
     if sum(pie_sizes) == 0:
@@ -828,16 +829,39 @@ with tabs[2]:
     ctop2.caption("Top visas par chiffre d'affaires")
     ctop2.bar_chart(pd.DataFrame({"CA": top_ca}))
 
-    if show_tables:
-        with st.expander("Détail tableaux — Top visas"):
-            st.write("Par dossiers"); st.dataframe(pd.DataFrame(top_vol))
-            st.write("Par CA");      st.dataframe(pd.DataFrame({"CA": top_ca}))
+    st.divider()
+
+    # ======= DÉTAILS ANALYSES (clients) =======
+    st.markdown("### 🔎 Détails (clients)")
+    d1, d2 = st.columns([1,1])
+    statut_filter = d1.multiselect("Filtrer par statut", ["Approuvé","Refusé","Annulé","En attente"], key="anal_statut_filter")
+    search = d2.text_input("Recherche (Nom / Visa / ID)", key="anal_search")
+
+    details_to_show = details[details_display_cols].copy()
+    if statut_filter:
+        details_to_show = details_to_show[details_to_show["Statut"].isin(statut_filter)]
+    if search:
+        s = search.lower()
+        def _match(row):
+            return (s in str(row.get("Nom","")).lower()) or (s in str(row.get("Visa","")).lower()) or (s in str(row.get("ID_Client","")).lower())
+        details_to_show = details_to_show[details_to_show.apply(_match, axis=1)]
+
+    st.dataframe(details_to_show.sort_values(["Periode","Nom"]), use_container_width=True)
+
+    # Clients par période et par statut (tableaux compacts)
+    with st.expander("Voir les tableaux 'Clients par période' et 'Clients par statut'"):
+        clients_par_periode = details.groupby("Periode")["Nom"].apply(lambda s: ", ".join(sorted(set(map(str, s.dropna())))))
+        clients_par_statut  = details.groupby("Statut")["Nom"].apply(lambda s: ", ".join(sorted(set(map(str, s.dropna())))))
+        st.write("**Clients par période**")
+        st.dataframe(clients_par_periode.to_frame("Clients"))
+        st.write("**Clients par statut**")
+        st.dataframe(clients_par_statut.to_frame("Clients"))
 
     st.divider()
 
-    # Export Analyses -> Excel
+    # Export Analyses -> Excel (avec détails)
     st.markdown("### 📤 Export Excel")
-    st.caption("Crée/Met à jour la feuille **'Analyses'** dans ton fichier courant.")
+    st.caption("Crée/Met à jour la feuille **'Analyses'** dans ton fichier courant (inclut les détails clients).")
     if st.button("Exporter vers l'Excel (feuille 'Analyses')", key="anal_export_btn"):
         try:
             blocks = [("KPI Globaux (après filtres)",
@@ -856,7 +880,6 @@ with tabs[2]:
                 blocks.append(("Volumes — Statuts par période", st_data2))
             blocks.append(("Financier — Montant / Payé / Reste par période", sums))
 
-            # Taux & Encours
             if not vol_env.empty and (vol_env > 0).any():
                 taux_app = (vol_app.reindex(vol_env.index).fillna(0) / vol_env.replace(0, pd.NA)) * 100
                 blocks.append(("Taux d'approbation (%) par période", pd.DataFrame({"Taux (%)": taux_app.fillna(0.0)})))
@@ -865,15 +888,20 @@ with tabs[2]:
             blocks.append(("Top visas — par nombre de dossiers", pd.DataFrame(top_vol)))
             blocks.append(("Top visas — par chiffre d'affaires", pd.DataFrame({"CA": top_ca})))
 
+            # Détails clients
+            blocks.append(("Détails (clients)", details_to_show))
+            blocks.append(("Clients par période (liste)", clients_par_periode.to_frame("Clients")))
+            blocks.append(("Clients par statut (liste)", clients_par_statut.to_frame("Clients")))
+
             write_analyses_sheet(current_path, blocks)
             save_workspace_path(current_path)
             st.success("Feuille **'Analyses'** exportée dans le fichier. ✅ (Téléchargement → sidebar)")
         except Exception as e:
             st.error(f"Échec export : {e}")
 
-    # Export Analyses -> ZIP CSV
+    # Export Analyses -> ZIP CSV (avec détails)
     st.markdown("### 📥 Export CSV (ZIP)")
-    st.caption("Télécharge un ZIP contenant les principaux tableaux au format CSV.")
+    st.caption("Télécharge un ZIP contenant les principaux tableaux (y compris les détails clients).")
     if st.button("Préparer le ZIP des analyses (CSV)", key="anal_zip_btn"):
         try:
             mem = io.BytesIO()
@@ -903,6 +931,11 @@ with tabs[2]:
 
                 zf.writestr("top_visas_volume.csv", pd.DataFrame(top_vol).to_csv(encoding="utf-8-sig"))
                 zf.writestr("top_visas_ca.csv", pd.DataFrame({"CA": top_ca}).to_csv(encoding="utf-8-sig"))
+
+                # Détails clients + listes
+                zf.writestr("details_clients.csv", details_to_show.to_csv(index=False, encoding="utf-8-sig"))
+                zf.writestr("clients_par_periode.csv", clients_par_periode.to_frame("Clients").to_csv(encoding="utf-8-sig"))
+                zf.writestr("clients_par_statut.csv", clients_par_statut.to_frame("Clients").to_csv(encoding="utf-8-sig"))
 
                 # Dataset filtré complet (utile)
                 zf.writestr("dataset_filtre_complet.csv", fA.to_csv(index=False, encoding="utf-8-sig"))
