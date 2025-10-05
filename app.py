@@ -110,24 +110,22 @@ def _sum_payments(pay_list) -> float:
     return tot
 
 def _make_client_id_from_row(row) -> str:
-    # ID basé sur Nom + Date (téléphone supprimé du modèle)
     base = "|".join([_safe_str(row.get("Nom")), _safe_str(row.get("Date"))])
     h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:8].upper()
     return f"CL-{h}"
 
 def looks_like_reference(df: pd.DataFrame) -> bool:
     cols = set(map(str.lower, df.columns.astype(str)))
-    has_ref = {"categories", "visa"} <= cols
+    # Référentiel "Visa" = contient colonne 'visa' (au singulier), pas de colonnes financières
+    has_visa = "visa" in cols
     no_money = not ({"montant", "honoraires", "acomptes", "payé", "reste", "solde"} & cols)
-    return has_ref and no_money
+    return has_visa and no_money
 
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # Harmonisation (sans Telephone/Email)
     if "Date" in df.columns: df["Date"] = _to_date(df["Date"])
     else: df["Date"] = pd.NaT
-
     df["Mois"] = df["Date"].apply(lambda x: f"{x.month:02d}" if pd.notna(x) else pd.NA)
 
     visa_col = None
@@ -152,21 +150,17 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
 
-    # Statuts (si absents → False)
     for b in ["RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]:
         if b not in df.columns: df[b] = False
 
-    # Colonnes à retirer si présentes
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
 
     if "Nom" not in df.columns: df["Nom"] = ""
-
     if "ID_Client" not in df.columns: df["ID_Client"] = ""
     need_id = df["ID_Client"].astype(str).str.strip().eq("") | df["ID_Client"].isna()
     if need_id.any():
         df.loc[need_id, "ID_Client"] = df.loc[need_id].apply(_make_client_id_from_row, axis=1)
-
     if "Paiements" not in df.columns: df["Paiements"] = ""
 
     ordered = ["ID_Client","Nom","Date","Mois","Visa","Montant","Payé","Reste",
@@ -319,6 +313,71 @@ tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses"])
 
 # ---------- DASHBOARD ----------
 with tabs[0]:
+    # On lit brut pour détecter un référentiel
+    df_raw = read_sheet(current_path, sheet_choice, normalize=False)
+    if looks_like_reference(df_raw):
+        st.subheader("📄 Référentiel — Types de Visa")
+        # On force un modèle simple à 1 colonne "Visa"
+        if "Visa" not in df_raw.columns:
+            df_raw = pd.DataFrame(columns=["Visa"])
+        df_ref = pd.DataFrame({"Visa": df_raw["Visa"].astype(str).fillna("").str.strip()})
+        st.dataframe(df_ref, use_container_width=True)
+
+        st.markdown("### ✏️ Gérer les types")
+        action = st.radio("Action", ["Ajouter", "Renommer", "Supprimer"], horizontal=True, key="visa_ref_action")
+
+        # Liste pour sélection
+        options = sorted([v for v in df_ref["Visa"].unique() if v], key=str.lower)
+
+        if action == "Ajouter":
+            new_v = st.text_input("Nouveau type de visa").strip()
+            if st.button("➕ Ajouter"):
+                if not new_v:
+                    st.warning("Saisis un libellé.")
+                elif new_v in options:
+                    st.info("Ce type existe déjà.")
+                else:
+                    out = pd.concat([df_ref, pd.DataFrame([{"Visa": new_v}])], ignore_index=True)
+                    write_sheet_inplace(current_path, sheet_choice, out)
+                    st.success("Type ajouté.")
+                    st.rerun()
+
+        elif action == "Renommer":
+            if not options:
+                st.info("Aucun type existant.")
+            else:
+                old = st.selectbox("Type à renommer", options)
+                new = st.text_input("Nouveau libellé").strip()
+                if st.button("📝 Renommer"):
+                    if not new:
+                        st.warning("Nouveau libellé requis.")
+                    elif new == old:
+                        st.info("Aucun changement.")
+                    elif new in options:
+                        st.info("Un type avec ce nom existe déjà.")
+                    else:
+                        out = df_ref.copy()
+                        out.loc[out["Visa"] == old, "Visa"] = new
+                        write_sheet_inplace(current_path, sheet_choice, out)
+                        st.success("Type renommé.")
+                        st.rerun()
+
+        else:  # Supprimer
+            if not options:
+                st.info("Aucun type à supprimer.")
+            else:
+                rm = st.selectbox("Type à supprimer", options)
+                st.error("⚠️ Cette action est irréversible.")
+                if st.button("🗑️ Supprimer"):
+                    out = df_ref[df_ref["Visa"] != rm].reset_index(drop=True)
+                    write_sheet_inplace(current_path, sheet_choice, out)
+                    st.success("Type supprimé.")
+                    st.rerun()
+
+        st.info("Astuce : sélectionne une autre feuille dans la sidebar pour revenir au Dashboard classique.")
+        st.stop()
+
+    # --- dashboard classique (feuille clients) ---
     df = read_sheet(current_path, sheet_choice, normalize=True)
 
     with st.container():
@@ -494,6 +553,7 @@ with tabs[1]:
             paye    = c6.number_input("Payé (US $)", value=0.0, step=10.0, format="%.2f")
 
             st.markdown("#### État du dossier")
+            # Ordre: Envoyé > Approuvé > RFE > Refusé > Annulé
             val_envoye = st.checkbox("Dossier envoyé",  value=False) if has_envoye else False
             val_appr   = st.checkbox("Dossier approuvé",value=False) if has_appr   else False
             val_rfe    = st.checkbox("RFE",             value=False) if has_rfe    else False
@@ -636,7 +696,6 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("📊 Analyses — Volumes & Financier")
 
-    # ⚠️ Normalisation FORCÉE ici (même si la feuille ressemble à un référentiel)
     dfA_raw = read_sheet(current_path, client_target_sheet, normalize=False)
     dfA = normalize_dataframe(dfA_raw).copy()
 
@@ -657,7 +716,6 @@ with tabs[2]:
     with st.container():
         d1, d2 = st.columns([1,1])
         today = date.today()
-        # ✔️ Blindage : si la colonne Date n’existe pas ou n’a aucune valeur → valeurs par défaut
         if ("Date" in dfA.columns) and dfA["Date"].notna().any():
             dmin = min([d for d in dfA["Date"] if pd.notna(d)])
             dmax = max([d for d in dfA["Date"] if pd.notna(d)])
