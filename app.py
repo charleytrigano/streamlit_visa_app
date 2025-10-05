@@ -67,7 +67,6 @@ def copy_upload_to_workspace(upload) -> Path:
 def _safe_str(x): return "" if pd.isna(x) else str(x).strip()
 
 def _to_num(s: pd.Series) -> pd.Series:
-    # attend une Series
     cleaned = (s.astype(str)
                  .str.replace("\u00a0", "", regex=False)
                  .str.replace("\u202f", "", regex=False)
@@ -157,16 +156,12 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "Montant" in df.columns and HONO not in df.columns:
         df[HONO] = _to_num(df["Montant"])
     else:
-        if HONO in df.columns:
-            df[HONO] = _to_num(df[HONO])
-        else:
-            df[HONO] = 0.0
+        if HONO in df.columns: df[HONO] = _to_num(df[HONO])
+        else: df[HONO] = 0.0
 
     # Autres frais
-    if AUTRE in df.columns:
-        df[AUTRE] = _to_num(df[AUTRE])
-    else:
-        df[AUTRE] = 0.0
+    if AUTRE in df.columns: df[AUTRE] = _to_num(df[AUTRE])
+    else: df[AUTRE] = 0.0
 
     # Total
     df[TOTAL] = (df[HONO] + df[AUTRE]).astype(float)
@@ -197,10 +192,8 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "Paiements" not in df.columns: df["Paiements"] = ""
 
     # ESCROW
-    if ESC_TR in df.columns:
-        df[ESC_TR] = _to_num(df[ESC_TR])
-    else:
-        df[ESC_TR] = 0.0
+    if ESC_TR in df.columns: df[ESC_TR] = _to_num(df[ESC_TR])
+    else: df[ESC_TR] = 0.0
     if ESC_JR not in df.columns: df[ESC_JR] = ""
 
     # Nettoyage
@@ -480,6 +473,74 @@ with tabs[0]:
         ), use_container_width=True)
 
     st.divider()
+
+    # =============== ➕ Ajouter un paiement (US $) — dossiers non soldés ===============
+    st.subheader("➕ Ajouter un paiement (US $)")
+    if client_target_sheet is None:
+        st.info("Choisis d’abord une **feuille clients** valide dans la sidebar.")
+    else:
+        clients_norm = read_sheet(current_path, client_target_sheet, normalize=True)
+        todo = clients_norm[clients_norm["Reste"] > 0.004].copy() if "Reste" in clients_norm.columns else pd.DataFrame()
+        if todo.empty:
+            st.success("Tous les dossiers sont soldés ✅")
+        else:
+            todo["_label"] = todo.apply(lambda r: f'{r.get("ID_Client","")} — {r.get("Nom","")} — Reste {_fmt_money_us(float(r.get("Reste",0)))}', axis=1)
+            label_to_id = todo.set_index("_label")["ID_Client"].to_dict()
+
+            csel, camt, cdate, cmode = st.columns([2,1,1,1])
+            sel_label = csel.selectbox("Dossier à créditer", todo["_label"].tolist())
+            amount = camt.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f")
+            pdate  = cdate.date_input("Date", value=date.today())
+            mode   = cmode.selectbox("Mode", ["CB","Chèque","Espèces","Virement","Autre"])
+            note   = st.text_input("Note (facultatif)", "")
+
+            if st.button("💾 Ajouter le paiement (écrit dans le fichier)"):
+                try:
+                    live = read_sheet(current_path, client_target_sheet, normalize=False)
+                    if "Paiements" not in live.columns: live["Paiements"] = ""
+                    # Localise la ligne
+                    target_id = label_to_id.get(sel_label, "")
+                    idxs = live.index[live.get("ID_Client","").astype(str) == str(target_id)]
+                    if len(idxs)==0:
+                        raise RuntimeError("Dossier introuvable.")
+                    idx = idxs[0]
+
+                    # Liste paiements existante
+                    pay_list = _parse_json_list(live.at[idx, "Paiements"])
+                    add = float(amount or 0.0)
+                    if add <= 0:
+                        st.warning("Le montant doit être > 0."); st.stop()
+
+                    # Sécurité : ne pas dépasser le reste
+                    live_norm = normalize_dataframe(live.copy())
+                    idc = str(live.at[idx, "ID_Client"]) if "ID_Client" in live.columns else ""
+                    reste_curr = float(live_norm.loc[live_norm["ID_Client"].astype(str)==idc, "Reste"].iloc[0]) if idc else 0.0
+                    if add > reste_curr + 1e-9:
+                        add = reste_curr
+
+                    # Ajoute le paiement + recalcul Payé/Reste/Total
+                    pay_list.append({"date": str(pdate), "amount": float(add), "mode": mode, "note": note})
+                    live.at[idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+
+                    # Garantir colonnes
+                    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+                        if c not in live.columns: live[c] = 0.0
+
+                    total_paid = _sum_payments(pay_list)
+                    hono = _to_num(pd.Series([live.at[idx, HONO]])).iloc[0] if HONO in live.columns else 0.0
+                    autr = _to_num(pd.Series([live.at[idx, AUTRE]])).iloc[0] if AUTRE in live.columns else 0.0
+                    total = float(hono + autr)
+
+                    live.at[idx, "Payé"]  = float(total_paid)
+                    live.at[idx, "Reste"] = max(total - float(total_paid), 0.0)
+                    live.at[idx, TOTAL]   = total
+
+                    write_sheet_inplace(current_path, client_target_sheet, live)
+                    st.success("Paiement enregistré **dans le fichier**. ✅"); st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur : {e}")
+
+    # ==================== Tableau ====================
     st.subheader("📋 Données (aperçu)")
     cols_show = [c for c in ["ID_Client","Nom","Date","Visa", HONO, AUTRE, TOTAL, "Payé","Reste",
                              "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"] if c in f.columns]
@@ -686,14 +747,11 @@ with tabs[1]:
                     if val_envoye and 'do_transfer_now' in locals() and do_transfer_now and (transfer_amount or 0.0) > 0:
                         try:
                             live_w = read_sheet(current_path, client_target_sheet, normalize=False).copy()
-                            # garantir colonnes
                             for c in [ESC_TR, ESC_JR]:
                                 if c not in live_w.columns: live_w[c] = 0.0 if c==ESC_TR else ""
-                            # retrouver l'index par ID
                             key = _safe_str(init.get("ID_Client"))
                             idxs = live_w.index[live_w.get("ID_Client","").astype(str)==key] if key else []
                             if len(idxs)==0:
-                                # fallback par (Nom,Date)
                                 msk = (live_w.get("Nom","").astype(str)==_safe_str(nom)) & \
                                       (live_w.get("Date","").astype(str)==str(d))
                                 idxs = live_w.index[msk]
@@ -701,7 +759,6 @@ with tabs[1]:
                                 st.info("Transfert demandé mais ligne introuvable après sauvegarde.")
                             else:
                                 i = idxs[0]
-                                # Recalculer l'ESCROW dispo réel après modifs
                                 tmp_norm = normalize_dataframe(live_w.copy())
                                 disp = float(tmp_norm.loc[tmp_norm["ID_Client"].astype(str)==str(live_w.at[i,"ID_Client"])].apply(escrow_available_from_row, axis=1).iloc[0])
                                 add = float(min(max(transfer_amount,0.0), disp))
@@ -863,7 +920,6 @@ with tabs[3]:
     live_raw = read_sheet(current_path, client_target_sheet, normalize=False)
     live = normalize_dataframe(live_raw).copy()
 
-    # Calculs ESCROW
     if ESC_TR not in live.columns: live[ESC_TR] = 0.0
     else: live[ESC_TR] = pd.to_numeric(live[ESC_TR], errors="coerce").fillna(0.0)
     live["ESCROW dispo"] = live.apply(escrow_available_from_row, axis=1)
@@ -894,18 +950,15 @@ with tabs[3]:
                 if st.button("✅ Marquer transféré (écrit dans le fichier)", key=f"esc_btn_{r['ID_Client']}"):
                     try:
                         live_w = read_sheet(current_path, client_target_sheet, normalize=False).copy()
-                        # garantir colonnes
                         for c in [ESC_TR, ESC_JR]:
                             if c not in live_w.columns: live_w[c] = 0.0 if c==ESC_TR else ""
                         idxs = live_w.index[live_w.get("ID_Client","").astype(str)==str(r["ID_Client"])]
                         if len(idxs)==0: st.error("Ligne introuvable."); st.stop()
                         i = idxs[0]
-                        # recompute dispo pour sécurité
                         tmp = normalize_dataframe(live_w.copy())
                         disp = float(tmp.loc[tmp["ID_Client"].astype(str)==str(r["ID_Client"]), :].apply(escrow_available_from_row, axis=1).iloc[0])
                         add = float(min(max(amt,0.0), disp))
                         live_w.at[i, ESC_TR] = float(pd.to_numeric(pd.Series([live_w.at[i, ESC_TR]]), errors="coerce").fillna(0.0).iloc[0] + add)
-                        journal_prev = live_w.at[i, ESC_JR] if ESC_JR in live_w.columns else ""
                         live_w.at[i, ESC_JR] = append_escrow_journal(live_w.loc[i], add, note)
                         write_sheet_inplace(current_path, client_target_sheet, live_w)
                         st.success("Transfert ESCROW enregistré **dans le fichier**. ✅"); st.rerun()
