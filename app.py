@@ -15,7 +15,7 @@ TOTAL  = "Total (US $)"
 ESC_TR = "Escrow transféré (US $)"
 ESC_JR = "Escrow journal"
 
-# ==== Workspace ====
+# ==== Workspace (mémoriser le dernier fichier) ====
 def pick_workdir() -> Path | None:
     for p in [Path("/mnt/data"), Path("/tmp/visa_workspace"), Path.cwd() / "visa_workspace"]:
         try:
@@ -29,17 +29,22 @@ WORK_DIR = pick_workdir()
 WS_FILE  = (WORK_DIR / "_workspace.json") if WORK_DIR else None
 
 def load_workspace_path() -> Path | None:
-    if WS_FILE is None or not WS_FILE.exists(): return None
+    if WS_FILE is None or not WS_FILE.exists():
+        return None
     try:
-        p = Path(json.loads(WS_FILE.read_text(encoding="utf-8")).get("last_path",""))
+        data = json.loads(WS_FILE.read_text(encoding="utf-8"))
+        p = Path(data.get("last_path",""))
         return p if p.exists() else None
     except Exception:
         return None
 
 def save_workspace_path(p: Path):
-    if WS_FILE is None: return
-    try: WS_FILE.write_text(json.dumps({"last_path": str(p)}), encoding="utf-8")
-    except Exception: pass
+    if WS_FILE is None:
+        return
+    try:
+        WS_FILE.write_text(json.dumps({"last_path": str(p)}), encoding="utf-8")
+    except Exception:
+        pass
 
 def copy_upload_to_workspace(upload) -> Path:
     base_dir = WORK_DIR if WORK_DIR else Path("/tmp")
@@ -51,7 +56,9 @@ def copy_upload_to_workspace(upload) -> Path:
         n = 1
         while True:
             cand = base_dir / f"{stem}_{n}{suf}"
-            if not cand.exists(): dest = cand; break
+            if not cand.exists():
+                dest = cand
+                break
             n += 1
     dest.write_bytes(upload.read())
     return dest
@@ -118,8 +125,10 @@ def append_escrow_journal(row_raw: pd.Series, amount: float, note: str = "") -> 
 # ==== Normalisation ====
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    # Date / Mois
     df["Date"] = _to_date(df["Date"]) if "Date" in df.columns else pd.NaT
     df["Mois"] = df["Date"].apply(lambda x: f"{x.month:02d}" if pd.notna(x) else pd.NA)
+    # Visa
     visa_col = next((c for c in ["Visa","Categories","Catégorie","TypeVisa"] if c in df.columns), None)
     df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
     # Montants
@@ -128,22 +137,28 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else: df[HONO] = 0.0
     df[AUTRE] = _to_num(df[AUTRE]) if AUTRE in df.columns else 0.0
     df[TOTAL] = (df[HONO] + df[AUTRE]).astype(float)
+    # Payé
     if "Payé" in df.columns: df["Payé"] = _to_num(df["Payé"])
     else:
         if "Paiements" in df.columns:
             parsed = df["Paiements"].apply(_parse_json_list)
             df["Payé"] = parsed.apply(_sum_payments).astype(float)
-        else: df["Payé"] = 0.0
+        else:
+            df["Payé"] = 0.0
     df["Reste"] = (df[TOTAL] - df["Payé"]).fillna(0.0)
+    # Statuts
     for b in ["RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]:
         if b not in df.columns: df[b] = False
+    # Identité
     if "Nom" not in df.columns: df["Nom"] = ""
     if "ID_Client" not in df.columns: df["ID_Client"] = ""
     need_id = df["ID_Client"].astype(str).str.strip().eq("") | df["ID_Client"].isna()
     if need_id.any(): df.loc[need_id,"ID_Client"] = df.loc[need_id].apply(_make_client_id_from_row, axis=1)
     if "Paiements" not in df.columns: df["Paiements"] = ""
+    # ESCROW
     df[ESC_TR] = _to_num(df[ESC_TR]) if ESC_TR in df.columns else 0.0
     if ESC_JR not in df.columns: df[ESC_JR] = ""
+    # Nettoyage
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
     ordered = ["ID_Client","Nom","Date","Mois","Visa",
@@ -188,55 +203,55 @@ def write_sheet_inplace(path: Path, sheet_to_replace: str, new_df: pd.DataFrame)
     try:
         st.session_state["download_bytes"] = bytes_out
         st.session_state["download_name"] = path.name
-    except Exception: pass
+    except Exception:
+        pass
 
-def write_analyses_sheet(path: Path, blocks: list[tuple[str, pd.DataFrame]]):
-    xls = pd.ExcelFile(path)
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        for name in xls.sheet_names:
-            if name != "Analyses":
-                pd.read_excel(xls, sheet_name=name).to_excel(writer, sheet_name=name, index=False)
-        startrow = 0
-        for title, df in blocks:
-            pd.DataFrame({title: []}).to_excel(writer, sheet_name="Analyses", index=False, startrow=startrow); startrow += 1
-            df2 = df.copy()
-            if isinstance(df2, pd.Series): df2 = df2.to_frame()
-            df2.to_excel(writer, sheet_name="Analyses", index=True, startrow=startrow); startrow += (len(df2) + 3)
-    bytes_out = out.getvalue()
-    path.write_bytes(bytes_out)
-    try:
-        st.session_state["download_bytes"] = bytes_out
-        st.session_state["download_name"] = path.name
-    except Exception: pass
-
-# ==== Source (sidebar) ====
+# ==== Source (sidebar) — persistance du dernier fichier ====
 st.sidebar.header("Source")
 current_path = load_workspace_path()
-if current_path and current_path.exists(): st.sidebar.success(f"Fichier courant : {current_path.name}")
+if current_path and current_path.exists():
+    st.sidebar.success(f"Fichier courant : {current_path.name}")
 else:
     defaults = ["/mnt/data/Visa_Clients_20251001-114844.xlsx", "/mnt/data/visa_analytics_datecol.xlsx"]
     cand = next((Path(p) for p in defaults if Path(p).exists()), None)
-    if cand: current_path = cand; save_workspace_path(current_path); st.sidebar.success(f"Fichier courant : {current_path.name}")
-    else: st.sidebar.warning("Aucun fichier trouvé. Importez un Excel pour démarrer.")
+    if cand:
+        current_path = cand
+        save_workspace_path(current_path)
+        st.sidebar.success(f"Fichier courant : {current_path.name}")
+    else:
+        st.sidebar.warning("Aucun fichier trouvé. Importez un Excel pour démarrer.")
+
 up = st.sidebar.file_uploader("Remplacer par un Excel (.xlsx, .xls)", type=["xlsx","xls"])
 if up is not None:
-    new_path = copy_upload_to_workspace(up); save_workspace_path(new_path)
+    new_path = copy_upload_to_workspace(up)
+    save_workspace_path(new_path)  # <-- mémorise le dernier fichier
     try:
-        st.session_state["download_bytes"] = new_path.read_bytes(); st.session_state["download_name"] = new_path.name
+        st.session_state["download_bytes"] = new_path.read_bytes()
+        st.session_state["download_name"] = new_path.name
     except Exception:
-        st.session_state["download_bytes"] = b""; st.session_state["download_name"] = new_path.name
-    st.sidebar.success(f"Nouveau fichier chargé : {new_path.name}"); st.rerun()
-if current_path is None or not current_path.exists(): st.stop()
+        st.session_state["download_bytes"] = b""
+        st.session_state["download_name"] = new_path.name
+    st.sidebar.success(f"Nouveau fichier chargé : {new_path.name}")
+    st.rerun()
+
+if current_path is None or not current_path.exists():
+    st.stop()
+
+# Alimente le bouton de téléchargement avec le fichier courant
 if "download_bytes" not in st.session_state or st.session_state.get("download_name") != current_path.name:
     try:
-        st.session_state["download_bytes"] = current_path.read_bytes(); st.session_state["download_name"] = current_path.name
+        st.session_state["download_bytes"] = current_path.read_bytes()
+        st.session_state["download_name"] = current_path.name
     except Exception:
-        st.session_state["download_bytes"] = b""; st.session_state["download_name"] = current_path.name
+        st.session_state["download_bytes"] = b""
+        st.session_state["download_name"] = current_path.name
+
 try:
     sheet_names = pd.ExcelFile(current_path).sheet_names
 except Exception as e:
-    st.error(f"Impossible de lire l'Excel : {e}"); st.stop()
+    st.error(f"Impossible de lire l'Excel : {e}")
+    st.stop()
+
 preferred_order = ["Clients","Visa","Données normalisées"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
 sheet_choice = st.sidebar.selectbox("Feuille (Dashboard)", sheet_names, index=sheet_names.index(default_sheet))
@@ -247,7 +262,9 @@ for s in sheet_names:
     try:
         df_tmp = read_sheet(current_path, s, normalize=False)
         if is_clients_like(df_tmp): valid_client_sheets.append(s)
-    except Exception: pass
+    except Exception:
+        pass
+
 if not valid_client_sheets:
     st.sidebar.error("Aucune feuille 'clients' valide (au minimum Nom & Visa).")
     client_target_sheet = None
@@ -255,12 +272,16 @@ else:
     default_client_sheet = "Clients" if "Clients" in valid_client_sheets else valid_client_sheets[0]
     if "client_sheet_select" in st.session_state and st.session_state["client_sheet_select"] not in valid_client_sheets:
         del st.session_state["client_sheet_select"]
-    client_target_sheet = st.sidebar.selectbox("Feuille *Clients* (cible CRUD)",
-                                               valid_client_sheets,
-                                               index=valid_client_sheets.index(default_client_sheet),
-                                               key="client_sheet_select")
+    client_target_sheet = st.sidebar.selectbox(
+        "Feuille *Clients* (cible CRUD)",
+        valid_client_sheets,
+        index=valid_client_sheets.index(default_client_sheet),
+        key="client_sheet_select"
+    )
+
 st.sidebar.caption(f"Édition **directe** dans : `{current_path}`")
-st.sidebar.download_button("⬇️ Télécharger une copie",
+st.sidebar.download_button(
+    "⬇️ Télécharger une copie",
     data=st.session_state.get("download_bytes", b""),
     file_name=st.session_state.get("download_name", current_path.name),
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -408,9 +429,10 @@ with tabs[0]:
                     if add <= 0: st.warning("Le montant doit être > 0."); st.stop()
                     # ne pas dépasser le reste
                     live_norm = normalize_dataframe(live.copy())
-                    idc = str(live.at[idx, "ID_Client"]) if "ID_Client" in live.columns else ""
-                    reste_curr = float(live_norm.loc[live_norm["ID_Client"].astype(str)==idc, "Reste"].iloc[0]) if idc else 0.0
-                    if add > reste_curr + 1e-9: add = reste_curr
+                    mask = live_norm["ID_Client"].astype(str) == str(live.at[idx, "ID_Client"])
+                    reste_curr = float(live_norm.loc[mask, "Reste"].sum()) if mask.any() else 0.0
+                    if add > reste_curr + 1e-9:
+                        add = reste_curr
                     pay_list.append({"date": str(pdate), "amount": float(add), "mode": mode, "note": note})
                     live.at[idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
                     for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
@@ -453,7 +475,8 @@ with tabs[1]:
     try:
         visa_ref = read_sheet(current_path, "Visa", normalize=False)
         visa_options = sorted(visa_ref["Visa"].dropna().astype(str).unique()) if "Visa" in visa_ref.columns else []
-    except Exception: visa_options = []
+    except Exception:
+        visa_options = []
     action = st.radio("Action", ["Créer", "Modifier", "Supprimer"], horizontal=True)
 
     # CREER
@@ -561,6 +584,7 @@ with tabs[1]:
                 if val_rfe and not (val_envoye or val_refuse or val_annule):
                     st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché."); st.stop()
                 live = live_raw.drop(columns=["_RowID"]).copy()
+                # localiser la ligne
                 t_idx = None
                 if "ID_Client" in live.columns and _safe_str(init.get("ID_Client")):
                     hits = live.index[live["ID_Client"].astype(str) == _safe_str(init.get("ID_Client"))]
@@ -570,7 +594,8 @@ with tabs[1]:
                           (pd.to_datetime(live.get("Date",""), errors="coerce").dt.date == pd.to_datetime(_safe_str(init.get("Date")), errors="coerce").date())
                     hit2 = live.index[msk] if hasattr(msk, "__len__") else []
                     t_idx = hit2[0] if len(hit2)>0 else None
-                if t_idx is None: st.error("Ligne introuvable.")
+                if t_idx is None:
+                    st.error("Ligne introuvable.")
                 else:
                     total = float((honoraires or 0.0)+(autres or 0.0))
                     live.at[t_idx,"Nom"]=_safe_str(nom)
@@ -589,6 +614,7 @@ with tabs[1]:
                     if has_refuse: live.at[t_idx,"Dossier refusé"]=bool(val_refuse)
                     if has_annule: live.at[t_idx,"Dossier annulé"]=bool(val_annule)
                     write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
+                    # transfert immédiat si demandé
                     if val_envoye and do_transfer_now and (transfer_amount or 0.0) > 0:
                         try:
                             live_w = read_sheet(current_path, client_target_sheet, normalize=False).copy()
@@ -735,7 +761,7 @@ with tabs[2]:
         k4.metric("Payé", _fmt_money_us(float(rowN.get("Payé",0.0))))
         k5.metric("Reste", _fmt_money_us(float(rowN.get("Reste",0.0))))
 
-        # Historique des paiements
+        # Historique
         rlive = base_live.loc[base_live.get("ID_Client","").astype(str)==str(sel_id)]
         plist = _parse_json_list(rlive.iloc[0].get("Paiements","")) if not rlive.empty else []
         st.markdown("**Historique des règlements**")
@@ -750,39 +776,55 @@ with tabs[2]:
         else:
             st.caption("Aucun paiement enregistré pour ce client.")
 
-        # 👉 Ajout d’un règlement depuis la fiche
+        # 👉 Ajout d’un règlement — corrigé & blindé
         st.markdown("**Ajouter un règlement**")
         cA, cB, cC, cD = st.columns([1,1,1,2])
         pay_date = cA.date_input("Date", value=date.today(), key=f"pay_date_{sel_id}")
         pay_mode = cB.selectbox("Mode", ["CB","Chèque","Espèces","Virement","Autre"], key=f"pay_mode_{sel_id}")
         pay_amt  = cC.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f", key=f"pay_amt_{sel_id}")
         pay_note = cD.text_input("Note", "", key=f"pay_note_{sel_id}")
+
         if st.button("💾 Enregistrer ce règlement (dans le fichier)", key=f"pay_add_btn_{sel_id}"):
             try:
                 live = read_sheet(current_path, client_target_sheet, normalize=False)
                 if "Paiements" not in live.columns: live["Paiements"] = ""
+
                 idxs = live.index[live.get("ID_Client","").astype(str)==str(sel_id)]
-                if len(idxs)==0: st.error("Dossier introuvable."); st.stop()
+                if len(idxs)==0:
+                    st.error("Dossier introuvable."); st.stop()
                 i = idxs[0]
+
                 pay_list = _parse_json_list(live.at[i, "Paiements"])
                 add = float(pay_amt or 0.0)
-                if add <= 0: st.warning("Le montant doit être > 0."); st.stop()
-                live_norm = normalize_dataframe(live.copy())
-                reste_curr = float(live_norm.loc[live_norm["ID_Client"].astype(str)==str(sel_id), "Reste"].iloc[0])
-                if add > reste_curr + 1e-9: add = reste_curr
+                if add <= 0:
+                    st.warning("Le montant doit être > 0.")
+                    st.stop()
+
+                # Reste courant sécurisé (sans .iloc[0] fragile)
+                norm = normalize_dataframe(live.copy())
+                mask_id = norm["ID_Client"].astype(str) == str(sel_id)
+                reste_curr = float(norm.loc[mask_id, "Reste"].sum()) if mask_id.any() else 0.0
+                if add > reste_curr + 1e-9:
+                    add = reste_curr
+
                 pay_list.append({"date": str(pay_date), "amount": float(add), "mode": pay_mode, "note": pay_note})
                 live.at[i, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+
                 for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
                     if c not in live.columns: live[c] = 0.0
+
                 total_paid = _sum_payments(pay_list)
                 hono = _to_num(pd.Series([live.at[i, HONO]])).iloc[0] if HONO in live.columns else 0.0
                 autr = _to_num(pd.Series([live.at[i, AUTRE]])).iloc[0] if AUTRE in live.columns else 0.0
                 total = float(hono + autr)
+
                 live.at[i, "Payé"]  = float(total_paid)
                 live.at[i, "Reste"] = max(total - float(total_paid), 0.0)
                 live.at[i, TOTAL]   = total
+
                 write_sheet_inplace(current_path, client_target_sheet, live)
-                st.success("Règlement ajouté **dans le fichier**. ✅"); st.rerun()
+                st.success("Règlement ajouté **dans le fichier**. ✅")
+                st.rerun()
             except Exception as e:
                 st.error(f"Erreur : {e}")
 
@@ -867,4 +909,3 @@ with tabs[3]:
         jdf = pd.DataFrame(rows).sort_values("Horodatage")
         jdf["Montant (US $)"] = jdf["Montant (US $)"].map(_fmt_money_us)
         st.dataframe(jdf, use_container_width=True)
-
