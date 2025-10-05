@@ -8,7 +8,6 @@ import zipfile
 
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="📊 Visas — Edition directe", layout="wide")
 st.title("📊 Visas — Edition DIRECTE du fichier")
@@ -116,7 +115,7 @@ def _make_client_id_from_row(row) -> str:
 
 def looks_like_reference(df: pd.DataFrame) -> bool:
     cols = set(map(str.lower, df.columns.astype(str)))
-    # Référentiel "Visa" = contient colonne 'visa' (au singulier), pas de colonnes financières
+    # Référentiel "Visa" = contient 'visa', pas de colonnes financières
     has_visa = "visa" in cols
     no_money = not ({"montant", "honoraires", "acomptes", "payé", "reste", "solde"} & cols)
     return has_visa and no_money
@@ -153,6 +152,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for b in ["RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]:
         if b not in df.columns: df[b] = False
 
+    # Supprime champs non souhaités
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
 
@@ -311,13 +311,18 @@ st.sidebar.download_button(
 # ---------- TABS ----------
 tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses"])
 
+# ---------- Fonctions communes ----------
+def is_clients_like(df: pd.DataFrame) -> bool:
+    cols = set(df.columns)
+    needed = {"Nom","Visa"}
+    return needed.issubset(cols)
+
 # ---------- DASHBOARD ----------
 with tabs[0]:
-    # On lit brut pour détecter un référentiel
+    # Référentiel Visa : mode gestion simple
     df_raw = read_sheet(current_path, sheet_choice, normalize=False)
     if looks_like_reference(df_raw):
         st.subheader("📄 Référentiel — Types de Visa")
-        # On force un modèle simple à 1 colonne "Visa"
         if "Visa" not in df_raw.columns:
             df_raw = pd.DataFrame(columns=["Visa"])
         df_ref = pd.DataFrame({"Visa": df_raw["Visa"].astype(str).fillna("").str.strip()})
@@ -325,8 +330,6 @@ with tabs[0]:
 
         st.markdown("### ✏️ Gérer les types")
         action = st.radio("Action", ["Ajouter", "Renommer", "Supprimer"], horizontal=True, key="visa_ref_action")
-
-        # Liste pour sélection
         options = sorted([v for v in df_ref["Visa"].unique() if v], key=str.lower)
 
         if action == "Ajouter":
@@ -341,7 +344,6 @@ with tabs[0]:
                     write_sheet_inplace(current_path, sheet_choice, out)
                     st.success("Type ajouté.")
                     st.rerun()
-
         elif action == "Renommer":
             if not options:
                 st.info("Aucun type existant.")
@@ -361,23 +363,22 @@ with tabs[0]:
                         write_sheet_inplace(current_path, sheet_choice, out)
                         st.success("Type renommé.")
                         st.rerun()
-
-        else:  # Supprimer
+        else:
             if not options:
                 st.info("Aucun type à supprimer.")
             else:
                 rm = st.selectbox("Type à supprimer", options)
-                st.error("⚠️ Cette action est irréversible.")
+                st.error("⚠️ Action irréversible.")
                 if st.button("🗑️ Supprimer"):
                     out = df_ref[df_ref["Visa"] != rm].reset_index(drop=True)
                     write_sheet_inplace(current_path, sheet_choice, out)
                     st.success("Type supprimé.")
                     st.rerun()
 
-        st.info("Astuce : sélectionne une autre feuille dans la sidebar pour revenir au Dashboard classique.")
+        st.info("Astuce : sélectionne une autre feuille dans la sidebar pour revenir au Dashboard.")
         st.stop()
 
-    # --- dashboard classique (feuille clients) ---
+    # Dashboard classique
     df = read_sheet(current_path, sheet_choice, normalize=True)
 
     with st.container():
@@ -427,7 +428,6 @@ with tabs[0]:
     if hidden > 0:
         st.caption(f"🔎 {hidden} ligne(s) masquée(s) par les filtres.")
 
-    # KPI compacts
     st.markdown("""
     <style>.small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}.small-kpi [data-testid="stMetricLabel"]{font-size:.8rem;opacity:.8}</style>
     """, unsafe_allow_html=True)
@@ -441,7 +441,7 @@ with tabs[0]:
 
     st.divider()
 
-    # Paiements (ajouts successifs)
+    # Paiements
     st.subheader("➕ Ajouter un paiement (US $)")
     clients_norm = read_sheet(current_path, client_target_sheet, normalize=True)
     todo = clients_norm[clients_norm["Reste"] > 0.004].copy() if "Reste" in clients_norm.columns else pd.DataFrame()
@@ -497,7 +497,6 @@ with tabs[0]:
             except Exception as e:
                 st.error(f"Erreur : {e}")
 
-    # Tableau
     st.subheader("📋 Données")
     cols_show = [c for c in ["ID_Client","Nom","Date","Visa","Montant","Payé","Reste",
                              "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"] if c in f.columns]
@@ -553,7 +552,6 @@ with tabs[1]:
             paye    = c6.number_input("Payé (US $)", value=0.0, step=10.0, format="%.2f")
 
             st.markdown("#### État du dossier")
-            # Ordre: Envoyé > Approuvé > RFE > Refusé > Annulé
             val_envoye = st.checkbox("Dossier envoyé",  value=False) if has_envoye else False
             val_appr   = st.checkbox("Dossier approuvé",value=False) if has_appr   else False
             val_rfe    = st.checkbox("RFE",             value=False) if has_rfe    else False
@@ -696,11 +694,13 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("📊 Analyses — Volumes & Financier")
 
+    # Normalisation FORCÉE ici
     dfA_raw = read_sheet(current_path, client_target_sheet, normalize=False)
     dfA = normalize_dataframe(dfA_raw).copy()
 
-    if dfA.empty:
-        st.info("Aucune donnée dans la feuille cible pour analyser.")
+    # Garde-fou : vérifier que la feuille cible ressemble à des "clients"
+    if not is_clients_like(dfA):
+        st.warning("La *Feuille Clients (cible CRUD)* ne contient pas les colonnes attendues (au minimum Nom & Visa). Sélectionne la bonne feuille dans la sidebar.")
         st.stop()
 
     with st.container():
@@ -842,7 +842,7 @@ with tabs[2]:
 
     st.divider()
 
-    # Fiche détaillée client
+    # Fiche détaillée client — ✅ FIX: normalise pour garantir ID_Client
     st.markdown("### 🧾 Fiche détaillée — client")
     unique_clients = details_to_show.dropna(subset=["ID_Client"]).copy()
     unique_clients["_opt"] = unique_clients.apply(
@@ -851,12 +851,17 @@ with tabs[2]:
     opt = st.selectbox("Choisir un client", unique_clients["_opt"].tolist(), key="anal_client_select")
     if opt:
         sel_id = unique_clients.set_index("_opt").loc[opt, "ID_Client"]
-        live_all = read_sheet(current_path, client_target_sheet, normalize=False)
-        subset = live_all[live_all.get("ID_Client","").astype(str) == str(sel_id)].copy()
-        if subset.empty:
-            st.info("Client introuvable.")
+        # 🔒 on normalise la feuille source pour être certain d'avoir ID_Client
+        live_all_raw = read_sheet(current_path, client_target_sheet, normalize=False)
+        live_all = normalize_dataframe(live_all_raw)
+        # Même si l'utilisateur a sélectionné "Visa" par erreur, la normalisation crée la colonne ID_Client vide → filtre sûr
+        idxs = live_all.index[live_all["ID_Client"].astype(str) == str(sel_id)]
+        if len(idxs) == 0:
+            st.info("Client introuvable dans la feuille cible.")
         else:
-            r0 = subset.iloc[0].to_dict()
+            idx = idxs[0]
+            r0 = live_all.loc[idx].to_dict()
+
             cA, cB, cC = st.columns(3)
             try: m = float(r0.get("Montant", 0))
             except Exception: m = 0.0
@@ -896,20 +901,31 @@ with tabs[2]:
                 ok_add = st.form_submit_button("💾 Ajouter le paiement (fiche)", type="primary")
             if ok_add:
                 try:
-                    live = live_all.copy()
-                    idxs = live.index[live.get("ID_Client","").astype(str) == str(sel_id)]
-                    if len(idxs)==0:
-                        st.error("Dossier introuvable.")
+                    live_write = read_sheet(current_path, client_target_sheet, normalize=False).copy()
+                    # ensure cols
+                    for c in ["Paiements","Payé","Montant","Reste","ID_Client"]:
+                        if c not in live_write.columns:
+                            live_write[c] = "" if c=="Paiements" else 0.0
+                    # trouve la ligne par ID_Client sur la version non normalisée si possible, sinon fallback par ID sur normalisée
+                    # priorité: créer une série des IDs sur live_write
+                    ids_series = live_write["ID_Client"].astype(str) if "ID_Client" in live_write.columns else pd.Series([""], index=live_write.index)
+                    hit = live_write.index[ids_series == str(sel_id)]
+                    if len(hit)==0:
+                        # fallback: on essaie de repérer l'équivalent par Nom + Date
+                        hit = live_write.index[(live_write.get("Nom","").astype(str)==_safe_str(r0.get("Nom"))) &
+                                               (live_write.get("Date","").astype(str)==_safe_str(r0.get("Date")))]
+                    if len(hit)==0:
+                        st.error("Impossible de localiser la ligne à mettre à jour.")
                     else:
-                        idx = idxs[0]
-                        pay_list = _parse_paiements(live.at[idx, "Paiements"] if "Paiements" in live.columns else "")
+                        i = hit[0]
+                        pay_list = _parse_paiements(live_write.at[i, "Paiements"])
                         add = float(np_amount or 0.0)
                         if add <= 0:
                             st.warning("Le montant doit être > 0.")
                             st.stop()
-                        try: m0 = float(live.at[idx,"Montant"])
+                        try: m0 = float(live_write.at[i,"Montant"])
                         except Exception: m0 = 0.0
-                        try: p0 = float(live.at[idx,"Payé"])
+                        try: p0 = float(live_write.at[i,"Payé"])
                         except Exception: p0 = 0.0
                         reste0 = max(m0 - p0, 0.0)
                         if add > reste0 + 1e-9:
@@ -917,12 +933,12 @@ with tabs[2]:
                             add = reste0
 
                         pay_list.append({"date": str(np_date), "amount": float(add), "mode": np_mode, "note": np_note})
-                        live.at[idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+                        live_write.at[i, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
                         total_paid = _sum_payments(pay_list)
-                        live.at[idx, "Payé"]  = float(total_paid)
-                        live.at[idx, "Reste"] = max(m0 - float(total_paid), 0.0)
+                        live_write.at[i, "Payé"]  = float(total_paid)
+                        live_write.at[i, "Reste"] = max(m0 - float(total_paid), 0.0)
 
-                        write_sheet_inplace(current_path, client_target_sheet, live)
+                        write_sheet_inplace(current_path, client_target_sheet, live_write)
                         st.success("Paiement ajouté **dans le fichier** depuis la fiche. ✅")
                         st.rerun()
                 except Exception as e:
