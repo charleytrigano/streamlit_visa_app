@@ -67,6 +67,7 @@ def copy_upload_to_workspace(upload) -> Path:
 def _safe_str(x): return "" if pd.isna(x) else str(x).strip()
 
 def _to_num(s: pd.Series) -> pd.Series:
+    # attend une Series
     cleaned = (s.astype(str)
                  .str.replace("\u00a0", "", regex=False)
                  .str.replace("\u202f", "", regex=False)
@@ -156,10 +157,16 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "Montant" in df.columns and HONO not in df.columns:
         df[HONO] = _to_num(df["Montant"])
     else:
-        df[HONO] = _to_num(df.get(HONO, 0.0))
+        if HONO in df.columns:
+            df[HONO] = _to_num(df[HONO])
+        else:
+            df[HONO] = 0.0
 
     # Autres frais
-    df[AUTRE] = _to_num(df.get(AUTRE, 0.0))
+    if AUTRE in df.columns:
+        df[AUTRE] = _to_num(df[AUTRE])
+    else:
+        df[AUTRE] = 0.0
 
     # Total
     df[TOTAL] = (df[HONO] + df[AUTRE]).astype(float)
@@ -190,7 +197,10 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "Paiements" not in df.columns: df["Paiements"] = ""
 
     # ESCROW
-    df[ESC_TR] = _to_num(df.get(ESC_TR, 0.0))
+    if ESC_TR in df.columns:
+        df[ESC_TR] = _to_num(df[ESC_TR])
+    else:
+        df[ESC_TR] = 0.0
     if ESC_JR not in df.columns: df[ESC_JR] = ""
 
     # Nettoyage
@@ -455,7 +465,8 @@ with tabs[0]:
 
     # ⚠️ Alerte ESCROW (dossiers envoyés à réclamer)
     df_esc = f.copy()
-    df_esc[ESC_TR] = _to_num(df_esc.get(ESC_TR, 0.0))
+    if ESC_TR not in df_esc.columns: df_esc[ESC_TR] = 0.0
+    else: df_esc[ESC_TR] = pd.to_numeric(df_esc[ESC_TR], errors="coerce").fillna(0.0)
     df_esc["escrow_dispo"] = df_esc.apply(escrow_available_from_row, axis=1)
     alert = df_esc[(df_esc.get("Dossier envoyé", False) == True) & (df_esc["escrow_dispo"] > 0.004)]
     if not alert.empty:
@@ -617,6 +628,19 @@ with tabs[1]:
                 val_refuse = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")))   if has_refuse else False
                 val_annule = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")))   if has_annule else False
 
+                # --- Alerte & transfert immédiat si 'Envoyé' ---
+                escrow_dispo_after = max(min(float(paye or 0.0), float(honoraires or 0.0)) - float(moved0), 0.0)
+                do_transfer_now = False
+                transfer_amount = 0.0
+                transfer_note = ""
+                if val_envoye and escrow_dispo_after > 0.004:
+                    st.warning(f"Ce dossier est *envoyé* : ESCROW à transférer possible = {_fmt_money_us(escrow_dispo_after)}")
+                    do_transfer_now = st.checkbox("Transférer maintenant vers compte ordinaire ?", value=True)
+                    transfer_amount = st.number_input("Montant à transférer (US $)", min_value=0.0,
+                                                      max_value=float(escrow_dispo_after), value=float(escrow_dispo_after),
+                                                      step=10.0, format="%.2f")
+                    transfer_note = st.text_input("Note de transfert (facultatif)", "")
+
                 ok = st.form_submit_button("💾 Enregistrer (dans le fichier)", type="primary")
 
             if ok:
@@ -654,8 +678,42 @@ with tabs[1]:
                     if has_rfe:    live.at[t_idx,"RFE"]=bool(val_rfe)
                     if has_refuse: live.at[t_idx,"Dossier refusé"]=bool(val_refuse)
                     if has_annule: live.at[t_idx,"Dossier annulé"]=bool(val_annule)
-                    write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
-                    st.success("Modifications enregistrées **dans le fichier**. ✅"); st.rerun()
+
+                    write_sheet_inplace(current_path, client_target_sheet, live)
+                    save_workspace_path(current_path)
+
+                    # --- Transfert immédiat si demandé ---
+                    if val_envoye and 'do_transfer_now' in locals() and do_transfer_now and (transfer_amount or 0.0) > 0:
+                        try:
+                            live_w = read_sheet(current_path, client_target_sheet, normalize=False).copy()
+                            # garantir colonnes
+                            for c in [ESC_TR, ESC_JR]:
+                                if c not in live_w.columns: live_w[c] = 0.0 if c==ESC_TR else ""
+                            # retrouver l'index par ID
+                            key = _safe_str(init.get("ID_Client"))
+                            idxs = live_w.index[live_w.get("ID_Client","").astype(str)==key] if key else []
+                            if len(idxs)==0:
+                                # fallback par (Nom,Date)
+                                msk = (live_w.get("Nom","").astype(str)==_safe_str(nom)) & \
+                                      (live_w.get("Date","").astype(str)==str(d))
+                                idxs = live_w.index[msk]
+                            if len(idxs)==0:
+                                st.info("Transfert demandé mais ligne introuvable après sauvegarde.")
+                            else:
+                                i = idxs[0]
+                                # Recalculer l'ESCROW dispo réel après modifs
+                                tmp_norm = normalize_dataframe(live_w.copy())
+                                disp = float(tmp_norm.loc[tmp_norm["ID_Client"].astype(str)==str(live_w.at[i,"ID_Client"])].apply(escrow_available_from_row, axis=1).iloc[0])
+                                add = float(min(max(transfer_amount,0.0), disp))
+                                live_w.at[i, ESC_TR] = float(pd.to_numeric(pd.Series([live_w.at[i, ESC_TR]]), errors="coerce").fillna(0.0).iloc[0] + add)
+                                live_w.at[i, ESC_JR] = append_escrow_journal(live_w.loc[i], add, transfer_note)
+                                write_sheet_inplace(current_path, client_target_sheet, live_w)
+                                st.success(f"Transfert ESCROW immédiat effectué : {_fmt_money_us(add)} ✅")
+                        except Exception as e:
+                            st.error(f"Transfert immédiat — erreur : {e}")
+
+                    st.success("Modifications enregistrées **dans le fichier**. ✅")
+                    st.rerun()
 
     # ---- SUPPRIMER ----
     if action == "Supprimer":
@@ -806,7 +864,8 @@ with tabs[3]:
     live = normalize_dataframe(live_raw).copy()
 
     # Calculs ESCROW
-    live[ESC_TR] = _to_num(live.get(ESC_TR, 0.0))
+    if ESC_TR not in live.columns: live[ESC_TR] = 0.0
+    else: live[ESC_TR] = pd.to_numeric(live[ESC_TR], errors="coerce").fillna(0.0)
     live["ESCROW dispo"] = live.apply(escrow_available_from_row, axis=1)
 
     c1, c2, c3, c4 = st.columns(4)
@@ -845,7 +904,8 @@ with tabs[3]:
                         tmp = normalize_dataframe(live_w.copy())
                         disp = float(tmp.loc[tmp["ID_Client"].astype(str)==str(r["ID_Client"]), :].apply(escrow_available_from_row, axis=1).iloc[0])
                         add = float(min(max(amt,0.0), disp))
-                        live_w.at[i, ESC_TR] = float(_to_num(pd.Series([live_w.at[i, ESC_TR]])).iloc[0] + add)
+                        live_w.at[i, ESC_TR] = float(pd.to_numeric(pd.Series([live_w.at[i, ESC_TR]]), errors="coerce").fillna(0.0).iloc[0] + add)
+                        journal_prev = live_w.at[i, ESC_JR] if ESC_JR in live_w.columns else ""
                         live_w.at[i, ESC_JR] = append_escrow_journal(live_w.loc[i], add, note)
                         write_sheet_inplace(current_path, client_target_sheet, live_w)
                         st.success("Transfert ESCROW enregistré **dans le fichier**. ✅"); st.rerun()
