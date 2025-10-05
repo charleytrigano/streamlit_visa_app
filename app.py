@@ -110,7 +110,7 @@ def _sum_payments(pay_list) -> float:
     return tot
 
 def _make_client_id_from_row(row) -> str:
-    # ID fondé sur Nom + Date (téléphone retiré du modèle)
+    # ID basé sur Nom + Date (téléphone supprimé du modèle)
     base = "|".join([_safe_str(row.get("Nom")), _safe_str(row.get("Date"))])
     h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:8].upper()
     return f"CL-{h}"
@@ -124,7 +124,7 @@ def looks_like_reference(df: pd.DataFrame) -> bool:
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # Harmonisation des colonnes principales (sans Telephone/Email)
+    # Harmonisation (sans Telephone/Email)
     if "Date" in df.columns: df["Date"] = _to_date(df["Date"])
     else: df["Date"] = pd.NaT
 
@@ -152,11 +152,11 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
 
-    # Colonnes statut (si absentes -> False)
+    # Statuts (si absents → False)
     for b in ["RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]:
         if b not in df.columns: df[b] = False
 
-    # Colonnes non souhaitées : on les retire si présentes
+    # Colonnes à retirer si présentes
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
 
@@ -167,13 +167,10 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if need_id.any():
         df.loc[need_id, "ID_Client"] = df.loc[need_id].apply(_make_client_id_from_row, axis=1)
 
-    # Assurer présence de Paiements
     if "Paiements" not in df.columns: df["Paiements"] = ""
 
-    # Ordre des colonnes (propre)
     ordered = ["ID_Client","Nom","Date","Mois","Visa","Montant","Payé","Reste",
                "Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé","Paiements"]
-    # On garde les colonnes connues dans cet ordre + le reste à la fin
     cols = [c for c in ordered if c in df.columns] + [c for c in df.columns if c not in ordered]
     return df[cols]
 
@@ -315,7 +312,6 @@ st.sidebar.download_button(
     data=st.session_state.get("download_bytes", b""),
     file_name=st.session_state.get("download_name", current_path.name),
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    help="Snapshot actuel du fichier."
 )
 
 # ---------- TABS ----------
@@ -462,14 +458,12 @@ with tabs[1]:
     live_raw = read_sheet(current_path, client_target_sheet, normalize=False).copy()
     live_raw["_RowID"] = range(len(live_raw))
 
-    # Flags statut
     has_envoye  = "Dossier envoyé"  in live_raw.columns
     has_appr    = "Dossier approuvé" in live_raw.columns
     has_rfe     = "RFE"             in live_raw.columns
     has_refuse  = "Dossier refusé"  in live_raw.columns
     has_annule  = "Dossier annulé"  in live_raw.columns
 
-    # Référentiel Visa
     try:
         visa_ref = read_sheet(current_path, "Visa", normalize=False)
         visa_options = sorted(visa_ref["Visa"].dropna().astype(str).unique()) if "Visa" in visa_ref.columns else []
@@ -481,7 +475,6 @@ with tabs[1]:
     # ---- CREER ----
     if action == "Créer":
         st.markdown("### ➕ Nouveau client")
-        # colonnes minimales
         for must in ["ID_Client","Nom","Date","Mois","Visa","Montant","Payé","Reste",
                      "Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé","Paiements"]:
             if must not in live_raw.columns:
@@ -501,7 +494,6 @@ with tabs[1]:
             paye    = c6.number_input("Payé (US $)", value=0.0, step=10.0, format="%.2f")
 
             st.markdown("#### État du dossier")
-            # ORDRE DEMANDÉ : Envoyé ▶ Approuvé ▶ RFE ▶ Refusé ▶ Annulé
             val_envoye = st.checkbox("Dossier envoyé",  value=False) if has_envoye else False
             val_appr   = st.checkbox("Dossier approuvé",value=False) if has_appr   else False
             val_rfe    = st.checkbox("RFE",             value=False) if has_rfe    else False
@@ -584,7 +576,6 @@ with tabs[1]:
                     st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché.")
                     st.stop()
                 live = live_raw.drop(columns=["_RowID"]).copy()
-                # Ciblage : priorité à l'ID, sinon Nom+Date
                 t_idx = None
                 if "ID_Client" in live.columns and _safe_str(init.get("ID_Client")):
                     hits = live.index[live["ID_Client"].astype(str) == _safe_str(init.get("ID_Client"))]
@@ -645,7 +636,10 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("📊 Analyses — Volumes & Financier")
 
-    dfA = read_sheet(current_path, client_target_sheet, normalize=True).copy()
+    # ⚠️ Normalisation FORCÉE ici (même si la feuille ressemble à un référentiel)
+    dfA_raw = read_sheet(current_path, client_target_sheet, normalize=False)
+    dfA = normalize_dataframe(dfA_raw).copy()
+
     if dfA.empty:
         st.info("Aucune donnée dans la feuille cible pour analyser.")
         st.stop()
@@ -662,11 +656,12 @@ with tabs[2]:
 
     with st.container():
         d1, d2 = st.columns([1,1])
-        if dfA["Date"].notna().any():
+        today = date.today()
+        # ✔️ Blindage : si la colonne Date n’existe pas ou n’a aucune valeur → valeurs par défaut
+        if ("Date" in dfA.columns) and dfA["Date"].notna().any():
             dmin = min([d for d in dfA["Date"] if pd.notna(d)])
             dmax = max([d for d in dfA["Date"] if pd.notna(d)])
         else:
-            today = date.today()
             dmin, dmax = today - timedelta(days=365), today
         date_from = d1.date_input("Du", value=dmin, key="anal_date_from")
         date_to   = d2.date_input("Au", value=dmax, key="anal_date_to")
@@ -705,7 +700,6 @@ with tabs[2]:
         if col in fA.columns:
             fA[col] = pd.to_numeric(fA[col], errors="coerce").fillna(0.0)
 
-    # Détail + statut
     def derive_statut(row) -> str:
         if bool(row.get("Dossier approuvé", False)): return "Approuvé"
         if bool(row.get("Dossier refusé", False)):   return "Refusé"
@@ -908,7 +902,6 @@ with tabs[2]:
             if vols_dict:
                 blocks.append(("Volumes — Statuts par période", st_data2))
             blocks.append(("Financier — Montant / Payé / Reste par période", sums))
-            # Détails
             blocks.append(("Détails (clients)", details_to_show))
             blocks.append(("Clients par période (liste)", clients_par_periode.to_frame("Clients")))
             blocks.append(("Clients par statut (liste)", clients_par_statut.to_frame("Clients")))
