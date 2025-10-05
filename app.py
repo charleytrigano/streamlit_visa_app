@@ -4,9 +4,10 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 import streamlit as st
 import pandas as pd
+import altair as alt  # pour les graphiques interactifs
 
 st.set_page_config(page_title="📊 Visas — Edition directe + ESCROW", layout="wide")
-st.title("📊 Visas — Edition DIRECTE du fichier (avec ESCROW)")
+st.title("📊 Visas — Edition DIRECTE du fichier (avec ESCROW + Analyses)")
 
 # ==== Constantes colonnes ====
 HONO   = "Honoraires (US $)"
@@ -224,7 +225,7 @@ else:
 up = st.sidebar.file_uploader("Remplacer par un Excel (.xlsx, .xls)", type=["xlsx","xls"])
 if up is not None:
     new_path = copy_upload_to_workspace(up)
-    save_workspace_path(new_path)  # <-- mémorise le dernier fichier
+    save_workspace_path(new_path)  # mémorise le dernier fichier
     try:
         st.session_state["download_bytes"] = new_path.read_bytes()
         st.session_state["download_name"] = new_path.name
@@ -331,6 +332,7 @@ with tabs[0]:
         st.stop()
 
     df = read_sheet(current_path, sheet_choice, normalize=True)
+
     with st.container():
         c1, c2, c3 = st.columns(3)
         years = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
@@ -381,7 +383,7 @@ with tabs[0]:
     k4.metric("Solde (US $)", _fmt_money_us(float(f.get("Reste", pd.Series(dtype=float)).sum())) )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Alerte ESCROW
+    # Alerte ESCROW (dossiers envoyés à réclamer)
     df_esc = f.copy()
     if ESC_TR not in df_esc.columns: df_esc[ESC_TR] = 0.0
     else: df_esc[ESC_TR] = pd.to_numeric(df_esc[ESC_TR], errors="coerce").fillna(0.0)
@@ -689,7 +691,7 @@ with tabs[2]:
         date_to   = d2.date_input("Au", value=dmax, key="anal_date_to")
         c3a, c3b = st.columns(2)
         agg_with_year = c3a.toggle("Agrégation par Année-Mois (YYYY-MM)", value=False, key="anal_agg_with_year")
-        show_tables   = c3b.toggle("Voir les tableaux détaillés", value=False, key="anal_show_tables")
+        show_tables   = c3b.toggle("Voir les tableaux détaillés", value=True, key="anal_show_tables")
 
     fA = dfA.copy()
     if sel_visa: fA = fA[fA["Visa"].astype(str).isin(sel_visa)]
@@ -706,14 +708,13 @@ with tabs[2]:
         if include_na_dates: mask_range = mask_range | fA["Date"].isna()
         fA = fA[mask_range]
 
+    # Période (YYYY-MM ou MM)
     if agg_with_year:
         fA["Periode"] = fA["Date"].apply(lambda x: f"{x.year}-{x.month:02d}" if pd.notna(x) else "NA")
-        ordre_periodes = sorted([p for p in fA["Periode"].unique() if p != "NA"]) + (["NA"] if "NA" in fA["Periode"].values else [])
     else:
         fA["Periode"] = fA["Mois"].fillna("NA")
-        ordre_periodes = [f"{m:02d}" for m in range(1,13)]
-        if "NA" in fA["Periode"].values: ordre_periodes += ["NA"]
 
+    # conversions monétaires
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
         if col in fA.columns: fA[col] = pd.to_numeric(fA[col], errors="coerce").fillna(0.0)
 
@@ -723,23 +724,104 @@ with tabs[2]:
         if bool(row.get("Dossier annulé", False)):   return "Annulé"
         return "En attente"
 
-    details = fA.copy()
-    details["Statut"] = details.apply(derive_statut, axis=1)
+    fA["Statut"] = fA.apply(derive_statut, axis=1)
 
+    # ---------- Graphiques : Volumes ----------
+    st.markdown("### 📈 Volumes")
+    vol_crees = fA.groupby("Periode").size().reset_index(name="Créés")
+    vol_env   = fA[fA["Dossier envoyé"]==True].groupby("Periode").size().reset_index(name="Envoyés")
+    vol_appr  = fA[fA["Dossier approuvé"]==True].groupby("Periode").size().reset_index(name="Approuvés")
+    vol_ref   = fA[fA["Dossier refusé"]==True].groupby("Periode").size().reset_index(name="Refusés")
+    vol_ann   = fA[fA["Dossier annulé"]==True].groupby("Periode").size().reset_index(name="Annulés")
+    # fusion pour chart multi-séries
+    def melt_counts(df_cnt, name):
+        return df_cnt.rename(columns={df_cnt.columns[1]: "val"}).assign(Indic=name)
+    df_vol = pd.concat([
+        melt_counts(vol_crees, "Créés"),
+        melt_counts(vol_env,   "Envoyés"),
+        melt_counts(vol_appr,  "Approuvés"),
+        melt_counts(vol_ref,   "Refusés"),
+        melt_counts(vol_ann,   "Annulés"),
+    ], ignore_index=True).rename(columns={"Periode":"Période","val":"Volume"})
+    if not df_vol.empty:
+        chart_vol = alt.Chart(df_vol).mark_line(point=True).encode(
+            x=alt.X("Période:N", sort=None, title="Période"),
+            y=alt.Y("Volume:Q"),
+            color=alt.Color("Indic:N", legend=alt.Legend(title="Statut")),
+            tooltip=["Période","Indic","Volume"]
+        ).properties(height=280, use_container_width=True)
+        st.altair_chart(chart_vol, use_container_width=True)
+    else:
+        st.caption("Aucune donnée de volume à afficher.")
+
+    # ---------- Graphiques : Financier ----------
+    st.markdown("### 💵 Financier")
+    fin = fA.groupby("Periode", dropna=False)[[HONO, AUTRE, TOTAL, "Payé","Reste"]].sum().reset_index()
+    if not fin.empty:
+        # CA (Honoraires + Autres)
+        ca = fin.melt(id_vars="Periode", value_vars=[HONO, AUTRE], var_name="Type", value_name="Montant")
+        chart_ca = alt.Chart(ca).mark_bar().encode(
+            x=alt.X("Periode:N", title="Période"),
+            y=alt.Y("Montant:Q"),
+            color=alt.Color("Type:N", legend=alt.Legend(title="Composant")),
+            tooltip=["Periode","Type", alt.Tooltip("Montant:Q", format="$.2f")]
+        ).properties(title="Chiffre d'affaires (Honoraires + Autres)", height=280)
+        st.altair_chart(chart_ca, use_container_width=True)
+
+        # Encaissements vs Solde
+        enc = fin.melt(id_vars="Periode", value_vars=["Payé","Reste"], var_name="Indicateur", value_name="Montant")
+        chart_enc = alt.Chart(enc).mark_line(point=True).encode(
+            x=alt.X("Periode:N", title="Période"),
+            y=alt.Y("Montant:Q"),
+            color=alt.Color("Indicateur:N", legend=alt.Legend(title="Indicateur")),
+            tooltip=["Periode","Indicateur", alt.Tooltip("Montant:Q", format="$.2f")]
+        ).properties(title="Encaissements vs Solde restant", height=280)
+        st.altair_chart(chart_enc, use_container_width=True)
+    else:
+        st.caption("Aucune donnée financière à afficher.")
+
+    # ---------- Graphique : Répartition par Visa ----------
+    st.markdown("### 🧭 Répartition par type de visa")
+    rep = fA.groupby("Visa").agg(
+        Dossiers=("Visa","count"),
+        Total_USD=(TOTAL,"sum"),
+        Paye_USD=("Payé","sum"),
+        Reste_USD=("Reste","sum")
+    ).reset_index().sort_values("Dossiers", ascending=False)
+    if not rep.empty:
+        chart_rep = alt.Chart(rep).mark_bar().encode(
+            x=alt.X("Dossiers:Q", title="Nb dossiers"),
+            y=alt.Y("Visa:N", sort="-x"),
+            tooltip=["Visa","Dossiers",
+                     alt.Tooltip("Total_USD:Q", format="$.2f", title="Total"),
+                     alt.Tooltip("Paye_USD:Q", format="$.2f", title="Payé"),
+                     alt.Tooltip("Reste_USD:Q", format="$.2f", title="Reste")]
+        ).properties(height=320)
+        st.altair_chart(chart_rep, use_container_width=True)
+    else:
+        st.caption("Aucune répartition par visa.")
+
+    st.divider()
+
+    # ---------- Détails (clients) + fiche & règlements ----------
     st.markdown("### 🔎 Détails (clients)")
-    details_display_cols = [c for c in ["Periode","ID_Client","Nom","Visa","Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut"] if c in details.columns]
-    details_to_show = details[details_display_cols].copy()
+    details_cols = [c for c in ["Periode","ID_Client","Nom","Visa","Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut"] if c in fA.columns]
+    details = fA[details_cols].copy()
+    # Formats monétaires pour affichage
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
-        if col in details_to_show.columns:
-            details_to_show[col] = details_to_show[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
+        if col in details.columns:
+            details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
     d1, d2 = st.columns(2)
     statut_filter = d1.multiselect("Filtrer par statut", ["Approuvé","Refusé","Annulé","En attente"], key="anal_statut_filter")
     search = d2.text_input("Recherche (Nom / Visa / ID)", key="anal_search")
-    if statut_filter: details_to_show = details_to_show[details_to_show["Statut"].isin(statut_filter)]
+    if statut_filter:
+        mask_st = fA["Statut"].isin(statut_filter)
+        details = details[mask_st.values]
     if search:
         s = search.lower()
-        details_to_show = details_to_show[details_to_show.apply(lambda r: (s in str(r.get("Nom","")).lower()) or (s in str(r.get("Visa","")).lower()) or (s in str(r.get("ID_Client","")).lower()), axis=1)]
-    st.dataframe(details_to_show.sort_values(["Periode","Nom"]), use_container_width=True)
+        mask_s = fA.apply(lambda r: (s in str(r.get("Nom","")).lower()) or (s in str(r.get("Visa","")).lower()) or (s in str(r.get("ID_Client","")).lower()), axis=1)
+        details = details[mask_s.values]
+    st.dataframe(details.sort_values(["Periode","Nom"]), use_container_width=True)
 
     # ---- Fiche & règlements du client (avec ajout de paiement) ----
     st.markdown("#### 🧾 Fiche & règlements du client")
@@ -761,7 +843,7 @@ with tabs[2]:
         k4.metric("Payé", _fmt_money_us(float(rowN.get("Payé",0.0))))
         k5.metric("Reste", _fmt_money_us(float(rowN.get("Reste",0.0))))
 
-        # Historique
+        # Historique des paiements
         rlive = base_live.loc[base_live.get("ID_Client","").astype(str)==str(sel_id)]
         plist = _parse_json_list(rlive.iloc[0].get("Paiements","")) if not rlive.empty else []
         st.markdown("**Historique des règlements**")
@@ -776,14 +858,13 @@ with tabs[2]:
         else:
             st.caption("Aucun paiement enregistré pour ce client.")
 
-        # 👉 Ajout d’un règlement — corrigé & blindé
+        # 👉 Ajout d’un règlement — depuis la fiche
         st.markdown("**Ajouter un règlement**")
         cA, cB, cC, cD = st.columns([1,1,1,2])
         pay_date = cA.date_input("Date", value=date.today(), key=f"pay_date_{sel_id}")
         pay_mode = cB.selectbox("Mode", ["CB","Chèque","Espèces","Virement","Autre"], key=f"pay_mode_{sel_id}")
         pay_amt  = cC.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f", key=f"pay_amt_{sel_id}")
         pay_note = cD.text_input("Note", "", key=f"pay_note_{sel_id}")
-
         if st.button("💾 Enregistrer ce règlement (dans le fichier)", key=f"pay_add_btn_{sel_id}"):
             try:
                 live = read_sheet(current_path, client_target_sheet, normalize=False)
@@ -800,7 +881,6 @@ with tabs[2]:
                     st.warning("Le montant doit être > 0.")
                     st.stop()
 
-                # Reste courant sécurisé (sans .iloc[0] fragile)
                 norm = normalize_dataframe(live.copy())
                 mask_id = norm["ID_Client"].astype(str) == str(sel_id)
                 reste_curr = float(norm.loc[mask_id, "Reste"].sum()) if mask_id.any() else 0.0
