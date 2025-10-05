@@ -115,31 +115,49 @@ def _make_client_id_from_row(row) -> str:
 
 def looks_like_reference(df: pd.DataFrame) -> bool:
     cols = set(map(str.lower, df.columns.astype(str)))
-    # Référentiel "Visa" = contient 'visa', pas de colonnes financières
     has_visa = "visa" in cols
     no_money = not ({"montant", "honoraires", "acomptes", "payé", "reste", "solde"} & cols)
     return has_visa and no_money
 
+# ---------- Nouveau schéma : Honoraires + Autres frais -> Total ----------
+HONO = "Honoraires (US $)"
+AUTRE = "Autres frais (US $)"
+TOTAL = "Total (US $)"
+
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
+    # Dates & Mois
     if "Date" in df.columns: df["Date"] = _to_date(df["Date"])
     else: df["Date"] = pd.NaT
     df["Mois"] = df["Date"].apply(lambda x: f"{x.month:02d}" if pd.notna(x) else pd.NA)
 
+    # Visa
     visa_col = None
     for c in ["Visa", "Categories", "Catégorie", "TypeVisa"]:
         if c in df.columns: visa_col = c; break
     df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
 
-    if "Montant" in df.columns: df["Montant"] = _to_num(df["Montant"])
+    # --- Montants : compatibilité ascendante ---
+    # Si "Montant" existe et HONO pas présent → copier vers HONO
+    if "Montant" in df.columns and HONO not in df.columns:
+        df[HONO] = _to_num(df["Montant"])
     else:
-        src = None
-        for c in ["Honoraires","Total","Amount"]:
-            if c in df.columns: src=c; break
-        df["Montant"] = _to_num(df[src]) if src else 0.0
+        if HONO in df.columns: df[HONO] = _to_num(df[HONO])
+        else: df[HONO] = 0.0
 
-    if "Payé" in df.columns: df["Payé"] = _to_num(df["Payé"])
+    # Autres frais (peut ne pas exister)
+    if AUTRE in df.columns:
+        df[AUTRE] = _to_num(df[AUTRE])
+    else:
+        df[AUTRE] = 0.0
+
+    # Total = Honoraires + Autres frais
+    df[TOTAL] = (df[HONO] + df[AUTRE]).astype(float)
+
+    # Payé
+    if "Payé" in df.columns:
+        df["Payé"] = _to_num(df["Payé"])
     else:
         if "Paiements" in df.columns:
             parsed = df["Paiements"].apply(_parse_paiements)
@@ -147,23 +165,29 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df["Payé"] = 0.0
 
-    df["Reste"] = (df["Montant"] - df["Payé"]).fillna(0.0)
+    # Reste = Total - Payé
+    df["Reste"] = (df[TOTAL] - df["Payé"]).fillna(0.0)
 
+    # Statuts
     for b in ["RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]:
         if b not in df.columns: df[b] = False
 
-    # On s'assure d'un schéma cohérent (sans Téléphone/Email)
+    # Retirer champs non souhaités
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
 
+    # Identité
     if "Nom" not in df.columns: df["Nom"] = ""
     if "ID_Client" not in df.columns: df["ID_Client"] = ""
     need_id = df["ID_Client"].astype(str).str.strip().eq("") | df["ID_Client"].isna()
     if need_id.any():
         df.loc[need_id, "ID_Client"] = df.loc[need_id].apply(_make_client_id_from_row, axis=1)
+
+    # Paiements
     if "Paiements" not in df.columns: df["Paiements"] = ""
 
-    ordered = ["ID_Client","Nom","Date","Mois","Visa","Montant","Payé","Reste",
+    ordered = ["ID_Client","Nom","Date","Mois","Visa",
+               HONO, AUTRE, TOTAL, "Payé","Reste",
                "Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé","Paiements"]
     cols = [c for c in ordered if c in df.columns] + [c for c in df.columns if c not in ordered]
     return df[cols]
@@ -177,7 +201,8 @@ def read_sheet(path: Path, sheet: str, normalize: bool) -> pd.DataFrame:
     xls = pd.ExcelFile(path)
     if sheet not in xls.sheet_names:
         base = pd.DataFrame(columns=[
-            "ID_Client","Nom","Date","Mois","Visa","Montant","Payé","Reste",
+            "ID_Client","Nom","Date","Mois","Visa",
+            HONO, AUTRE, TOTAL, "Payé","Reste",
             "Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé","Paiements"
         ])
         return normalize_dataframe(base) if normalize else base
@@ -296,12 +321,10 @@ except Exception as e:
     st.error(f"Impossible de lire l'Excel : {e}")
     st.stop()
 
-# Feuille affichée dans le Dashboard (libre)
 preferred_order = ["Clients","Visa","Données normalisées"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
 sheet_choice = st.sidebar.selectbox("Feuille (Dashboard)", sheet_names, index=sheet_names.index(default_sheet))
 
-# Liste des feuilles éligibles CRUD = au moins Nom & Visa
 valid_client_sheets = []
 for s in sheet_names:
     try:
@@ -316,7 +339,6 @@ if not valid_client_sheets:
     client_target_sheet = None
 else:
     default_client_sheet = "Clients" if "Clients" in valid_client_sheets else valid_client_sheets[0]
-    # Nettoyage session pour éviter clés invalides
     if "client_sheet_select" in st.session_state and st.session_state["client_sheet_select"] not in valid_client_sheets:
         del st.session_state["client_sheet_select"]
     client_target_sheet = st.sidebar.selectbox(
@@ -343,7 +365,7 @@ tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses"])
 
 # ---------- DASHBOARD ----------
 with tabs[0]:
-    # Si la feuille choisie est un référentiel Visa → UI dédiée
+    # Si "Visa" est un référentiel simple
     df_raw = read_sheet(current_path, sheet_choice, normalize=False)
     if looks_like_reference(df_raw):
         st.subheader("📄 Référentiel — Types de Visa")
@@ -366,8 +388,7 @@ with tabs[0]:
                 else:
                     out = pd.concat([df_ref, pd.DataFrame([{"Visa": new_v}])], ignore_index=True)
                     write_sheet_inplace(current_path, sheet_choice, out)
-                    st.success("Type ajouté.")
-                    st.rerun()
+                    st.success("Type ajouté."); st.rerun()
 
         elif action == "Renommer":
             if not options:
@@ -386,25 +407,22 @@ with tabs[0]:
                         out = df_ref.copy()
                         out.loc[out["Visa"] == old, "Visa"] = new
                         write_sheet_inplace(current_path, sheet_choice, out)
-                        st.success("Type renommé.")
-                        st.rerun()
-
-        else:  # Supprimer
+                        st.success("Type renommé."); st.rerun()
+        else:
             if not options:
                 st.info("Aucun type à supprimer.")
             else:
                 rm = st.selectbox("Type à supprimer", options)
-                st.error("⚠️ Cette action est irréversible.")
+                st.error("⚠️ Action irréversible.")
                 if st.button("🗑️ Supprimer"):
                     out = df_ref[df_ref["Visa"] != rm].reset_index(drop=True)
                     write_sheet_inplace(current_path, sheet_choice, out)
-                    st.success("Type supprimé.")
-                    st.rerun()
+                    st.success("Type supprimé."); st.rerun()
 
         st.info("Astuce : sélectionne une autre feuille dans la sidebar pour revenir au Dashboard classique.")
         st.stop()
 
-    # Dashboard classique (feuille transactionnelle)
+    # Dashboard classique (clients/transactions)
     df = read_sheet(current_path, sheet_choice, normalize=True)
 
     with st.container():
@@ -431,8 +449,9 @@ with tabs[0]:
             step = 1.0 if (vmax - vmin) > 1000 else 0.1 if (vmax - vmin) > 10 else 0.01
             return container.slider(lab, min_value=vmin, max_value=vmax, value=(vmin, vmax), step=step)
 
-        pay_range   = make_slider(df, "Payé", "Payé (min-max)", c4)
-        reste_range = make_slider(df, "Reste", "Solde (min-max)", c5)
+        total_range = make_slider(df, TOTAL, "Total (US $) min-max", c4)
+        pay_range   = make_slider(df, "Payé", "Payé (US $) min-max", c5)
+        reste_range = make_slider(df, "Reste", "Solde (US $) min-max", c6)
 
     f = df.copy()
     if "Date" in f.columns and sel_years:
@@ -445,6 +464,8 @@ with tabs[0]:
         f = f[mask]
     if "Visa" in f.columns and sel_visas:
         f = f[f["Visa"].astype(str).isin(sel_visas)]
+    if TOTAL in f.columns and total_range is not None:
+        f = f[(f[TOTAL] >= total_range[0]) & (f[TOTAL] <= total_range[1])]
     if "Payé" in f.columns and pay_range is not None:
         f = f[(f["Payé"] >= pay_range[0]) & (f["Payé"] <= pay_range[1])]
     if "Reste" in f.columns and reste_range is not None:
@@ -454,23 +475,24 @@ with tabs[0]:
     if hidden > 0:
         st.caption(f"🔎 {hidden} ligne(s) masquée(s) par les filtres.")
 
+    # KPI compacts
     st.markdown("""
     <style>.small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}.small-kpi [data-testid="stMetricLabel"]{font-size:.8rem;opacity:.8}</style>
     """, unsafe_allow_html=True)
     st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
     k1,k2,k3,k4 = st.columns(4)
     k1.metric("Dossiers", f"{len(f)}")
-    k2.metric("Montant total", _fmt_money_us(float(f.get("Montant", pd.Series(dtype=float)).sum())) )
-    k3.metric("Payé", _fmt_money_us(float(f.get("Payé", pd.Series(dtype=float)).sum())) )
-    k4.metric("Reste", _fmt_money_us(float(f.get("Reste", pd.Series(dtype=float)).sum())) )
+    k2.metric("Total (US $)", _fmt_money_us(float(f.get(TOTAL, pd.Series(dtype=float)).sum())) )
+    k3.metric("Payé (US $)", _fmt_money_us(float(f.get("Payé", pd.Series(dtype=float)).sum())) )
+    k4.metric("Solde (US $)", _fmt_money_us(float(f.get("Reste", pd.Series(dtype=float)).sum())) )
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
 
-    # Paiements
+    # Paiements (ajouts successifs)
     st.subheader("➕ Ajouter un paiement (US $)")
     if client_target_sheet is None:
-        st.info("Choisis d’abord une **feuille clients** valide dans la sidebar pour créditer des paiements.")
+        st.info("Choisis d’abord une **feuille clients** valide dans la sidebar.")
     else:
         clients_norm = read_sheet(current_path, client_target_sheet, normalize=True)
         todo = clients_norm[clients_norm["Reste"] > 0.004].copy() if "Reste" in clients_norm.columns else pd.DataFrame()
@@ -497,41 +519,53 @@ with tabs[0]:
                         raise RuntimeError("Dossier introuvable.")
                     idx = idxs[0]
 
-                    reste = float(todo.set_index("_label").loc[sel_label, "Reste"])
+                    # recalcul à partir des colonnes (compatibles)
+                    pay_list = _parse_paiements(live.at[idx, "Paiements"])
                     add = float(amount or 0.0)
                     if add <= 0:
-                        st.warning("Le montant doit être > 0.")
-                        st.stop()
-                    if add > reste + 1e-9:
-                        st.info(f"Le paiement dépasse le reste. Plafonné à {_fmt_money_us(reste)}.")
-                        add = reste
+                        st.warning("Le montant doit être > 0."); st.stop()
 
-                    pay_list = _parse_paiements(live.at[idx, "Paiements"])
+                    # Déterminer le reste courant de façon robuste
+                    # On s'appuie sur la version normalisée (pour TOTAL)
+                    live_norm = normalize_dataframe(live.copy())
+                    idc = str(live.at[idx, "ID_Client"]) if "ID_Client" in live.columns else ""
+                    reste_curr = float(live_norm.loc[live_norm["ID_Client"].astype(str)==idc, "Reste"].iloc[0]) if idc else 0.0
+                    if add > reste_curr + 1e-9:
+                        add = reste_curr
+
                     pay_list.append({"date": str(pdate), "amount": float(add), "mode": mode, "note": note})
                     live.at[idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
 
-                    if "Payé" not in live.columns: live["Payé"] = 0.0
+                    # Recalcul Payé/Reste sur la base TOTAL = HONO + AUTRE
+                    # Assurer colonnes existantes
+                    for c in [HONO, AUTRE, "Payé", "Reste"]:
+                        if c not in live.columns:
+                            live[c] = 0.0 if c != "Reste" else 0.0
                     total_paid = _sum_payments(pay_list)
-                    live.at[idx, "Payé"] = float(total_paid)
+                    # recompute total
+                    hono = _to_num(pd.Series([live.at[idx, HONO]])).iloc[0] if HONO in live.columns else 0.0
+                    autr = _to_num(pd.Series([live.at[idx, AUTRE]])).iloc[0] if AUTRE in live.columns else 0.0
+                    total = float(hono + autr)
 
-                    if "Montant" not in live.columns: live["Montant"] = 0.0
-                    if "Reste" not in live.columns: live["Reste"] = 0.0
-                    try: m = float(live.at[idx, "Montant"])
-                    except Exception: m = 0.0
-                    live.at[idx, "Reste"] = max(m - float(total_paid), 0.0)
+                    live.at[idx, "Payé"]  = float(total_paid)
+                    live.at[idx, "Reste"] = max(total - float(total_paid), 0.0)
+
+                    # si TOTAL existe dans la feuille, le mettre à jour
+                    if TOTAL in live.columns:
+                        live.at[idx, TOTAL] = total
 
                     write_sheet_inplace(current_path, client_target_sheet, live)
-                    st.success("Paiement enregistré **dans le fichier**. ✅")
-                    st.rerun()
+                    st.success("Paiement enregistré **dans le fichier**. ✅"); st.rerun()
                 except Exception as e:
                     st.error(f"Erreur : {e}")
 
     # Tableau
     st.subheader("📋 Données")
-    cols_show = [c for c in ["ID_Client","Nom","Date","Visa","Montant","Payé","Reste",
-                             "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"] if c in f.columns]
+    cols_show_order = ["ID_Client","Nom","Date","Visa", HONO, AUTRE, TOTAL, "Payé","Reste",
+                       "RFE","Dossier envoyé","Dossier approuvé","Dossier refusé","Dossier annulé"]
+    cols_show = [c for c in cols_show_order if c in f.columns]
     table = f.copy()
-    for col in ["Montant","Payé","Reste"]:
+    for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
         if col in table.columns: table[col] = table[col].map(_fmt_money_us)
     if "Date" in table.columns: table["Date"] = table["Date"].astype(str)
     st.dataframe(table[cols_show].sort_values(by=[c for c in ["Date","Visa"] if c in table.columns], na_position="last"),
@@ -568,10 +602,12 @@ with tabs[1]:
     # ---- CREER ----
     if action == "Créer":
         st.markdown("### ➕ Nouveau client")
-        for must in ["ID_Client","Nom","Date","Mois","Visa","Montant","Payé","Reste",
+        # garantir colonnes nécessaires
+        for must in ["ID_Client","Nom","Date","Mois","Visa",
+                     HONO, AUTRE, TOTAL, "Payé","Reste",
                      "Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé","Paiements"]:
             if must not in live_raw.columns:
-                if must in {"Montant","Payé","Reste"}: live_raw[must]=0.0
+                if must in {HONO, AUTRE, TOTAL, "Payé","Reste"}: live_raw[must]=0.0
                 elif must=="Paiements": live_raw[must]=""
                 elif must in {"Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé"}: live_raw[must]=False
                 elif must=="Mois": live_raw[must]=""
@@ -581,13 +617,19 @@ with tabs[1]:
             c1,c2 = st.columns(2)
             nom = c1.text_input("Nom")
             d = c2.date_input("Date", value=date.today())
+
             visa = st.selectbox("Visa", visa_options, index=0) if visa_options else st.text_input("Visa")
+
             c5,c6 = st.columns(2)
-            montant = c5.number_input("Montant (US $)", value=0.0, step=10.0, format="%.2f")
-            paye    = c6.number_input("Payé (US $)", value=0.0, step=10.0, format="%.2f")
+            honoraires = c5.number_input("Montant honoraires (US $)", value=0.0, step=10.0, format="%.2f")
+            autres     = c6.number_input("Autres frais (US $)", value=0.0, step=10.0, format="%.2f")
+
+            c7,c8 = st.columns(2)
+            total_preview = float(honoraires + autres)
+            c7.metric("Total (US $)", _fmt_money_us(total_preview))
+            paye_init = c8.number_input("Payé (US $)", value=0.0, step=10.0, format="%.2f")
 
             st.markdown("#### État du dossier")
-            # Ordre: Envoyé > Approuvé > RFE > Refusé > Annulé
             val_envoye = st.checkbox("Dossier envoyé",  value=False) if has_envoye else False
             val_appr   = st.checkbox("Dossier approuvé",value=False) if has_appr   else False
             val_rfe    = st.checkbox("RFE",             value=False) if has_rfe    else False
@@ -598,8 +640,7 @@ with tabs[1]:
 
         if ok:
             if val_rfe and not (val_envoye or val_refuse or val_annule):
-                st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché.")
-                st.stop()
+                st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché."); st.stop()
 
             gen_id = _make_client_id_from_row({"Nom": nom, "Date": d})
             existing = set(live_raw["ID_Client"].astype(str)) if "ID_Client" in live_raw.columns else set()
@@ -607,11 +648,14 @@ with tabs[1]:
             while new_id in existing:
                 n+=1; new_id=f"{gen_id}-{n:02d}"
 
+            total = float((honoraires or 0.0) + (autres or 0.0))
+            reste = max(total - float(paye_init or 0.0), 0.0)
+
             new_row = {
-                "ID_Client": new_id, "Nom": _safe_str(nom), "Date": str(d),
-                "Mois": f"{d.month:02d}",
-                "Visa": _safe_str(visa), "Montant": float(montant or 0), "Payé": float(paye or 0),
-                "Reste": max(float(montant or 0) - float(paye or 0), 0.0), "Paiements": "",
+                "ID_Client": new_id, "Nom": _safe_str(nom), "Date": str(d), "Mois": f"{d.month:02d}",
+                "Visa": _safe_str(visa),
+                HONO: float(honoraires or 0.0), AUTRE: float(autres or 0.0), TOTAL: total,
+                "Payé": float(paye_init or 0.0), "Reste": reste, "Paiements": "",
                 "Dossier envoyé": bool(val_envoye), "Dossier approuvé": bool(val_appr),
                 "RFE": bool(val_rfe), "Dossier refusé": bool(val_refuse), "Dossier annulé": bool(val_annule),
             }
@@ -619,8 +663,7 @@ with tabs[1]:
             live_after = pd.concat([live_raw.drop(columns=["_RowID"]), pd.DataFrame([new_row])], ignore_index=True)
             write_sheet_inplace(current_path, client_target_sheet, live_after)
             save_workspace_path(current_path)
-            st.success("Client créé **dans le fichier**. ✅")
-            st.rerun()
+            st.success("Client créé **dans le fichier**. ✅"); st.rerun()
 
     # ---- MODIFIER ----
     if action == "Modifier":
@@ -648,13 +691,22 @@ with tabs[1]:
                 else:
                     visa = st.text_input("Visa", value=_safe_str(init.get("Visa")))
 
-                c5,c6 = st.columns(2)
-                try: montant0=float(init.get("Montant",0))
-                except Exception: montant0=0.0
-                try: paye0=float(init.get("Payé",0))
+                # valeurs init robustes
+                try: hono0=float(init.get(HONO, init.get("Montant", 0.0))); 
+                except Exception: hono0=0.0
+                try: autre0=float(init.get(AUTRE, 0.0))
+                except Exception: autre0=0.0
+                try: paye0=float(init.get("Payé",0.0))
                 except Exception: paye0=0.0
-                montant = c5.number_input("Montant (US $)", value=montant0, step=10.0, format="%.2f")
-                paye    = c6.number_input("Payé (US $)", value=paye0,    step=10.0, format="%.2f")
+
+                c5,c6 = st.columns(2)
+                honoraires = c5.number_input("Montant honoraires (US $)", value=hono0, step=10.0, format="%.2f")
+                autres     = c6.number_input("Autres frais (US $)", value=autre0, step=10.0, format="%.2f")
+
+                c7,c8 = st.columns(2)
+                total_preview = float(honoraires + autres)
+                c7.metric("Total (US $)", _fmt_money_us(total_preview))
+                paye    = c8.number_input("Payé (US $)", value=paye0, step=10.0, format="%.2f")
 
                 st.markdown("#### État du dossier")
                 val_envoye = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")))   if has_envoye else False
@@ -667,9 +719,9 @@ with tabs[1]:
 
             if ok:
                 if val_rfe and not (val_envoye or val_refuse or val_annule):
-                    st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché.")
-                    st.stop()
+                    st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché."); st.stop()
                 live = live_raw.drop(columns=["_RowID"]).copy()
+                # localiser la ligne
                 t_idx = None
                 if "ID_Client" in live.columns and _safe_str(init.get("ID_Client")):
                     hits = live.index[live["ID_Client"].astype(str) == _safe_str(init.get("ID_Client"))]
@@ -682,13 +734,20 @@ with tabs[1]:
                 if t_idx is None:
                     st.error("Ligne introuvable.")
                 else:
+                    total = float((honoraires or 0.0)+(autres or 0.0))
                     live.at[t_idx,"Nom"]=_safe_str(nom)
                     live.at[t_idx,"Date"]=str(d)
                     live.at[t_idx,"Mois"]=f"{d.month:02d}"
                     live.at[t_idx,"Visa"]=_safe_str(visa)
-                    live.at[t_idx,"Montant"]=float(montant or 0)
-                    live.at[t_idx,"Payé"]=float(paye or 0)
-                    live.at[t_idx,"Reste"]=max(float(live.at[t_idx,"Montant"])-float(live.at[t_idx,"Payé"]),0.0)
+                    live.at[t_idx, HONO]=float(honoraires or 0.0)
+                    live.at[t_idx, AUTRE]=float(autres or 0.0)
+                    if TOTAL in live.columns: live.at[t_idx, TOTAL]=total
+                    else:
+                        # crée la colonne si elle n'existait pas
+                        live[TOTAL] = live.get(TOTAL, 0.0)
+                        live.at[t_idx, TOTAL]=total
+                    live.at[t_idx,"Payé"]=float(paye or 0.0)
+                    live.at[t_idx,"Reste"]=max(total - float(paye or 0.0), 0.0)
                     if has_envoye: live.at[t_idx,"Dossier envoyé"]=bool(val_envoye)
                     if has_appr:   live.at[t_idx,"Dossier approuvé"]=bool(val_appr)
                     if has_rfe:    live.at[t_idx,"RFE"]=bool(val_rfe)
@@ -697,8 +756,7 @@ with tabs[1]:
 
                     write_sheet_inplace(current_path, client_target_sheet, live)
                     save_workspace_path(current_path)
-                    st.success("Modifications enregistrées **dans le fichier**. ✅")
-                    st.rerun()
+                    st.success("Modifications enregistrées **dans le fichier**. ✅"); st.rerun()
 
     # ---- SUPPRIMER ----
     if action == "Supprimer":
@@ -723,8 +781,7 @@ with tabs[1]:
                     live = live[~((live.get("Nom","").astype(str)==nom)&(live.get("Date","").astype(str)==dat))].reset_index(drop=True)
                 write_sheet_inplace(current_path, client_target_sheet, live)
                 save_workspace_path(current_path)
-                st.success("Client supprimé **dans le fichier**. ✅")
-                st.rerun()
+                st.success("Client supprimé **dans le fichier**. ✅"); st.rerun()
 
 # ---------- ANALYSES ----------
 with tabs[2]:
@@ -734,9 +791,10 @@ with tabs[2]:
         st.info("Choisis d’abord une **feuille clients** valide (Nom & Visa) pour lancer les analyses.")
         st.stop()
 
-    # Normalisation FORCÉE ici
     dfA_raw = read_sheet(current_path, client_target_sheet, normalize=False)
     dfA = normalize_dataframe(dfA_raw).copy()
+    if dfA.empty:
+        st.info("Aucune donnée pour analyser."); st.stop()
 
     with st.container():
         c1, c2, c3, c4 = st.columns([1,1,1,1])
@@ -776,8 +834,7 @@ with tabs[2]:
         fA = fA[mask_month]
     if "Date" in fA.columns and (date_from or date_to):
         mask_range = fA["Date"].apply(lambda x: pd.notna(x) and (x >= date_from) and (x <= date_to))
-        if include_na_dates:
-            mask_range = mask_range | fA["Date"].isna()
+        if include_na_dates: mask_range = mask_range | fA["Date"].isna()
         fA = fA[mask_range]
 
     if agg_with_year:
@@ -789,7 +846,8 @@ with tabs[2]:
         if "NA" in fA["Periode"].values:
             ordre_periodes += ["NA"]
 
-    for col in ["Montant","Payé","Reste"]:
+    # numériser les colonnes d'argent
+    for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
         if col in fA.columns:
             fA[col] = pd.to_numeric(fA[col], errors="coerce").fillna(0.0)
 
@@ -801,14 +859,14 @@ with tabs[2]:
 
     details = fA.copy()
     details["Statut"] = details.apply(derive_statut, axis=1)
-    details_display_cols = [c for c in ["Periode","ID_Client","Nom","Visa","Date","Montant","Payé","Reste","Statut"] if c in details.columns]
+    details_display_cols = [c for c in ["Periode","ID_Client","Nom","Visa","Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut"] if c in details.columns]
 
     # KPI
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Dossiers (filtrés)", f"{len(fA)}")
-    k2.metric("Chiffre d’affaires", _fmt_money_us(float(fA.get("Montant", pd.Series(dtype=float)).sum())))
-    k3.metric("Encaissements",       _fmt_money_us(float(fA.get("Payé",    pd.Series(dtype=float)).sum())))
-    k4.metric("Solde à encaisser",   _fmt_money_us(float(fA.get("Reste",   pd.Series(dtype=float)).sum())))
+    k2.metric("Total (US $)", _fmt_money_us(float(fA.get(TOTAL, pd.Series(dtype=float)).sum())))
+    k3.metric("Encaissements (US $)", _fmt_money_us(float(fA.get("Payé",    pd.Series(dtype=float)).sum())))
+    k4.metric("Solde à encaisser (US $)", _fmt_money_us(float(fA.get("Reste",   pd.Series(dtype=float)).sum())))
 
     st.divider()
 
@@ -841,14 +899,14 @@ with tabs[2]:
 
     st.divider()
 
-    # Financier
+    # Financier par période
     st.markdown("### 💵 Financier par période")
-    sums = fA.groupby("Periode")[["Montant","Payé","Reste"]].sum().reindex(ordre_periodes).fillna(0.0)
+    sums = fA.groupby("Periode")[[HONO, AUTRE, TOTAL, "Payé","Reste"]].sum().reindex(ordre_periodes).fillna(0.0)
     cfin1, cfin2 = st.columns(2)
-    cfin1.caption("Chiffre d'affaires (Montant)")
-    cfin1.bar_chart(sums[["Montant"]])
-    cfin2.caption("Encaissements (Payé) & Solde à encaisser (Reste)")
-    cfin2.bar_chart(sums[["Payé","Reste"]])
+    cfin1.caption("Détail : Honoraires & Autres frais (US $)")
+    cfin1.bar_chart(sums[[HONO, AUTRE]])
+    cfin2.caption("Total vs Encaissements vs Solde (US $)")
+    cfin2.bar_chart(sums[[TOTAL, "Payé","Reste"]])
 
     st.divider()
 
@@ -877,7 +935,7 @@ with tabs[2]:
 
     st.divider()
 
-    # Fiche détaillée client (ajout de paiements aussi ici)
+    # Fiche détaillée — paiements depuis la fiche
     st.markdown("### 🧾 Fiche détaillée — client")
     unique_clients = details_to_show.dropna(subset=["ID_Client"]).copy()
     unique_clients["_opt"] = unique_clients.apply(
@@ -894,14 +952,17 @@ with tabs[2]:
         else:
             idx = idxs[0]
             r0 = live_all.loc[idx].to_dict()
+            m = float(r0.get(TOTAL, 0.0))
+            p = float(r0.get("Payé", 0.0))
+            rest = max(m - p, 0.0)
 
             cA, cB, cC = st.columns(3)
-            try: m = float(r0.get("Montant", 0))
-            except Exception: m = 0.0
-            try: p = float(r0.get("Payé", 0))
-            except Exception: p = 0.0
-            rest = max(m - p, 0.0)
-            cA.metric("Montant", _fmt_money_us(m)); cB.metric("Payé", _fmt_money_us(p)); cC.metric("Reste", _fmt_money_us(rest))
+            cA.metric("Honoraires (US $)", _fmt_money_us(float(r0.get(HONO,0.0))))
+            cB.metric("Autres frais (US $)", _fmt_money_us(float(r0.get(AUTRE,0.0))))
+            cC.metric("Total (US $)", _fmt_money_us(m))
+            cA2, cB2 = st.columns(2)
+            cA2.metric("Payé (US $)", _fmt_money_us(p))
+            cB2.metric("Reste (US $)", _fmt_money_us(rest))
 
             def _b(v, lab):
                 return f'<span style="padding:.2rem .5rem;border-radius:.6rem;border:1px solid #ddd;margin-right:.25rem">{lab}: {"✅" if v else "—"}</span>'
@@ -935,14 +996,11 @@ with tabs[2]:
             if ok_add:
                 try:
                     live_write = read_sheet(current_path, client_target_sheet, normalize=False).copy()
-                    for c in ["Paiements","Payé","Montant","Reste","ID_Client"]:
+                    for c in ["Paiements","Payé","Reste", HONO, AUTRE, TOTAL, "ID_Client"]:
                         if c not in live_write.columns:
                             live_write[c] = "" if c=="Paiements" else 0.0
                     ids_series = live_write["ID_Client"].astype(str) if "ID_Client" in live_write.columns else pd.Series([""], index=live_write.index)
                     hit = live_write.index[ids_series == str(sel_id)]
-                    if len(hit)==0:
-                        hit = live_write.index[(live_write.get("Nom","").astype(str)==_safe_str(r0.get("Nom"))) &
-                                               (live_write.get("Date","").astype(str)==_safe_str(r0.get("Date")))]
                     if len(hit)==0:
                         st.error("Impossible de localiser la ligne à mettre à jour.")
                     else:
@@ -950,26 +1008,29 @@ with tabs[2]:
                         pay_list = _parse_paiements(live_write.at[i, "Paiements"])
                         add = float(np_amount or 0.0)
                         if add <= 0:
-                            st.warning("Le montant doit être > 0.")
-                            st.stop()
-                        try: m0 = float(live_write.at[i,"Montant"])
-                        except Exception: m0 = 0.0
-                        try: p0 = float(live_write.at[i,"Payé"])
-                        except Exception: p0 = 0.0
-                        reste0 = max(m0 - p0, 0.0)
-                        if add > reste0 + 1e-9:
-                            st.info(f"Le paiement dépasse le reste. Plafonné à {_fmt_money_us(reste0)}.")
-                            add = reste0
+                            st.warning("Le montant doit être > 0."); st.stop()
+
+                        # Total courant (recalcule si besoin)
+                        hono = _to_num(pd.Series([live_write.at[i, HONO]])).iloc[0] if HONO in live_write.columns else 0.0
+                        autr = _to_num(pd.Series([live_write.at[i, AUTRE]])).iloc[0] if AUTRE in live_write.columns else 0.0
+                        total_now = float(hono + autr)
+                        if TOTAL in live_write.columns:
+                            live_write.at[i, TOTAL] = total_now
+
+                        # Payé / Reste
+                        paid_before = _sum_payments(pay_list)
+                        reste_before = max(total_now - paid_before, 0.0)
+                        if add > reste_before + 1e-9:
+                            add = reste_before
 
                         pay_list.append({"date": str(np_date), "amount": float(add), "mode": np_mode, "note": np_note})
                         live_write.at[i, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
                         total_paid = _sum_payments(pay_list)
                         live_write.at[i, "Payé"]  = float(total_paid)
-                        live_write.at[i, "Reste"] = max(m0 - float(total_paid), 0.0)
+                        live_write.at[i, "Reste"] = max(total_now - float(total_paid), 0.0)
 
                         write_sheet_inplace(current_path, client_target_sheet, live_write)
-                        st.success("Paiement ajouté **dans le fichier** depuis la fiche. ✅")
-                        st.rerun()
+                        st.success("Paiement ajouté **dans le fichier** depuis la fiche. ✅"); st.rerun()
                 except Exception as e:
                     st.error(f"Erreur: {e}")
 
@@ -981,22 +1042,20 @@ with tabs[2]:
         try:
             blocks = [("KPI Globaux (après filtres)",
                        pd.DataFrame({
-                           "KPI": ["Dossiers (filtrés)", "Chiffre d’affaires", "Encaissements", "Solde à encaisser"],
+                           "KPI": ["Dossiers (filtrés)", "Total (US $)", "Encaissements (US $)", "Solde (US $)"],
                            "Valeur": [
                                len(fA),
-                               float(fA.get("Montant", pd.Series(dtype=float)).sum()),
+                               float(fA.get(TOTAL, pd.Series(dtype=float)).sum()),
                                float(fA.get("Payé",    pd.Series(dtype=float)).sum()),
                                float(fA.get("Reste",   pd.Series(dtype=float)).sum()),
                            ],
                        }))
             ]
             blocks.append(("Volumes — Dossiers ouverts par période", st_data1))
-            if vols_dict:
+            if 'st_data2' in locals():
                 blocks.append(("Volumes — Statuts par période", st_data2))
-            blocks.append(("Financier — Montant / Payé / Reste par période", sums))
+            blocks.append(("Financier — Détail montants", sums))
             blocks.append(("Détails (clients)", details_to_show))
-            blocks.append(("Clients par période (liste)", clients_par_periode.to_frame("Clients")))
-            blocks.append(("Clients par statut (liste)", clients_par_statut.to_frame("Clients")))
 
             write_analyses_sheet(current_path, blocks)
             save_workspace_path(current_path)
@@ -1010,22 +1069,20 @@ with tabs[2]:
             mem = io.BytesIO()
             with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                 kpi_df = pd.DataFrame({
-                    "KPI": ["Dossiers (filtrés)", "Chiffre d’affaires", "Encaissements", "Solde à encaisser"],
+                    "KPI": ["Dossiers (filtrés)", "Total (US $)", "Encaissements (US $)", "Solde (US $)"],
                     "Valeur": [
                         len(fA),
-                        float(fA.get("Montant", pd.Series(dtype=float)).sum()),
+                        float(fA.get(TOTAL, pd.Series(dtype=float)).sum()),
                         float(fA.get("Payé",    pd.Series(dtype=float)).sum()),
                         float(fA.get("Reste",   pd.Series(dtype=float)).sum()),
                     ],
                 })
                 zf.writestr("kpi_globaux.csv", kpi_df.to_csv(index=False, encoding="utf-8-sig"))
                 zf.writestr("volumes_ouverts_par_periode.csv", st_data1.to_csv(encoding="utf-8-sig"))
-                if vols_dict:
+                if 'st_data2' in locals():
                     zf.writestr("volumes_statuts_par_periode.csv", st_data2.to_csv(encoding="utf-8-sig"))
                 zf.writestr("financier_par_periode.csv", sums.to_csv(encoding="utf-8-sig"))
                 zf.writestr("details_clients.csv", details_to_show.to_csv(index=False, encoding="utf-8-sig"))
-                zf.writestr("clients_par_periode.csv", clients_par_periode.to_frame("Clients").to_csv(encoding="utf-8-sig"))
-                zf.writestr("clients_par_statut.csv", clients_par_statut.to_frame("Clients").to_csv(encoding="utf-8-sig"))
                 zf.writestr("dataset_filtre_complet.csv", fA.to_csv(index=False, encoding="utf-8-sig"))
             mem.seek(0)
             st.session_state["anal_zip_bytes"] = mem.read()
