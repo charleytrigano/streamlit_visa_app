@@ -5,6 +5,10 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 import altair as alt  # pour les graphiques interactifs
+# --- Altair setup (fiabilisation) ---
+alt.data_transformers.disable_max_rows()
+alt.renderers.set_embed_options(actions=False)
+
 
 st.set_page_config(page_title="📊 Visas — Edition directe + ESCROW", layout="wide")
 st.title("📊 Visas — Edition DIRECTE du fichier (avec ESCROW + Analyses)")
@@ -989,3 +993,4 @@ with tabs[3]:
         jdf = pd.DataFrame(rows).sort_values("Horodatage")
         jdf["Montant (US $)"] = jdf["Montant (US $)"].map(_fmt_money_us)
         st.dataframe(jdf, use_container_width=True)
+
