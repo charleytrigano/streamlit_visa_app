@@ -632,105 +632,132 @@ with tabs[1]:
             write_sheet_inplace(current_path, client_target_sheet, live_after); save_workspace_path(current_path)
             st.success(f"Client créé **dans le fichier** (Dossier N {next_num}). ✅"); st.rerun()
 
-    # --------- MODIFIER ----------
-    if action == "Modifier":
-        st.markdown("### ✏️ Modifier un client (fiche complète + paiements)")
-        if live_raw.drop(columns=["_RowID"]).empty:
-            st.info("Aucun client.")
-        else:
-            # Sélection sûre (garantie d’affichage)
-            options = [(int(r["_RowID"]),
-                        f'{int(r.get(DOSSIER_COL,0))} — { _safe_str(r.get("ID_Client")) } — { _safe_str(r.get("Nom")) }')
-                       for _,r in live_raw.iterrows()]
-            labels  = [lab for _,lab in options]
-            sel_lab = st.selectbox("Sélection", labels, key="edit_sel_label")
-            sel_rowid = [rid for rid,lab in options if lab==sel_lab][0]
-            idx = live_raw.index[live_raw["_RowID"]==sel_rowid][0]
-            init = live_raw.loc[idx].to_dict()
 
-            # ----- Formulaire FICHE -----
-            with st.form(f"edit_form_{sel_rowid}", clear_on_submit=False):
-                c0, c1, c2 = st.columns([1,1,1])
-                c0.metric("Dossier N", f'{int(init.get(DOSSIER_COL,0))}')
-                nom = c1.text_input("Nom", value=_safe_str(init.get("Nom")), key=f"edit_nom_{sel_rowid}")
+            # --------- MODIFIER ----------
+if action == "Modifier":
+    st.markdown("### ✏️ Modifier un client (fiche complète + paiements)")
+    if live_raw.drop(columns=["_RowID"]).empty:
+        st.info("Aucun client.")
+    else:
+        # Liste de sélection (on garde la position d'origine)
+        options = [(int(r["_RowID"]),
+                    int(r.name),  # position d'origine dans la feuille lue
+                    f'{int(r.get(DOSSIER_COL,0))} — { _safe_str(r.get("ID_Client")) } — { _safe_str(r.get("Nom")) }')
+                   for _,r in live_raw.iterrows()]
+        labels  = [lab for _,__,lab in options]
+        sel_lab = st.selectbox("Sélection", labels, key="edit_sel_label")
+        sel_rowid, orig_pos, _ = [t for t in options if t[2]==sel_lab][0]
+
+        idx = live_raw.index[live_raw["_RowID"]==sel_rowid][0]
+        init = live_raw.loc[idx].to_dict()
+
+        # ----- Formulaire FICHE -----
+        with st.form(f"edit_form_{sel_rowid}", clear_on_submit=False):
+            c0, c1, c2 = st.columns([1,1,1])
+            c0.metric("Dossier N", f'{int(init.get(DOSSIER_COL,0))}')
+            nom = c1.text_input("Nom", value=_safe_str(init.get("Nom")), key=f"edit_nom_{sel_rowid}")
+            try:
+                d_init = pd.to_datetime(init.get("Date")).date() if _safe_str(init.get("Date")) else date.today()
+            except Exception:
+                d_init = date.today()
+            d = c2.date_input("Date", value=d_init, key=f"edit_date_{sel_rowid}")
+
+            cC, cV = st.columns(2)
+            init_cat = _safe_str(init.get("Catégorie"))
+            sel_cat = cC.selectbox("Catégorie", [""] + cats_ref,
+                                   index=([""]+cats_ref).index(init_cat) if init_cat in ([""]+cats_ref) else 0,
+                                   key=f"edit_cat_{sel_rowid}")
+            visas_opt = sorted(visa_ref.loc[visa_ref["Catégorie"]==sel_cat, "Visa"].unique().tolist()) if sel_cat else visas_all
+            init_visa = _safe_str(init.get("Visa"))
+            visa = cV.selectbox("Visa", visas_opt if visas_opt else [init_visa or ""],
+                                index=(visas_opt.index(init_visa) if init_visa in visas_opt else 0) if visas_opt else 0,
+                                key=f"edit_visa_{sel_rowid}")
+
+            def _f(v, alt=0.0):
+                try: return float(v)
+                except Exception: return float(alt)
+            hono0  = _f(init.get(HONO, init.get("Montant", 0.0)))
+            autre0 = _f(init.get(AUTRE, 0.0))
+            paye0  = _f(init.get("Payé", 0.0))
+            c5,c6 = st.columns(2)
+            honoraires = c5.number_input("Montant honoraires (US $)", value=hono0, step=10.0, format="%.2f", key=f"edit_hono_{sel_rowid}")
+            autres     = c6.number_input("Autres frais (US $)", value=autre0, step=10.0, format="%.2f", key=f"edit_autre_{sel_rowid}")
+            c7,c8 = st.columns(2)
+            total_preview = float(honoraires + autres); c7.metric("Total (US $)", _fmt_money_us(total_preview))
+            st.caption(f"Payé actuel (calculé par règlements) : {_fmt_money_us(paye0)} — Solde prévisionnel après sauvegarde : {_fmt_money_us(max(total_preview - paye0, 0.0))}")
+
+            st.markdown("#### État du dossier")
+            val_envoye = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")),  key=f"edit_env_{sel_rowid}") if flags["Dossier envoyé"] else False
+            val_appr   = st.checkbox("Dossier approuvé",value=bool(init.get("Dossier approuvé")), key=f"edit_app_{sel_rowid}") if flags["Dossier approuvé"] else False
+            val_rfe    = st.checkbox("RFE",             value=bool(init.get("RFE")),              key=f"edit_rfe_{sel_rowid}") if flags["RFE"] else False
+            val_refuse = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")),   key=f"edit_ref_{sel_rowid}") if flags["Dossier refusé"] else False
+            val_annule = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")),   key=f"edit_ann_{sel_rowid}") if flags["Dossier annulé"] else False
+
+            ok_fiche = st.form_submit_button("💾 Enregistrer la fiche (dans le fichier)", type="primary")
+
+        if ok_fiche:
+            if val_rfe and not (val_envoye or val_refuse or val_annule):
+                st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché."); st.stop()
+
+            # 👉 Relecture fraiche du fichier pour éviter tout décalage
+            live = read_sheet(current_path, client_target_sheet, normalize=False).copy()
+
+            # 1) par ID_Client si dispo
+            t_idx = None
+            key_id = _safe_str(init.get("ID_Client"))
+            if key_id and "ID_Client" in live.columns:
+                hits = live.index[live["ID_Client"].astype(str) == key_id]
+                if len(hits)>0: t_idx = hits[0]
+
+            # 2) sinon par Dossier N (numéro unique)
+            if t_idx is None and (DOSSIER_COL in live.columns) and (init.get(DOSSIER_COL) not in [None, ""]):
                 try:
-                    d_init = pd.to_datetime(init.get("Date")).date() if _safe_str(init.get("Date")) else date.today()
-                except Exception:
-                    d_init = date.today()
-                d = c2.date_input("Date", value=d_init, key=f"edit_date_{sel_rowid}")
-
-                cC, cV = st.columns(2)
-                init_cat = _safe_str(init.get("Catégorie"))
-                sel_cat = cC.selectbox("Catégorie", [""] + cats_ref,
-                                       index=([""]+cats_ref).index(init_cat) if init_cat in ([""]+cats_ref) else 0,
-                                       key=f"edit_cat_{sel_rowid}")
-                visas_opt = sorted(visa_ref.loc[visa_ref["Catégorie"]==sel_cat, "Visa"].unique().tolist()) if sel_cat else visas_all
-                init_visa = _safe_str(init.get("Visa"))
-                visa = cV.selectbox("Visa", visas_opt if visas_opt else [init_visa or ""],
-                                    index=(visas_opt.index(init_visa) if init_visa in visas_opt else 0) if visas_opt else 0,
-                                    key=f"edit_visa_{sel_rowid}")
-
-                def _f(v, alt=0.0):
-                    try: return float(v)
-                    except Exception: return float(alt)
-                hono0  = _f(init.get(HONO, init.get("Montant", 0.0)))
-                autre0 = _f(init.get(AUTRE, 0.0))
-                paye0  = _f(init.get("Payé", 0.0))
-                c5,c6 = st.columns(2)
-                honoraires = c5.number_input("Montant honoraires (US $)", value=hono0, step=10.0, format="%.2f", key=f"edit_hono_{sel_rowid}")
-                autres     = c6.number_input("Autres frais (US $)", value=autre0, step=10.0, format="%.2f", key=f"edit_autre_{sel_rowid}")
-                c7,c8 = st.columns(2)
-                total_preview = float(honoraires + autres); c7.metric("Total (US $)", _fmt_money_us(total_preview))
-                st.caption(f"Payé actuel (calculé par règlements) : {_fmt_money_us(paye0)} — Solde prévisionnel après sauvegarde : {_fmt_money_us(max(total_preview - paye0, 0.0))}")
-
-                st.markdown("#### État du dossier")
-                val_envoye = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")),  key=f"edit_env_{sel_rowid}") if flags["Dossier envoyé"] else False
-                val_appr   = st.checkbox("Dossier approuvé",value=bool(init.get("Dossier approuvé")), key=f"edit_app_{sel_rowid}") if flags["Dossier approuvé"] else False
-                val_rfe    = st.checkbox("RFE",             value=bool(init.get("RFE")),              key=f"edit_rfe_{sel_rowid}") if flags["RFE"] else False
-                val_refuse = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")),   key=f"edit_ref_{sel_rowid}") if flags["Dossier refusé"] else False
-                val_annule = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")),   key=f"edit_ann_{sel_rowid}") if flags["Dossier annulé"] else False
-
-                ok_fiche = st.form_submit_button("💾 Enregistrer la fiche (dans le fichier)", type="primary")
-
-            if ok_fiche:
-                if val_rfe and not (val_envoye or val_refuse or val_annule):
-                    st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché."); st.stop()
-                live = live_raw.drop(columns=["_RowID"]).copy()
-                # localiser la ligne par ID_Client si possible
-                t_idx = None
-                key_id = _safe_str(init.get("ID_Client"))
-                if key_id and "ID_Client" in live.columns:
-                    hits = live.index[live["ID_Client"].astype(str) == key_id]
+                    num = int(_to_int(pd.Series([init.get(DOSSIER_COL)])).iloc[0])
+                    hits = live.index[_to_int(live[DOSSIER_COL]) == num]
                     if len(hits)>0: t_idx = hits[0]
-                if t_idx is None:
-                    msk = (live.get("Nom","").astype(str)==_safe_str(init.get("Nom"))) & \
-                          (pd.to_datetime(live.get("Date",""), errors="coerce").dt.date ==
-                           pd.to_datetime(_safe_str(init.get("Date")), errors="coerce").date())
-                    hit2 = live.index[msk] if hasattr(msk, "__len__") else []
-                    t_idx = hit2[0] if len(hit2)>0 else None
-                if t_idx is None:
-                    st.error("Ligne introuvable."); st.stop()
+                except Exception:
+                    pass
 
-                total = float((honoraires or 0.0)+(autres or 0.0))
-                live.at[t_idx,"Nom"]=_safe_str(nom)
-                live.at[t_idx,"Date"]=str(d); live.at[t_idx,"Mois"]=f"{d.month:02d}"
-                live.at[t_idx,"Catégorie"]=_safe_str(sel_cat)
-                live.at[t_idx,"Visa"]=_safe_str(visa if isinstance(visa,str) else "")
-                live.at[t_idx, HONO]=float(honoraires or 0.0)
-                live.at[t_idx, AUTRE]=float(autres or 0.0)
-                # Payé/Reste se recalculeront après modification de paiements; ici on garde le "Payé" existant
-                pay_json = live.at[t_idx, "Paiements"] if "Paiements" in live.columns else ""
-                paid = _sum_payments(_parse_json_list(pay_json))
-                live.at[t_idx, "Payé"]  = float(paid)
-                live.at[t_idx, TOTAL]   = total
-                live.at[t_idx, "Reste"] = max(total - float(paid), 0.0)
-                # Statuts
-                for col, val in [("Dossier envoyé",val_envoye), ("Dossier approuvé",val_appr),
-                                 ("RFE",val_rfe), ("Dossier refusé",val_refuse), ("Dossier annulé",val_annule)]:
-                    if col in live.columns: live.at[t_idx, col] = bool(val)
-                live = ensure_dossier_numbers(live)
-                write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
-                st.success("Fiche enregistrée **dans le fichier**. ✅"); st.rerun()
+            # 3) sinon, on retombe sur la position d’origine
+            if t_idx is None and orig_pos is not None and 0 <= int(orig_pos) < len(live):
+                t_idx = int(orig_pos)
+
+            if t_idx is None:
+                st.error("Ligne introuvable."); st.stop()
+
+            total = float((honoraires or 0.0)+(autres or 0.0))
+            live.at[t_idx,"Nom"]=_safe_str(nom)
+            live.at[t_idx,"Date"]=str(d)
+            live.at[t_idx,"Mois"]=f"{d.month:02d}"
+            live.at[t_idx,"Catégorie"]=_safe_str(sel_cat)
+            live.at[t_idx,"Visa"]=_safe_str(visa if isinstance(visa,str) else "")
+            for c in [HONO, AUTRE, TOTAL, "Payé","Reste","Paiements", ESC_TR, ESC_JR,
+                      "Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé", DOSSIER_COL]:
+                if c not in live.columns:
+                    live[c] = 0.0 if c in [HONO,AUTRE,TOTAL,"Payé","Reste",ESC_TR] else ("" if c in ["Paiements",ESC_JR] else False)
+            live.at[t_idx, HONO]=float(honoraires or 0.0)
+            live.at[t_idx, AUTRE]=float(autres or 0.0)
+            pay_json = live.at[t_idx,"Paiements"]
+            paid = _sum_payments(_parse_json_list(pay_json))
+            live.at[t_idx, "Payé"]  = float(paid)
+            live.at[t_idx, TOTAL]   = total
+            live.at[t_idx, "Reste"] = max(total - float(paid), 0.0)
+
+            # Statuts
+            if "Dossier envoyé" in live.columns: live.at[t_idx,"Dossier envoyé"]=bool(val_envoye)
+            if "Dossier approuvé" in live.columns: live.at[t_idx,"Dossier approuvé"]=bool(val_appr)
+            if "RFE" in live.columns: live.at[t_idx,"RFE"]=bool(val_rfe)
+            if "Dossier refusé" in live.columns: live.at[t_idx,"Dossier refusé"]=bool(val_refuse)
+            if "Dossier annulé" in live.columns: live.at[t_idx,"Dossier annulé"]=bool(val_annule)
+
+            # On garantit la présence/continuité des numéros de dossier
+            live = ensure_dossier_numbers(live)
+
+            write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
+            st.success("Fiche enregistrée **dans le fichier**. ✅"); st.rerun()
+
+            
+    # ----- (le bloc Paiements qui suit peut rester tel quel) -----
 
             # ----- Gestion PAIEMENTS -----
             st.markdown("#### 💳 Règlements du client")
@@ -1059,3 +1086,4 @@ with tabs[3]:
         jdf = pd.DataFrame(rows).sort_values("Horodatage")
         jdf["Montant (US $)"] = jdf["Montant (US $)"].map(_fmt_money_us)
         st.dataframe(jdf, use_container_width=True)
+
