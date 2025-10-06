@@ -1,4 +1,4 @@
-# app.py — COMPLET (CRUD Visa + Clients, Paiements, ESCROW, Analyses, Dates de statuts)
+# app.py — COMPLET (2/2) — Partie 1
 import io, json, hashlib
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -18,7 +18,7 @@ AUTRE  = "Autres frais (US $)"
 TOTAL  = "Total (US $)"
 ESC_TR = "Escrow transféré (US $)"
 ESC_JR = "Escrow journal"
-DOSSIER_COL = "Dossier N"
+DOSSIER_COL   = "Dossier N"
 DOSSIER_START = 13057
 
 # Statuts + dates
@@ -236,7 +236,7 @@ def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) 
     if ESC_JR not in df.columns: df[ESC_JR]=""
     # Dossier N
     df = ensure_dossier_numbers(df)
-    # Nettoyage visibles
+    # Nettoyage visibles (on retire Téléphone/Email si présents)
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
     ordered = [DOSSIER_COL,"ID_Client","Nom","Date","Mois","Catégorie","Visa",
@@ -375,12 +375,14 @@ st.sidebar.download_button(
 # -------- Onglets --------
 tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses", "ESCROW"])
 
+# app.py — COMPLET (2/2) — Partie 2
+
 # ================= DASHBOARD =================
 with tabs[0]:
     visa_ref = read_visa_reference(current_path)
     df_raw = read_sheet(current_path, sheet_choice, normalize=False)
 
-    # Référentiel Visa (CRUD complet)
+    # Référentiel Visa (CRUD complet si on est sur la feuille Visa)
     if looks_like_reference(df_raw) and sheet_choice == "Visa":
         st.subheader("📄 Référentiel — Catégories & Types de Visa")
         df_ref = df_raw.copy()
@@ -528,7 +530,6 @@ with tabs[1]:
     cats_ref  = sorted([c for c in visa_ref["Catégorie"].astype(str).unique() if c!=""]) if not visa_ref.empty else []
     visas_all = sorted(visa_ref["Visa"].astype(str).unique()) if not visa_ref.empty else []
 
-    flags = {k: (k in live_raw.columns) for k in STATUS_COLS}
     action = st.radio("Action", ["Créer", "Modifier", "Supprimer"], horizontal=True, key="crud_action")
 
     # --- CREER ---
@@ -837,16 +838,18 @@ with tabs[1]:
                 write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
                 st.success("Client supprimé **dans le fichier**. ✅"); st.rerun()
 
-# ================= ANALYSES =================
+# ================= ANALYSES (avec comparaisons) =================
 with tabs[2]:
-    st.subheader("📊 Analyses — Volumes & Financier")
+    st.subheader("📊 Analyses — Volumes, Financier & Comparaisons")
     if client_target_sheet is None:
         st.info("Choisis d’abord une **feuille clients** valide (Nom & Visa)."); st.stop()
+
     visa_ref = read_visa_reference(current_path)
     dfA_raw = read_sheet(current_path, client_target_sheet, normalize=False)
     dfA = normalize_dataframe(dfA_raw, visa_ref=visa_ref).copy()
     if dfA.empty: st.info("Aucune donnée pour analyser."); st.stop()
 
+    # Filtres
     with st.container():
         c1, c2, c3, c4, c5 = st.columns(5)
         catsA  = sorted(dfA["Catégorie"].dropna().astype(str).unique()) if "Catégorie" in dfA.columns else []
@@ -854,7 +857,7 @@ with tabs[2]:
         sel_cats  = c1.multiselect("Catégorie", catsA, default=[], key="anal_cats")
         sel_visas = c2.multiselect("Type de visa", visasA, default=[], key="anal_visa")
         yearsA  = sorted({d.year for d in dfA["Date"] if pd.notna(d)}) if "Date" in dfA.columns else []
-        sel_years  = c3.multiselect("Année", yearsA, default=[], key="anal_years")
+        sel_years  = c3.multiselect("Année (filtre)", yearsA, default=[], key="anal_years")
         monthsA = [f"{m:02d}" for m in range(1,13)]
         sel_months = c4.multiselect("Mois (MM)", monthsA, default=[], key="anal_months")
         include_na_dates = c5.checkbox("Inclure lignes sans date", value=True, key="anal_na_dates")
@@ -888,6 +891,9 @@ with tabs[2]:
         if include_na_dates: mask_range = mask_range | fA["Date"].isna()
         fA = fA[mask_range]
 
+    # Colonnes temps & numériques
+    fA["Année"] = fA["Date"].apply(lambda x: x.year if pd.notna(x) else pd.NA)
+    fA["MoisNum"] = fA["Date"].apply(lambda x: int(x.month) if pd.notna(x) else pd.NA)
     fA["Periode"] = fA["Date"].apply(lambda x: f"{x.year}-{x.month:02d}" if pd.notna(x) else "NA") if agg_with_year else fA["Mois"].fillna("NA")
 
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
@@ -900,56 +906,197 @@ with tabs[2]:
         return "En attente"
     fA["Statut"] = fA.apply(derive_statut, axis=1)
 
-    # Volumes
-    st.markdown("### 📈 Volumes")
+    # KPI
+    st.markdown("""
+    <style>.small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}.small-kpi [data-testid="stMetricLabel"]{font-size:.8rem;opacity:.8}</style>
+    """, unsafe_allow_html=True)
+    st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("Dossiers", f"{len(fA)}")
+    k2.metric("Total (US $)", _fmt_money_us(float(fA.get(TOTAL, pd.Series(dtype=float)).sum())) )
+    k3.metric("Payé (US $)", _fmt_money_us(float(fA.get("Payé", pd.Series(dtype=float)).sum())) )
+    k4.metric("Solde (US $)", _fmt_money_us(float(fA.get("Reste", pd.Series(dtype=float)).sum())) )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Volumes simples
+    st.markdown("### 📈 Volumes (créations)")
     vol_crees = fA.groupby("Periode").size().reset_index(name="Créés")
     df_vol = vol_crees.rename(columns={"Créés":"Volume"}).assign(Indic="Créés")
     if not df_vol.empty:
         try:
-            chart_vol = alt.Chart(df_vol).mark_line(point=True).encode(
-                x=alt.X("Periode:N", sort=None, title="Période"),
-                y=alt.Y("Volume:Q"),
-                color=alt.Color("Indic:N", legend=alt.Legend(title="Statut")),
-                tooltip=["Periode","Indic","Volume"]
-            ).properties(height=280, use_container_width=True)
-            st.altair_chart(chart_vol, use_container_width=True)
+            st.altair_chart(
+                alt.Chart(df_vol).mark_line(point=True).encode(
+                    x=alt.X("Periode:N", sort=None, title="Période"),
+                    y=alt.Y("Volume:Q"),
+                    color=alt.Color("Indic:N", legend=alt.Legend(title="Statut")),
+                    tooltip=["Periode","Indic","Volume"]
+                ).properties(height=260), use_container_width=True
+            )
         except Exception:
             st.dataframe(df_vol, use_container_width=True)
 
-    # Financier
-    st.markdown("### 💵 Financier")
-    fin = fA.groupby("Periode", dropna=False)[[HONO, AUTRE, TOTAL, "Payé","Reste"]].sum().reset_index()
-    if not fin.empty:
-        ca = fin.melt(id_vars="Periode", value_vars=[HONO, AUTRE], var_name="Type", value_name="Montant")
-        try:
-            chart_ca = alt.Chart(ca).mark_bar().encode(
-                x=alt.X("Periode:N", title="Période"), y=alt.Y("Montant:Q"),
-                color=alt.Color("Type:N", legend=alt.Legend(title="Composant")),
-                tooltip=["Periode","Type", alt.Tooltip("Montant:Q", format="$.2f")]
-            ).properties(title="Chiffre d'affaires (Honoraires + Autres)", height=280)
-            st.altair_chart(chart_ca, use_container_width=True)
-        except Exception:
-            st.dataframe(ca, use_container_width=True)
+    st.divider()
 
-        enc = fin.melt(id_vars="Periode", value_vars=["Payé","Reste"], var_name="Indicateur", value_name="Montant")
-        try:
-            chart_enc = alt.Chart(enc).mark_line(point=True).encode(
-                x=alt.X("Periode:N", title="Période"),
-                y=alt.Y("Montant:Q"),
-                color=alt.Color("Indicateur:N", legend=alt.Legend(title="Indicateur")),
-                tooltip=["Periode","Indicateur", alt.Tooltip("Montant:Q", format="$.2f")]
-            ).properties(title="Encaissements vs Solde restant", height=280)
-            st.altair_chart(chart_enc, use_container_width=True)
-        except Exception:
-            st.dataframe(enc, use_container_width=True)
+    # ==================== COMPARAISONS ====================
+    st.markdown("## 🔁 Comparaisons (YoY & MoM)")
 
+    # 1) YOY Global
+    st.markdown("### 🗓️ Année sur année — Global")
+    by_year = fA.dropna(subset=["Année"]).groupby("Année").agg(
+        Dossiers=("Nom","count"),
+        Honoraires=(HONO,"sum"),
+        Autres=(AUTRE,"sum"),
+        Total=(TOTAL,"sum"),
+        Payé=("Payé","sum"),
+        Reste=("Reste","sum"),
+    ).reset_index().sort_values("Année")
+    c1, c2 = st.columns(2)
+    if not by_year.empty:
+        try:
+            c1.altair_chart(
+                alt.Chart(by_year.melt("Année", ["Dossiers"])).mark_bar().encode(
+                    x=alt.X("Année:N"), y=alt.Y("value:Q", title="Volume"),
+                    color=alt.Color("variable:N", legend=None),
+                    tooltip=["Année","value"]
+                ).properties(title="Nombre de dossiers", height=260), use_container_width=True
+            )
+        except Exception:
+            c1.dataframe(by_year[["Année","Dossiers"]], use_container_width=True)
+
+        try:
+            metric_vars = ["Honoraires","Autres","Total","Payé","Reste"]
+            yo = by_year.melt("Année", metric_vars, var_name="Indicateur", value_name="Montant")
+            c2.altair_chart(
+                alt.Chart(yo).mark_bar().encode(
+                    x=alt.X("Année:N"),
+                    y=alt.Y("Montant:Q"),
+                    color=alt.Color("Indicateur:N"),
+                    tooltip=["Année","Indicateur", alt.Tooltip("Montant:Q", format="$.2f")]
+                ).properties(title="Montants par année", height=260), use_container_width=True
+            )
+        except Exception:
+            c2.dataframe(by_year.drop(columns=["Dossiers"]), use_container_width=True)
+    else:
+        st.info("Pas de dates exploitables pour la comparaison annuelle.")
+
+    # 2) YOY par mois
+    st.markdown("### 📅 Mois (1..12) — Année sur année")
+    by_year_month = fA.dropna(subset=["Année","MoisNum"]).groupby(["Année","MoisNum"]).agg(
+        Dossiers=("Nom","count"),
+        Total=(TOTAL,"sum"),
+        Payé=("Payé","sum"),
+        Reste=("Reste","sum"),
+    ).reset_index()
+
+    c3, c4 = st.columns(2)
+    if not by_year_month.empty:
+        try:
+            c3.altair_chart(
+                alt.Chart(by_year_month).mark_line(point=True).encode(
+                    x=alt.X("MoisNum:O", title="Mois"),
+                    y=alt.Y("Dossiers:Q"),
+                    color=alt.Color("Année:N"),
+                    tooltip=["Année","MoisNum","Dossiers"]
+                ).properties(title="Dossiers par mois (YoY)", height=260), use_container_width=True
+            )
+        except Exception:
+            c3.dataframe(by_year_month.pivot(index="MoisNum", columns="Année", values="Dossiers"), use_container_width=True)
+
+        try:
+            c4.altair_chart(
+                alt.Chart(by_year_month.melt(["Année","MoisNum"], ["Total","Payé","Reste"],
+                                             var_name="Indicateur", value_name="Montant")
+                ).mark_line(point=True).encode(
+                    x=alt.X("MoisNum:O", title="Mois"),
+                    y=alt.Y("Montant:Q"),
+                    color=alt.Color("Année:N"),
+                    tooltip=["Année","MoisNum","Indicateur", alt.Tooltip("Montant:Q", format="$.2f")]
+                ).properties(title="Montants par mois (YoY)", height=260),
+                use_container_width=True
+            )
+        except Exception:
+            c4.dataframe(by_year_month.pivot_table(index="MoisNum", columns="Année", values="Total"), use_container_width=True)
+    else:
+        st.info("Pas de séries mois/année disponibles.")
+
+    # 3) Par type de visa — YOY
+    st.markdown("### 🛂 Par type de visa — Année sur année")
+    topN = st.slider("Top N visas (par Total)", 3, 20, 10, 1, key="cmp_topn")
+    metric_cmp = st.selectbox("Indicateur", ["Dossiers","Total","Payé","Reste","Honoraires","Autres"], index=1, key="cmp_metric")
+
+    by_year_visa = fA.dropna(subset=["Année"]).groupby(["Année","Visa"]).agg(
+        Dossiers=("Nom","count"),
+        Honoraires=(HONO,"sum"),
+        Autres=(AUTRE,"sum"),
+        Total=(TOTAL,"sum"),
+        Payé=("Payé","sum"),
+        Reste=("Reste","sum"),
+    ).reset_index()
+
+    top_visas = (by_year_visa.groupby("Visa")["Total"].sum()
+                 .sort_values(ascending=False).head(topN).index.tolist())
+    by_year_visa_top = by_year_visa[by_year_visa["Visa"].isin(top_visas)].copy()
+
+    if not by_year_visa_top.empty:
+        try:
+            st.altair_chart(
+                alt.Chart(by_year_visa_top).mark_bar().encode(
+                    x=alt.X("Visa:N", sort=top_visas),
+                    y=alt.Y(f"{metric_cmp}:Q"),
+                    color=alt.Color("Année:N"),
+                    tooltip=["Visa","Année", alt.Tooltip(f"{metric_cmp}:Q", format="$.2f" if metric_cmp!="Dossiers" else "")],
+                ).properties(height=300), use_container_width=True
+            )
+        except Exception:
+            st.dataframe(by_year_visa_top.pivot_table(index="Visa", columns="Année", values=metric_cmp, aggfunc="sum"),
+                         use_container_width=True)
+    else:
+        st.info("Pas de données par type de visa après filtres.")
+
+    # 4) Comparer 2 années — barres par mois
+    st.markdown("### ⚖️ Comparer 2 années — barres par mois")
+    years_all = sorted([y for y in fA["Année"].dropna().unique()])
+    colY1, colY2, colMet = st.columns([1,1,2])
+    y1 = colY1.selectbox("Année A", years_all, index=0 if len(years_all)==0 else 0, key="cmp_y1")
+    y2 = colY2.selectbox("Année B", years_all, index=1 if len(years_all)>1 else 0, key="cmp_y2")
+    metric2 = colMet.selectbox("Indicateur", ["Dossiers","Total","Payé","Reste","Honoraires","Autres"], index=1, key="cmp_metric2")
+
+    if y1 == y2:
+        st.caption("Choisis deux années différentes pour cette vue.")
+    else:
+        b = by_year_month[by_year_month["Année"].isin([y1, y2])].copy()
+        if metric2 == "Dossiers":
+            plot_df = b[["Année","MoisNum","Dossiers"]].rename(columns={"Dossiers":"Valeur"})
+        else:
+            plot_df = b[["Année","MoisNum", metric2]].rename(columns={metric2:"Valeur"})
+        if not plot_df.empty:
+            try:
+                st.altair_chart(
+                    alt.Chart(plot_df).mark_bar().encode(
+                        x=alt.X("MoisNum:O", title="Mois"),
+                        y=alt.Y("Valeur:Q"),
+                        column=alt.Column("Année:N", title=""),
+                        tooltip=["Année","MoisNum", alt.Tooltip("Valeur:Q", format="$.2f" if metric2!="Dossiers" else "")]
+                    ).properties(height=280), use_container_width=True
+                )
+            except Exception:
+                st.dataframe(plot_df.pivot(index="MoisNum", columns="Année", values="Valeur"), use_container_width=True)
+
+    # Détails
     st.divider()
     st.markdown("### 🔎 Détails (clients)")
-    details_cols = [c for c in ["Periode",DOSSIER_COL,"ID_Client","Nom","Catégorie","Visa","Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut"] if c in fA.columns]
+    details_cols = [c for c in ["Periode",DOSSIER_COL,"ID_Client","Nom","Catégorie","Visa","Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut","Année","MoisNum"] if c in fA.columns]
     details = fA[details_cols].copy()
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
         if col in details.columns: details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
-    st.dataframe(details.sort_values(["Periode","Catégorie","Nom"]), use_container_width=True)
+    st.dataframe(details.sort_values(["Année","MoisNum","Catégorie","Nom"]), use_container_width=True)
+
+    if show_tables:
+        st.divider()
+        st.markdown("#### Tableaux récap (pour export)")
+        st.write("• Année — global");           st.dataframe(by_year, use_container_width=True)
+        st.write("• Année & Mois — récap");     st.dataframe(by_year_month, use_container_width=True)
+        st.write("• Année & Visa — récap");     st.dataframe(by_year_visa, use_container_width=True)
 
 # ================= ESCROW =================
 with tabs[3]:
@@ -1017,7 +1164,6 @@ with tabs[3]:
         st.dataframe(show, use_container_width=True)
 
     st.divider()
-    # --- Historique des transferts (journal) — robuste ---
     st.markdown("### 🧾 Historique des transferts (journal)")
     has_journal = live[live[ESC_JR].astype(str).str.len() > 0]
 
