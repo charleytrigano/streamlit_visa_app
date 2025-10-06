@@ -4,14 +4,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 import streamlit as st
 import pandas as pd
-import altair as alt  # pour les graphiques interactifs
+import altair as alt  # graphiques
+
 # --- Altair setup (fiabilisation) ---
 alt.data_transformers.disable_max_rows()
 alt.renderers.set_embed_options(actions=False)
 
-
-st.set_page_config(page_title="📊 Visas — Edition directe + ESCROW", layout="wide")
-st.title("📊 Visas — Edition DIRECTE du fichier (avec ESCROW + Analyses)")
+st.set_page_config(page_title="📊 Visas — Edition directe + ESCROW + Analyses", layout="wide")
+st.title("📊 Visas — Edition DIRECTE du fichier (ESCROW + Analyses)")
 
 # ==== Constantes colonnes ====
 HONO   = "Honoraires (US $)"
@@ -70,6 +70,7 @@ def copy_upload_to_workspace(upload) -> Path:
 
 # ==== Utils ====
 def _safe_str(x): return "" if pd.isna(x) else str(x).strip()
+
 def _to_num(s: pd.Series) -> pd.Series:
     cleaned = (s.astype(str)
                  .str.replace("\u00a0","",regex=False)
@@ -78,14 +79,17 @@ def _to_num(s: pd.Series) -> pd.Series:
                  .str.replace("$","",regex=False)
                  .str.replace(",","",regex=False))
     return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
+
 def _to_date(s: pd.Series) -> pd.Series:
     d = pd.to_datetime(s, errors="coerce")
     try: d = d.dt.tz_localize(None)
     except Exception: pass
     return d.dt.normalize().dt.date
+
 def _fmt_money_us(v: float) -> str:
     try: return f"${float(v):,.2f}"
     except Exception: return "$0.00"
+
 def _parse_json_list(x):
     if isinstance(x, list): return x
     if pd.isna(x) or str(x).strip()== "": return []
@@ -94,6 +98,7 @@ def _parse_json_list(x):
         return v if isinstance(v, list) else []
     except Exception:
         return []
+
 def _sum_payments(pay_list) -> float:
     tot = 0.0
     for p in (pay_list or []):
@@ -101,16 +106,35 @@ def _sum_payments(pay_list) -> float:
         except Exception: amt = 0.0
         tot += amt
     return tot
+
 def _make_client_id_from_row(row) -> str:
     base = "|".join([_safe_str(row.get("Nom")), _safe_str(row.get("Date"))])
     h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:8].upper()
     return f"CL-{h}"
+
 def looks_like_reference(df: pd.DataFrame) -> bool:
     cols = set(map(str.lower, df.columns.astype(str)))
     return ("visa" in cols) and not ({"montant","honoraires","acomptes","payé","reste","solde"} & cols)
+
 def is_clients_like(df: pd.DataFrame) -> bool:
     cols = set(df.columns.astype(str))
     return {"Nom","Visa"}.issubset(cols)
+
+# ---- Helper Altair : nettoyage des données pour chart
+def _clean_for_chart(df: pd.DataFrame, str_cols, num_cols, drop_na_cols):
+    """Force les colonnes string/num, enlève les NA sur colonnes critiques, et renvoie une copie propre."""
+    df2 = df.copy()
+    for c in str_cols:
+        if c in df2.columns:
+            df2[c] = df2[c].astype(str).fillna("")
+    for c in num_cols:
+        if c in df2.columns:
+            df2[c] = pd.to_numeric(df2[c], errors="coerce").astype(float)
+    keep = pd.Series(True, index=df2.index)
+    for c in drop_na_cols:
+        if c in df2.columns:
+            keep &= df2[c].notna()
+    return df2[keep]
 
 # ==== ESCROW helpers ====
 def escrow_available_from_row(row) -> float:
@@ -121,6 +145,7 @@ def escrow_available_from_row(row) -> float:
     try: moved = float(row.get(ESC_TR, 0.0))
     except Exception: moved = 0.0
     return max(min(paid, hon) - moved, 0.0)
+
 def append_escrow_journal(row_raw: pd.Series, amount: float, note: str = "") -> str:
     journal = _parse_json_list(row_raw.get(ESC_JR, ""))
     journal.append({"ts": datetime.now().isoformat(timespec="seconds"),
@@ -163,7 +188,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # ESCROW
     df[ESC_TR] = _to_num(df[ESC_TR]) if ESC_TR in df.columns else 0.0
     if ESC_JR not in df.columns: df[ESC_JR] = ""
-    # Nettoyage
+    # Nettoyage (téléphone/email retirés)
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
     ordered = ["ID_Client","Nom","Date","Mois","Visa",
@@ -261,7 +286,7 @@ preferred_order = ["Clients","Visa","Données normalisées"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
 sheet_choice = st.sidebar.selectbox("Feuille (Dashboard)", sheet_names, index=sheet_names.index(default_sheet))
 
-# Feuille CRUD
+# Feuille CRUD détectée
 valid_client_sheets = []
 for s in sheet_names:
     try:
@@ -471,6 +496,7 @@ with tabs[1]:
     if client_target_sheet is None:
         st.warning("Aucune feuille *Clients* valide disponible. Ajoute une feuille avec au moins les colonnes **Nom** et **Visa**."); st.stop()
     if st.button("🔄 Recharger le fichier"): st.rerun()
+
     live_raw = read_sheet(current_path, client_target_sheet, normalize=False).copy()
     live_raw["_RowID"] = range(len(live_raw))
     has_envoye  = "Dossier envoyé"  in live_raw.columns
@@ -478,11 +504,14 @@ with tabs[1]:
     has_rfe     = "RFE"             in live_raw.columns
     has_refuse  = "Dossier refusé"  in live_raw.columns
     has_annule  = "Dossier annulé"  in live_raw.columns
+
+    # Options de visa (référentiel)
     try:
         visa_ref = read_sheet(current_path, "Visa", normalize=False)
         visa_options = sorted(visa_ref["Visa"].dropna().astype(str).unique()) if "Visa" in visa_ref.columns else []
     except Exception:
         visa_options = []
+
     action = st.radio("Action", ["Créer", "Modifier", "Supprimer"], horizontal=True)
 
     # CREER
@@ -620,7 +649,7 @@ with tabs[1]:
                     if has_refuse: live.at[t_idx,"Dossier refusé"]=bool(val_refuse)
                     if has_annule: live.at[t_idx,"Dossier annulé"]=bool(val_annule)
                     write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
-                    # transfert immédiat si demandé
+                    # transfert ESCROW immédiat si demandé
                     if val_envoye and do_transfer_now and (transfer_amount or 0.0) > 0:
                         try:
                             live_w = read_sheet(current_path, client_target_sheet, normalize=False).copy()
@@ -727,7 +756,6 @@ with tabs[2]:
         if bool(row.get("Dossier refusé", False)):   return "Refusé"
         if bool(row.get("Dossier annulé", False)):   return "Annulé"
         return "En attente"
-
     fA["Statut"] = fA.apply(derive_statut, axis=1)
 
     # ---------- Graphiques : Volumes ----------
@@ -737,54 +765,72 @@ with tabs[2]:
     vol_appr  = fA[fA["Dossier approuvé"]==True].groupby("Periode").size().reset_index(name="Approuvés")
     vol_ref   = fA[fA["Dossier refusé"]==True].groupby("Periode").size().reset_index(name="Refusés")
     vol_ann   = fA[fA["Dossier annulé"]==True].groupby("Periode").size().reset_index(name="Annulés")
-    # fusion pour chart multi-séries
-    def melt_counts(df_cnt, name):
-        return df_cnt.rename(columns={df_cnt.columns[1]: "val"}).assign(Indic=name)
+
+    def _melt_counts(df_cnt, name):
+        if df_cnt.empty: 
+            return pd.DataFrame(columns=["Periode","Indic","Volume"])
+        return df_cnt.rename(columns={df_cnt.columns[1]: "Volume"}).assign(Indic=name)
+
     df_vol = pd.concat([
-        melt_counts(vol_crees, "Créés"),
-        melt_counts(vol_env,   "Envoyés"),
-        melt_counts(vol_appr,  "Approuvés"),
-        melt_counts(vol_ref,   "Refusés"),
-        melt_counts(vol_ann,   "Annulés"),
-    ], ignore_index=True).rename(columns={"Periode":"Période","val":"Volume"})
-    if not df_vol.empty:
-        chart_vol = alt.Chart(df_vol).mark_line(point=True).encode(
-            x=alt.X("Période:N", sort=None, title="Période"),
-            y=alt.Y("Volume:Q"),
-            color=alt.Color("Indic:N", legend=alt.Legend(title="Statut")),
-            tooltip=["Période","Indic","Volume"]
-        ).properties(height=280, use_container_width=True)
-        st.altair_chart(chart_vol, use_container_width=True)
-    else:
+        _melt_counts(vol_crees, "Créés"),
+        _melt_counts(vol_env,   "Envoyés"),
+        _melt_counts(vol_appr,  "Approuvés"),
+        _melt_counts(vol_ref,   "Refusés"),
+        _melt_counts(vol_ann,   "Annulés"),
+    ], ignore_index=True)
+
+    df_vol = _clean_for_chart(df_vol, str_cols=["Periode","Indic"], num_cols=["Volume"], drop_na_cols=["Periode","Indic","Volume"])
+
+    if df_vol.empty:
         st.caption("Aucune donnée de volume à afficher.")
+    else:
+        try:
+            chart_vol = alt.Chart(df_vol).mark_line(point=True).encode(
+                x=alt.X("Periode:N", sort=None, title="Période"),
+                y=alt.Y("Volume:Q"),
+                color=alt.Color("Indic:N", legend=alt.Legend(title="Statut")),
+                tooltip=["Periode","Indic","Volume"]
+            ).properties(height=280, use_container_width=True)
+            st.altair_chart(chart_vol, use_container_width=True)
+        except Exception:
+            st.dataframe(df_vol, use_container_width=True)
 
     # ---------- Graphiques : Financier ----------
     st.markdown("### 💵 Financier")
     fin = fA.groupby("Periode", dropna=False)[[HONO, AUTRE, TOTAL, "Payé","Reste"]].sum().reset_index()
-    if not fin.empty:
-        # CA (Honoraires + Autres)
+
+    if fin.empty:
+        st.caption("Aucune donnée financière à afficher.")
+    else:
+        # CA (barres empilées)
         ca = fin.melt(id_vars="Periode", value_vars=[HONO, AUTRE], var_name="Type", value_name="Montant")
-        chart_ca = alt.Chart(ca).mark_bar().encode(
-            x=alt.X("Periode:N", title="Période"),
-            y=alt.Y("Montant:Q"),
-            color=alt.Color("Type:N", legend=alt.Legend(title="Composant")),
-            tooltip=["Periode","Type", alt.Tooltip("Montant:Q", format="$.2f")]
-        ).properties(title="Chiffre d'affaires (Honoraires + Autres)", height=280)
-        st.altair_chart(chart_ca, use_container_width=True)
+        ca = _clean_for_chart(ca, str_cols=["Periode","Type"], num_cols=["Montant"], drop_na_cols=["Periode","Type","Montant"])
+        try:
+            chart_ca = alt.Chart(ca).mark_bar().encode(
+                x=alt.X("Periode:N", title="Période"),
+                y=alt.Y("Montant:Q"),
+                color=alt.Color("Type:N", legend=alt.Legend(title="Composant")),
+                tooltip=["Periode","Type", alt.Tooltip("Montant:Q", format="$.2f")]
+            ).properties(title="Chiffre d'affaires (Honoraires + Autres)", height=280)
+            st.altair_chart(chart_ca, use_container_width=True)
+        except Exception:
+            st.dataframe(ca, use_container_width=True)
 
         # Encaissements vs Solde
         enc = fin.melt(id_vars="Periode", value_vars=["Payé","Reste"], var_name="Indicateur", value_name="Montant")
-        chart_enc = alt.Chart(enc).mark_line(point=True).encode(
-            x=alt.X("Periode:N", title="Période"),
-            y=alt.Y("Montant:Q"),
-            color=alt.Color("Indicateur:N", legend=alt.Legend(title="Indicateur")),
-            tooltip=["Periode","Indicateur", alt.Tooltip("Montant:Q", format="$.2f")]
-        ).properties(title="Encaissements vs Solde restant", height=280)
-        st.altair_chart(chart_enc, use_container_width=True)
-    else:
-        st.caption("Aucune donnée financière à afficher.")
+        enc = _clean_for_chart(enc, str_cols=["Periode","Indicateur"], num_cols=["Montant"], drop_na_cols=["Periode","Indicateur","Montant"])
+        try:
+            chart_enc = alt.Chart(enc).mark_line(point=True).encode(
+                x=alt.X("Periode:N", title="Période"),
+                y=alt.Y("Montant:Q"),
+                color=alt.Color("Indicateur:N", legend=alt.Legend(title="Indicateur")),
+                tooltip=["Periode","Indicateur", alt.Tooltip("Montant:Q", format="$.2f")]
+            ).properties(title="Encaissements vs Solde restant", height=280)
+            st.altair_chart(chart_enc, use_container_width=True)
+        except Exception:
+            st.dataframe(enc, use_container_width=True)
 
-    # ---------- Graphique : Répartition par Visa ----------
+    # ---------- Répartition par Visa ----------
     st.markdown("### 🧭 Répartition par type de visa")
     rep = fA.groupby("Visa").agg(
         Dossiers=("Visa","count"),
@@ -792,26 +838,31 @@ with tabs[2]:
         Paye_USD=("Payé","sum"),
         Reste_USD=("Reste","sum")
     ).reset_index().sort_values("Dossiers", ascending=False)
-    if not rep.empty:
-        chart_rep = alt.Chart(rep).mark_bar().encode(
-            x=alt.X("Dossiers:Q", title="Nb dossiers"),
-            y=alt.Y("Visa:N", sort="-x"),
-            tooltip=["Visa","Dossiers",
-                     alt.Tooltip("Total_USD:Q", format="$.2f", title="Total"),
-                     alt.Tooltip("Paye_USD:Q", format="$.2f", title="Payé"),
-                     alt.Tooltip("Reste_USD:Q", format="$.2f", title="Reste")]
-        ).properties(height=320)
-        st.altair_chart(chart_rep, use_container_width=True)
-    else:
+
+    rep = _clean_for_chart(rep, str_cols=["Visa"], num_cols=["Dossiers","Total_USD","Paye_USD","Reste_USD"], drop_na_cols=["Visa","Dossiers"])
+
+    if rep.empty:
         st.caption("Aucune répartition par visa.")
+    else:
+        try:
+            chart_rep = alt.Chart(rep).mark_bar().encode(
+                x=alt.X("Dossiers:Q", title="Nb dossiers"),
+                y=alt.Y("Visa:N", sort="-x"),
+                tooltip=["Visa","Dossiers",
+                         alt.Tooltip("Total_USD:Q", format="$.2f", title="Total"),
+                         alt.Tooltip("Paye_USD:Q", format="$.2f", title="Payé"),
+                         alt.Tooltip("Reste_USD:Q", format="$.2f", title="Reste")]
+            ).properties(height=320)
+            st.altair_chart(chart_rep, use_container_width=True)
+        except Exception:
+            st.dataframe(rep, use_container_width=True)
 
     st.divider()
 
-    # ---------- Détails (clients) + fiche & règlements ----------
+    # ---------- Détails (clients) ----------
     st.markdown("### 🔎 Détails (clients)")
     details_cols = [c for c in ["Periode","ID_Client","Nom","Visa","Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut"] if c in fA.columns]
     details = fA[details_cols].copy()
-    # Formats monétaires pour affichage
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
         if col in details.columns:
             details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
@@ -993,4 +1044,3 @@ with tabs[3]:
         jdf = pd.DataFrame(rows).sort_values("Horodatage")
         jdf["Montant (US $)"] = jdf["Montant (US $)"].map(_fmt_money_us)
         st.dataframe(jdf, use_container_width=True)
-
