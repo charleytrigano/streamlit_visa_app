@@ -6,14 +6,13 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 
-# --- Altair setup ---
+# ============ Config Altair / Streamlit ============
 alt.data_transformers.disable_max_rows()
 alt.renderers.set_embed_options(actions=False)
-
 st.set_page_config(page_title="📊 Visas — Edition directe + ESCROW + Analyses", layout="wide")
 st.title("📊 Visas — Edition DIRECTE du fichier (ESCROW + Analyses)")
 
-# ==== Constantes colonnes ====
+# ============ Constantes colonnes ============
 HONO   = "Honoraires (US $)"
 AUTRE  = "Autres frais (US $)"
 TOTAL  = "Total (US $)"
@@ -22,7 +21,7 @@ ESC_JR = "Escrow journal"
 DOSSIER_COL = "Dossier N"
 DOSSIER_START = 13057
 
-# ==== Workspace (mémoriser le dernier fichier) ====
+# ============ Workspace (mémoriser le dernier fichier) ============
 def pick_workdir() -> Path | None:
     for p in [Path("/mnt/data"), Path("/tmp/visa_workspace"), Path.cwd() / "visa_workspace"]:
         try:
@@ -32,21 +31,27 @@ def pick_workdir() -> Path | None:
         except Exception:
             continue
     return None
+
 WORK_DIR = pick_workdir()
 WS_FILE  = (WORK_DIR / "_workspace.json") if WORK_DIR else None
 
 def load_workspace_path() -> Path | None:
-    if WS_FILE is None or not WS_FILE.exists(): return None
+    if WS_FILE is None or not WS_FILE.exists():
+        return None
     try:
         data = json.loads(WS_FILE.read_text(encoding="utf-8"))
-        p = Path(data.get("last_path","")); return p if p.exists() else None
+        p = Path(data.get("last_path",""))
+        return p if p.exists() else None
     except Exception:
         return None
 
 def save_workspace_path(p: Path):
-    if WS_FILE is None: return
-    try: WS_FILE.write_text(json.dumps({"last_path": str(p)}), encoding="utf-8")
-    except Exception: pass
+    if WS_FILE is None:
+        return
+    try:
+        WS_FILE.write_text(json.dumps({"last_path": str(p)}), encoding="utf-8")
+    except Exception:
+        pass
 
 def copy_upload_to_workspace(upload) -> Path:
     base_dir = WORK_DIR if WORK_DIR else Path("/tmp")
@@ -59,13 +64,15 @@ def copy_upload_to_workspace(upload) -> Path:
         while True:
             cand = base_dir / f"{stem}_{n}{suf}"
             if not cand.exists():
-                dest = cand; break
+                dest = cand
+                break
             n += 1
     dest.write_bytes(upload.read())
     return dest
 
-# ==== Utils ====
+# ============ Utils ============
 def _safe_str(x): return "" if pd.isna(x) else str(x).strip()
+
 def _to_num(s: pd.Series) -> pd.Series:
     cleaned = (s.astype(str)
                  .str.replace("\u00a0","",regex=False)
@@ -74,22 +81,29 @@ def _to_num(s: pd.Series) -> pd.Series:
                  .str.replace("$","",regex=False)
                  .str.replace(",","",regex=False))
     return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
-def _to_int(s: pd.Series) -> pd.Series: return pd.to_numeric(s, errors="coerce").fillna(0).astype(int)
+
+def _to_int(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0).astype(int)
+
 def _to_date(s: pd.Series) -> pd.Series:
     d = pd.to_datetime(s, errors="coerce")
     try: d = d.dt.tz_localize(None)
     except Exception: pass
     return d.dt.normalize().dt.date
+
 def _fmt_money_us(v: float) -> str:
     try: return f"${float(v):,.2f}"
     except Exception: return "$0.00"
+
 def _parse_json_list(x):
     if isinstance(x, list): return x
     if pd.isna(x) or str(x).strip()== "": return []
     try:
-        v = json.loads(x); return v if isinstance(v, list) else []
+        v = json.loads(x)
+        return v if isinstance(v, list) else []
     except Exception:
         return []
+
 def _sum_payments(pay_list) -> float:
     tot = 0.0
     for p in (pay_list or []):
@@ -97,29 +111,36 @@ def _sum_payments(pay_list) -> float:
         except Exception: amt = 0.0
         tot += amt
     return tot
+
 def _make_client_id_from_row(row) -> str:
     base = "|".join([_safe_str(row.get("Nom")), _safe_str(row.get("Date"))])
     h = hashlib.sha1(base.encode("utf-8")).hexdigest()[:8].upper()
     return f"CL-{h}"
+
 def looks_like_reference(df: pd.DataFrame) -> bool:
     cols = set(map(str.lower, df.columns.astype(str)))
-    # Référentiel si contient au moins Visa (et éventuellement Catégorie), et pas de colonnes finance
+    # Référentiel si Visa (et potentiellement Catégorie) mais pas de colonnes financières
     return ("visa" in cols) and not ({"montant","honoraires","payé","reste","solde"} & cols)
+
 def is_clients_like(df: pd.DataFrame) -> bool:
     cols = set(df.columns.astype(str))
     return {"Nom","Visa"}.issubset(cols)
+
 def _clean_for_chart(df: pd.DataFrame, str_cols, num_cols, drop_na_cols):
     df2 = df.copy()
     for c in str_cols:
-        if c in df2.columns: df2[c] = df2[c].astype(str).fillna("")
+        if c in df2.columns:
+            df2[c] = df2[c].astype(str).fillna("")
     for c in num_cols:
-        if c in df2.columns: df2[c] = pd.to_numeric(df2[c], errors="coerce").astype(float)
+        if c in df2.columns:
+            df2[c] = pd.to_numeric(df2[c], errors="coerce").astype(float)
     keep = pd.Series(True, index=df2.index)
     for c in drop_na_cols:
-        if c in df2.columns: keep &= df2[c].notna()
+        if c in df2.columns:
+            keep &= df2[c].notna()
     return df2[keep]
 
-# ==== ESCROW helpers ====
+# ============ ESCROW helpers ============
 def escrow_available_from_row(row) -> float:
     try: hon = float(row.get(HONO, 0.0))
     except Exception: hon = 0.0
@@ -128,13 +149,14 @@ def escrow_available_from_row(row) -> float:
     try: moved = float(row.get(ESC_TR, 0.0))
     except Exception: moved = 0.0
     return max(min(paid, hon) - moved, 0.0)
+
 def append_escrow_journal(row_raw: pd.Series, amount: float, note: str = "") -> str:
     journal = _parse_json_list(row_raw.get(ESC_JR, ""))
     journal.append({"ts": datetime.now().isoformat(timespec="seconds"),
                     "amount": float(amount), "note": note})
     return json.dumps(journal, ensure_ascii=False)
 
-# ==== Numérotation Dossier N ====
+# ============ Numérotation Dossier N ============
 def ensure_dossier_numbers(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if DOSSIER_COL not in df.columns:
@@ -147,30 +169,32 @@ def ensure_dossier_numbers(df: pd.DataFrame) -> pd.DataFrame:
     next_num = int(existing.max() + 1) if not existing.empty else DOSSIER_START
     to_fill_idx = df.index[df[DOSSIER_COL] <= 0].tolist()
     for i in to_fill_idx:
-        df.at[i, DOSSIER_COL] = next_num; next_num += 1
+        df.at[i, DOSSIER_COL] = next_num
+        next_num += 1
     return df
+
 def next_dossier_number(df_existing: pd.DataFrame) -> int:
-    if DOSSIER_COL not in df_existing.columns or df_existing.empty: return DOSSIER_START
+    if DOSSIER_COL not in df_existing.columns or df_existing.empty:
+        return DOSSIER_START
     s = _to_int(df_existing[DOSSIER_COL]); s = s[s > 0]
     return int(s.max() + 1) if not s.empty else DOSSIER_START
 
-# ==== Référentiel (Visa ⇢ Catégorie) ====
+# ============ Référentiel (Visa ⇢ Catégorie) ============
 def read_visa_reference(path: Path) -> pd.DataFrame:
     try:
         dfv = pd.read_excel(path, sheet_name="Visa")
     except Exception:
         return pd.DataFrame(columns=["Catégorie","Visa"])
-    # normaliser colonnes
-    cols = {c.lower(): c for c in dfv.columns}
-    has_cat = any(c.lower() == "catégorie" or c.lower()=="categorie" for c in dfv.columns)
-    if "Visa" not in dfv.columns and "visa" in cols: dfv.rename(columns={cols["visa"]:"Visa"}, inplace=True)
-    if not has_cat:
-        dfv["Catégorie"] = ""  # compat 1 colonne
-    else:
-        # uniformiser nom
-        cat_col = next(c for c in dfv.columns if c.lower() in ("catégorie","categorie"))
-        if cat_col != "Catégorie": dfv.rename(columns={cat_col: "Catégorie"}, inplace=True)
-    # forcer string
+    # normaliser
+    if "Visa" not in dfv.columns:
+        visa_col = next((c for c in dfv.columns if str(c).strip().lower()=="visa"), None)
+        if visa_col: dfv = dfv.rename(columns={visa_col:"Visa"})
+    cat_col = next((c for c in dfv.columns if str(c).strip().lower() in ("catégorie","categorie")), None)
+    if not cat_col:
+        dfv["Catégorie"] = ""
+    elif cat_col != "Catégorie":
+        dfv = dfv.rename(columns={cat_col:"Catégorie"})
+    # typage
     for c in ["Catégorie","Visa"]:
         if c in dfv.columns: dfv[c] = dfv[c].astype(str).fillna("").str.strip()
     return dfv[["Catégorie","Visa"]]
@@ -181,32 +205,32 @@ def map_category_from_ref(visalib: str, ref_df: pd.DataFrame) -> str:
     if tmp.empty: return ""
     return _safe_str(tmp.iloc[0]["Catégorie"])
 
-# ==== Normalisation ====
+# ============ Normalisation ============
 def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) -> pd.DataFrame:
     df = df.copy()
     # Date / Mois
     df["Date"] = _to_date(df["Date"]) if "Date" in df.columns else pd.NaT
     df["Mois"] = df["Date"].apply(lambda x: f"{x.month:02d}" if pd.notna(x) else pd.NA)
-    # Visa
+
+    # Visa & Catégorie
     visa_col = next((c for c in ["Visa","Categories","Catégorie","Categorie","TypeVisa"] if c in df.columns), None)
     df["Visa"] = df[visa_col].astype(str) if visa_col else "Inconnu"
-
-    # --- Catégorie : si absente, tenter de déduire via référentiel
     if "Catégorie" not in df.columns: df["Catégorie"] = ""
     if visa_ref is not None and not visa_ref.empty:
         df["Catégorie"] = df.apply(lambda r: _safe_str(r.get("Catégorie")) or map_category_from_ref(_safe_str(r.get("Visa")), visa_ref), axis=1)
 
-    # --- Honoraires alias
-    hono_aliases = [HONO, "Honoraires", "Honoraires US $", "Montant honoraires us $", "Montant honoraires", "Montant (US $)", "Montant"]
+    # Honoraires alias
+    hono_aliases = [HONO, "Honoraires", "Honoraires US $", "Montant honoraires us $", "Montant honoraires",
+                    "Montant (US $)", "Montant"]
     hono_src = next((c for c in hono_aliases if c in df.columns), None)
     df[HONO] = _to_num(df[hono_src]) if hono_src else 0.0
 
-    # --- Autres frais alias
+    # Autres frais alias
     autre_aliases = [AUTRE, "Autres frais", "Frais", "Other fees", "Autres"]
     autre_src = next((c for c in autre_aliases if c in df.columns), None)
     df[AUTRE] = _to_num(df[autre_src]) if autre_src else 0.0
 
-    # --- Paiements / Acomptes
+    # Paiements / Acomptes
     if "Paiements" in df.columns and df["Paiements"].astype(str).str.strip().ne("").any():
         parsed = df["Paiements"].apply(_parse_json_list)
         df["Payé"] = parsed.apply(_sum_payments).astype(float)
@@ -248,7 +272,7 @@ def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) 
     # Dossier N
     df = ensure_dossier_numbers(df)
 
-    # Nettoyage (téléphone/email retirés)
+    # Nettoyage (on retire Téléphone/Email si présents)
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
 
@@ -259,7 +283,7 @@ def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) 
     cols = [c for c in ordered if c in df.columns] + [c for c in df.columns if c not in ordered]
     return df[cols]
 
-# ==== IO Excel ====
+# ============ IO Excel ============
 def read_sheet(path: Path, sheet: str, normalize: bool, visa_ref: pd.DataFrame | None = None) -> pd.DataFrame:
     xls = pd.ExcelFile(path)
     if sheet not in xls.sheet_names:
@@ -297,14 +321,17 @@ def write_sheet_inplace(path: Path, sheet_to_replace: str, new_df: pd.DataFrame)
     except Exception:
         pass
 
-# ==== Source (sidebar) — persistance du dernier fichier ====
+# ============ Source (sidebar) ============
 st.sidebar.header("Source")
+
 def _find_latest_xlsx(paths: list[Path]) -> Path | None:
     cand = []
     for base in paths:
         try:
-            if base and base.exists(): cand.extend([p for p in base.glob("*.xlsx") if p.is_file()])
-        except Exception: pass
+            if base and base.exists():
+                cand.extend([p for p in base.glob("*.xlsx") if p.is_file()])
+        except Exception:
+            pass
     if not cand: return None
     return sorted(cand, key=lambda p: p.stat().st_mtime, reverse=True)[0]
 
@@ -313,14 +340,20 @@ if (current_path is None) or (not current_path.exists()):
     search_dirs = [WORK_DIR] if WORK_DIR else []
     if Path("/mnt/data").exists(): search_dirs.append(Path("/mnt/data"))
     latest = _find_latest_xlsx(search_dirs)
-    if latest: current_path = latest; save_workspace_path(current_path)
+    if latest:
+        current_path = latest
+        save_workspace_path(current_path)
+
 if (current_path is None) or (not current_path.exists()):
-    defaults = [Path("/mnt/data/donnees_visa_clients.xlsx"),
-                Path("/mnt/data/modele_clients_visa.xlsx"),
-                Path("/mnt/data/Visa_Clients_20251001-114844.xlsx"),
-                Path("/mnt/data/visa_analytics_datecol.xlsx")]
+    defaults = [
+        Path("/mnt/data/donnees_visa_clients.xlsx"),
+        Path("/mnt/data/modele_clients_visa.xlsx"),
+        Path("/mnt/data/Visa_Clients_20251001-114844.xlsx"),
+        Path("/mnt/data/visa_analytics_datecol.xlsx"),
+    ]
     current_path = next((p for p in defaults if p.exists()), None)
-    if current_path: save_workspace_path(current_path)
+    if current_path:
+        save_workspace_path(current_path)
 
 if current_path and current_path.exists():
     st.sidebar.success(f"Fichier courant : {current_path.name}")
@@ -340,8 +373,10 @@ if up is not None:
     st.sidebar.success(f"Nouveau fichier chargé : {new_path.name}")
     st.rerun()
 
-if current_path is None or not current_path.exists(): st.stop()
+if current_path is None or not current_path.exists():
+    st.stop()
 
+# Sync bouton de téléchargement avec le fichier courant
 if ("download_bytes" not in st.session_state) or (st.session_state.get("download_name") != current_path.name):
     try:
         st.session_state["download_bytes"] = current_path.read_bytes()
@@ -353,19 +388,23 @@ if ("download_bytes" not in st.session_state) or (st.session_state.get("download
 try:
     sheet_names = pd.ExcelFile(current_path).sheet_names
 except Exception as e:
-    st.error(f"Impossible de lire l'Excel : {e}"); st.stop()
+    st.error(f"Impossible de lire l'Excel : {e}")
+    st.stop()
 
 preferred_order = ["Clients","Visa","Données normalisées"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
 sheet_choice = st.sidebar.selectbox("Feuille (Dashboard)", sheet_names, index=sheet_names.index(default_sheet))
 
-# --- Détection de la feuille *Clients* (cible CRUD) ---
+# Détection de la feuille *Clients* (cible CRUD)
 valid_client_sheets = []
 for s in sheet_names:
     try:
         df_tmp = read_sheet(current_path, s, normalize=False)
-        if is_clients_like(df_tmp): valid_client_sheets.append(s)
-    except Exception: pass
+        if is_clients_like(df_tmp):
+            valid_client_sheets.append(s)
+    except Exception:
+        pass
+
 if not valid_client_sheets:
     st.sidebar.error("Aucune feuille 'clients' valide (au minimum Nom & Visa).")
     client_target_sheet = None
@@ -388,29 +427,25 @@ st.sidebar.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
-# ==== Onglets ====
+# ============ Onglets ============
 tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses", "ESCROW"])
 
 # ================= DASHBOARD =================
 with tabs[0]:
-    # Lire référentiel pour dériver la Catégorie si besoin
     visa_ref = read_visa_reference(current_path)
     df_raw = read_sheet(current_path, sheet_choice, normalize=False)
 
-    # Si la feuille sélectionnée est le référentiel Visa => gestion Catégorie + Visa
+    # Référentiel Visa (Catégorie + Visa)
     if looks_like_reference(df_raw) and sheet_choice == "Visa":
         st.subheader("📄 Référentiel — Catégories & Types de Visa")
-        # Normaliser à 2 colonnes
         if "Visa" not in df_raw.columns:
             df_ref = pd.DataFrame(columns=["Catégorie","Visa"])
         else:
             df_ref = df_raw.copy()
             if "Catégorie" not in df_ref.columns:
                 df_ref["Catégorie"] = ""
-            # garder l'ordre propre
             df_ref = df_ref[["Catégorie","Visa"]].astype(str).fillna("").applymap(lambda s: s.strip())
 
-        # Filtres Catégorie / Visa
         c1, c2 = st.columns(2)
         cats = sorted([c for c in df_ref["Catégorie"].astype(str).unique() if c!=""])
         visas = sorted([v for v in df_ref["Visa"].astype(str).unique() if v!=""])
@@ -469,10 +504,10 @@ with tabs[0]:
                     write_sheet_inplace(current_path, "Visa", out); st.success("Supprimé."); st.rerun()
         st.stop()
 
-    # Sinon : feuille de données -> normaliser avec référentiel
-    df = read_sheet(current_path, sheet_choice, normalize=True, visa_ref=visa_ref)
+    # Sinon : données -> normaliser (avec référentiel)
+    df = read_sheet(current_path, sheet_choice, normalize=True, visa_ref=read_visa_reference(current_path))
 
-    # Filtres Catégorie + Visa (+ déjà existants)
+    # Filtres Catégorie & Visa & Date
     with st.container():
         c1, c2, c3 = st.columns(3)
         cats = sorted(df["Catégorie"].dropna().astype(str).unique()) if "Catégorie" in df.columns else []
@@ -485,7 +520,7 @@ with tabs[0]:
         months = sorted(df["Mois"].dropna().unique()) if "Mois" in df.columns else []
         sel_months = d1.multiselect("Mois (MM)", months, default=[])
         include_na_dates = d2.checkbox("Inclure lignes sans date", value=True)
-        # sliders
+
         def make_slider(_df, col, lab, container):
             if col not in _df.columns or _df[col].dropna().empty:
                 container.caption(f"{lab} : aucune donnée"); return None
@@ -507,11 +542,13 @@ with tabs[0]:
         mask = f["Mois"].isin(sel_months)
         if include_na_dates: mask |= f["Mois"].isna()
         f = f[mask]
-    if TOTAL in f.columns and total_range is not None: f = f[(f[TOTAL] >= total_range[0]) & (f[TOTAL] <= total_range[1])]
+    if TOTAL in f.columns and total_range is not None:
+        f = f[(f[TOTAL] >= total_range[0]) & (f[TOTAL] <= total_range[1])]
 
     hidden = len(df) - len(f)
     if hidden > 0: st.caption(f"🔎 {hidden} ligne(s) masquée(s) par les filtres.")
 
+    # KPI
     st.markdown("""
     <style>.small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}.small-kpi [data-testid="stMetricLabel"]{font-size:.8rem;opacity:.8}</style>
     """, unsafe_allow_html=True)
@@ -523,7 +560,7 @@ with tabs[0]:
     k4.metric("Solde (US $)", _fmt_money_us(float(f.get("Reste", pd.Series(dtype=float)).sum())) )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Alerte ESCROW
+    # Alerte ESCROW (dossiers envoyés avec solde ESCROW à réclamer)
     df_esc = f.copy()
     if ESC_TR not in df_esc.columns: df_esc[ESC_TR] = 0.0
     else: df_esc[ESC_TR] = pd.to_numeric(df_esc[ESC_TR], errors="coerce").fillna(0.0)
@@ -550,19 +587,69 @@ with tabs[0]:
     st.dataframe(table[cols_show].sort_values(by=[c for c in ["Date","Visa"] if c in table.columns], na_position="last"),
                  use_container_width=True)
 
+    st.divider()
+    # Ajout rapide d'un paiement (dossiers non soldés)
+    st.subheader("➕ Ajouter un paiement (US $)")
+    if client_target_sheet is None:
+        st.info("Choisis d’abord une **feuille clients** valide dans la sidebar.")
+    else:
+        clients_norm = read_sheet(current_path, client_target_sheet, normalize=True, visa_ref=read_visa_reference(current_path))
+        todo = clients_norm[clients_norm["Reste"] > 0.004].copy() if "Reste" in clients_norm.columns else pd.DataFrame()
+        if todo.empty:
+            st.success("Tous les dossiers sont soldés ✅")
+        else:
+            todo["_label"] = todo.apply(lambda r: f'{r.get("ID_Client","")} — {r.get("Nom","")} — Reste {_fmt_money_us(float(r.get("Reste",0)))}', axis=1)
+            label_to_id = todo.set_index("_label")["ID_Client"].to_dict()
+            csel, camt, cdate, cmode = st.columns([2,1,1,1])
+            sel_label = csel.selectbox("Dossier à créditer", todo["_label"].tolist(), key="quick_pay_sel")
+            amount = camt.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f", key="quick_pay_amt")
+            pdate  = cdate.date_input("Date", value=date.today(), key="quick_pay_date")
+            mode   = cmode.selectbox("Mode", ["CB","Chèque","Espèces","Virement","Venmo","Autre"], key="quick_pay_mode")
+            note   = st.text_input("Note (facultatif)", "", key="quick_pay_note")
+            if st.button("💾 Ajouter le paiement (écrit dans le fichier)", key="quick_pay_btn"):
+                try:
+                    live = read_sheet(current_path, client_target_sheet, normalize=False)
+                    if "Paiements" not in live.columns: live["Paiements"] = ""
+                    target_id = label_to_id.get(sel_label, "")
+                    idxs = live.index[live.get("ID_Client","").astype(str) == str(target_id)]
+                    if len(idxs)==0: raise RuntimeError("Dossier introuvable.")
+                    idx = idxs[0]
+                    pay_list = _parse_json_list(live.at[idx, "Paiements"])
+                    add = float(amount or 0.0)
+                    if add <= 0: st.warning("Le montant doit être > 0."); st.stop()
+                    live_norm = normalize_dataframe(live.copy(), visa_ref=read_visa_reference(current_path))
+                    mask = live_norm["ID_Client"].astype(str) == str(live.at[idx, "ID_Client"])
+                    reste_curr = float(live_norm.loc[mask, "Reste"].sum()) if mask.any() else 0.0
+                    if add > reste_curr + 1e-9: add = reste_curr
+                    pay_list.append({"date": str(pdate), "amount": float(add), "mode": mode, "note": note})
+                    live.at[idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+                    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+                        if c not in live.columns: live[c] = 0.0
+                    total_paid = _sum_payments(pay_list)
+                    hono = _to_num(pd.Series([live.at[idx, HONO]])).iloc[0] if HONO in live.columns else 0.0
+                    autr = _to_num(pd.Series([live.at[idx, AUTRE]])).iloc[0] if AUTRE in live.columns else 0.0
+                    total = float(hono + autr)
+                    live.at[idx, "Payé"]  = float(total_paid)
+                    live.at[idx, "Reste"] = max(total - float(total_paid), 0.0)
+                    live.at[idx, TOTAL]   = total
+                    write_sheet_inplace(current_path, client_target_sheet, live)
+                    st.success("Paiement enregistré **dans le fichier**. ✅"); st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur : {e}")
+
 # ================= CLIENTS (CRUD) =================
 with tabs[1]:
     st.subheader("👤 Clients — Créer / Modifier / Supprimer (écriture **directe**)")
     if client_target_sheet is None:
         st.warning("Aucune feuille *Clients* valide disponible. Ajoute une feuille avec au moins les colonnes **Nom** et **Visa**."); st.stop()
-    if st.button("🔄 Recharger le fichier"): st.rerun()
+    if st.button("🔄 Recharger le fichier", key="reload_btn"):
+        st.rerun()
 
     visa_ref = read_visa_reference(current_path)
     live_raw = read_sheet(current_path, client_target_sheet, normalize=False).copy()
     live_raw = ensure_dossier_numbers(live_raw)
     live_raw["_RowID"] = range(len(live_raw))
 
-    # Pour les sélecteurs : listes Catégorie/Visa du référentiel
     cats_ref  = sorted([c for c in visa_ref["Catégorie"].astype(str).unique() if c!=""]) if not visa_ref.empty else []
     visas_all = sorted(visa_ref["Visa"].astype(str).unique()) if not visa_ref.empty else []
 
@@ -572,11 +659,12 @@ with tabs[1]:
     has_refuse  = "Dossier refusé"  in live_raw.columns
     has_annule  = "Dossier annulé"  in live_raw.columns
 
-    action = st.radio("Action", ["Créer", "Modifier", "Supprimer"], horizontal=True)
+    action = st.radio("Action", ["Créer", "Modifier", "Supprimer"], horizontal=True, key="crud_action")
 
-    # CREER
+    # --- CREER ---
     if action == "Créer":
         st.markdown("### ➕ Nouveau client")
+        # s'assurer des colonnes nécessaires
         for must in [DOSSIER_COL,"ID_Client","Nom","Date","Mois","Catégorie","Visa",
                      HONO, AUTRE, TOTAL, "Payé","Reste", ESC_TR, ESC_JR,
                      "Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé","Paiements"]:
@@ -596,47 +684,51 @@ with tabs[1]:
             nom_in = c1.text_input("Nom")
             d = c2.date_input("Date", value=date.today())
 
-            # Sélecteurs Catégorie -> Visa (filtré)
             cC, cV = st.columns(2)
-            sel_cat = cC.selectbox("Catégorie", [""] + cats_ref, index=0)
+            sel_cat = cC.selectbox("Catégorie", [""] + cats_ref, index=0, key="create_cat")
             if sel_cat:
                 visas_opt = sorted(visa_ref.loc[visa_ref["Catégorie"]==sel_cat, "Visa"].unique().tolist())
             else:
                 visas_opt = visas_all
             if visas_opt:
-                visa = cV.selectbox("Visa", visas_opt)
+                visa = cV.selectbox("Visa", visas_opt, key="create_visa")
             else:
-                visa = cV.text_input("Visa")
+                visa = cV.text_input("Visa", key="create_visa_txt")
 
             c5,c6 = st.columns(2)
-            honoraires = c5.number_input("Montant honoraires (US $)", value=0.0, step=10.0, format="%.2f")
-            autres     = c6.number_input("Autres frais (US $)", value=0.0, step=10.0, format="%.2f")
+            honoraires = c5.number_input("Montant honoraires (US $)", value=0.0, step=10.0, format="%.2f", key="create_hono")
+            autres     = c6.number_input("Autres frais (US $)", value=0.0, step=10.0, format="%.2f", key="create_autre")
             c7,c8 = st.columns(2)
             total_preview = float(honoraires + autres); c7.metric("Total (US $)", _fmt_money_us(total_preview))
-            paye_init = c8.number_input("Payé (US $)", value=0.0, step=10.0, format="%.2f")
+            paye_init = c8.number_input("Payé (US $)", value=0.0, step=10.0, format="%.2f", key="create_paye")
+
             st.markdown("#### État du dossier")
-            val_envoye = st.checkbox("Dossier envoyé",  value=False) if has_envoye else False
-            val_appr   = st.checkbox("Dossier approuvé",value=False) if has_appr   else False
-            val_rfe    = st.checkbox("RFE",             value=False) if has_rfe    else False
-            val_refuse = st.checkbox("Dossier refusé",  value=False) if has_refuse else False
-            val_annule = st.checkbox("Dossier annulé",  value=False) if has_annule else False
-            ok = st.form_submit_button("💾 Sauvegarder (dans le fichier)", type="primary")
+            val_envoye = st.checkbox("Dossier envoyé",  value=False, key="create_env") if has_envoye else False
+            val_appr   = st.checkbox("Dossier approuvé",value=False, key="create_app") if has_appr   else False
+            val_rfe    = st.checkbox("RFE",             value=False, key="create_rfe") if has_rfe    else False
+            val_refuse = st.checkbox("Dossier refusé",  value=False, key="create_ref") if has_refuse else False
+            val_annule = st.checkbox("Dossier annulé",  value=False, key="create_ann") if has_annule else False
+
+            ok = st.form_submit_button("💾 Sauvegarder (dans le fichier)", type="primary", help="Ajoute la ligne directement dans l'Excel")
         if ok:
             if val_rfe and not (val_envoye or val_refuse or val_annule):
                 st.error("RFE ⇢ seulement si Envoyé/Refusé/Annulé est coché."); st.stop()
-            # Doublon Nom -> suffixes -0, -1...
+
+            # Nom dupliqué -> suffixes -0, -1, ...
             existing_names = set(live_raw["Nom"].dropna().astype(str))
             base_name = _safe_str(nom_in)
             use_name = base_name
             if base_name in existing_names:
                 k = 0
-                while f"{base_name}-{k}" in existing_names: k += 1
+                while f"{base_name}-{k}" in existing_names:
+                    k += 1
                 use_name = f"{base_name}-{k}"
 
             gen_id = _make_client_id_from_row({"Nom": use_name, "Date": d})
             existing_ids = set(live_raw["ID_Client"].astype(str)) if "ID_Client" in live_raw.columns else set()
             new_id = gen_id; n=1
-            while new_id in existing_ids: n+=1; new_id=f"{gen_id}-{n:02d}"
+            while new_id in existing_ids:
+                n+=1; new_id=f"{gen_id}-{n:02d}"
 
             total = float((honoraires or 0.0)+(autres or 0.0))
             reste = max(total - float(paye_init or 0.0), 0.0)
@@ -648,7 +740,7 @@ with tabs[1]:
                 "Date": str(d),
                 "Mois": f"{d.month:02d}",
                 "Catégorie": _safe_str(sel_cat),
-                "Visa": _safe_str(visa),
+                "Visa": _safe_str(visa if isinstance(visa, str) else ""),
                 HONO: float(honoraires or 0.0),
                 AUTRE: float(autres or 0.0),
                 TOTAL: total, "Payé": float(paye_init or 0.0), "Reste": reste,
@@ -661,13 +753,15 @@ with tabs[1]:
             write_sheet_inplace(current_path, client_target_sheet, live_after); save_workspace_path(current_path)
             st.success(f"Client créé **dans le fichier** avec Dossier N {next_num}. ✅"); st.rerun()
 
-    # MODIFIER
+    # --- MODIFIER ---
     if action == "Modifier":
         st.markdown("### ✏️ Modifier un client")
-        if live_raw.drop(columns=["_RowID"]).empty: st.info("Aucun client.")
+        if live_raw.drop(columns=["_RowID"]).empty:
+            st.info("Aucun client.")
         else:
-            opts = [(int(r["_RowID"]), f'{int(r.get(DOSSIER_COL,0))} — {_safe_str(r.get("ID_Client"))} — {_safe_str(r.get("Nom"))}') for _,r in live_raw.iterrows()]
-            label = st.selectbox("Sélection", [lab for _,lab in opts])
+            opts = [(int(r["_RowID"]), f'{int(r.get(DOSSIER_COL,0))} — {_safe_str(r.get("ID_Client"))} — {_safe_str(r.get("Nom"))}')
+                    for _,r in live_raw.iterrows()]
+            label = st.selectbox("Sélection", [lab for _,lab in opts], key="edit_select")
             sel_rowid = [rid for rid,lab in opts if lab==label][0]
             idx = live_raw.index[live_raw["_RowID"]==sel_rowid][0]
             init = live_raw.loc[idx].to_dict()
@@ -675,26 +769,22 @@ with tabs[1]:
             with st.form("edit_form", clear_on_submit=False):
                 c0, c1, c2 = st.columns([1,1,1])
                 c0.metric("Dossier N", f'{int(init.get(DOSSIER_COL,0))}')
-                nom = c1.text_input("Nom", value=_safe_str(init.get("Nom")))
+                nom = c1.text_input("Nom", value=_safe_str(init.get("Nom")), key="edit_nom")
                 try: d_init = pd.to_datetime(init.get("Date")).date() if _safe_str(init.get("Date")) else date.today()
                 except Exception: d_init = date.today()
-                d = c2.date_input("Date", value=d_init)
+                d = c2.date_input("Date", value=d_init, key="edit_date")
 
-                # Catégorie/Visa
                 cC, cV = st.columns(2)
                 init_cat = _safe_str(init.get("Catégorie"))
-                sel_cat = cC.selectbox("Catégorie", [""] + cats_ref, index=([""]+cats_ref).index(init_cat) if init_cat in ([""]+cats_ref) else 0)
-                if sel_cat:
-                    visas_opt = sorted(visa_ref.loc[visa_ref["Catégorie"]==sel_cat, "Visa"].unique().tolist())
-                else:
-                    visas_opt = visas_all
+                sel_cat = cC.selectbox("Catégorie", [""] + cats_ref, index=([""]+cats_ref).index(init_cat) if init_cat in ([""]+cats_ref) else 0, key="edit_cat")
+                visas_opt = sorted(visa_ref.loc[visa_ref["Catégorie"]==sel_cat, "Visa"].unique().tolist()) if sel_cat else visas_all
                 init_visa = _safe_str(init.get("Visa"))
                 if visas_opt:
                     try: idxv = visas_opt.index(init_visa)
                     except Exception: idxv = 0
-                    visa = cV.selectbox("Visa", visas_opt, index=idxv)
+                    visa = cV.selectbox("Visa", visas_opt, index=idxv, key="edit_visa")
                 else:
-                    visa = cV.text_input("Visa", value=init_visa)
+                    visa = cV.text_input("Visa", value=init_visa, key="edit_visa_txt")
 
                 def _f(v, alt=0.0):
                     try: return float(v)
@@ -704,18 +794,20 @@ with tabs[1]:
                 paye0  = _f(init.get("Payé", 0.0))
                 moved0 = _f(init.get(ESC_TR, 0.0))
                 c5,c6 = st.columns(2)
-                honoraires = c5.number_input("Montant honoraires (US $)", value=hono0, step=10.0, format="%.2f")
-                autres     = c6.number_input("Autres frais (US $)", value=autre0, step=10.0, format="%.2f")
+                honoraires = c5.number_input("Montant honoraires (US $)", value=hono0, step=10.0, format="%.2f", key="edit_hono")
+                autres     = c6.number_input("Autres frais (US $)", value=autre0, step=10.0, format="%.2f", key="edit_autre")
                 c7,c8 = st.columns(2)
                 total_preview = float(honoraires + autres); c7.metric("Total (US $)", _fmt_money_us(total_preview))
-                paye    = c8.number_input("Payé (US $)", value=paye0, step=10.0, format="%.2f")
+                paye    = c8.number_input("Payé (US $)", value=paye0, step=10.0, format="%.2f", key="edit_paye")
+
                 st.caption(f"ESCROW transféré (cumul) actuellement : {_fmt_money_us(moved0)} — (gérer les transferts dans l’onglet ESCROW)")
                 st.markdown("#### État du dossier")
-                val_envoye = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")))   if has_envoye else False
-                val_appr   = st.checkbox("Dossier approuvé",value=bool(init.get("Dossier approuvé"))) if has_appr   else False
-                val_rfe    = st.checkbox("RFE",             value=bool(init.get("RFE")))              if has_rfe    else False
-                val_refuse = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")))   if has_refuse else False
-                val_annule = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")))   if has_annule else False
+                val_envoye = st.checkbox("Dossier envoyé",  value=bool(init.get("Dossier envoyé")),  key="edit_env") if has_envoye else False
+                val_appr   = st.checkbox("Dossier approuvé",value=bool(init.get("Dossier approuvé")), key="edit_app") if has_appr   else False
+                val_rfe    = st.checkbox("RFE",             value=bool(init.get("RFE")),              key="edit_rfe") if has_rfe    else False
+                val_refuse = st.checkbox("Dossier refusé",  value=bool(init.get("Dossier refusé")),   key="edit_ref") if has_refuse else False
+                val_annule = st.checkbox("Dossier annulé",  value=bool(init.get("Dossier annulé")),   key="edit_ann") if has_annule else False
+
                 ok = st.form_submit_button("💾 Enregistrer (dans le fichier)", type="primary")
             if ok:
                 if val_rfe and not (val_envoye or val_refuse or val_annule):
@@ -738,7 +830,7 @@ with tabs[1]:
                     live.at[t_idx,"Nom"]=_safe_str(nom)
                     live.at[t_idx,"Date"]=str(d); live.at[t_idx,"Mois"]=f"{d.month:02d}"
                     live.at[t_idx,"Catégorie"]=_safe_str(sel_cat)
-                    live.at[t_idx,"Visa"]=_safe_str(visa)
+                    live.at[t_idx,"Visa"]=_safe_str(visa if isinstance(visa,str) else "")
                     live.at[t_idx, HONO]=float(honoraires or 0.0)
                     live.at[t_idx, AUTRE]=float(autres or 0.0)
                     live[TOTAL] = live.get(TOTAL, 0.0); live.at[t_idx, TOTAL]=total
@@ -755,17 +847,19 @@ with tabs[1]:
                     write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
                     st.success("Modifications enregistrées **dans le fichier**. ✅"); st.rerun()
 
-    # SUPPRIMER
+    # --- SUPPRIMER ---
     if action == "Supprimer":
         st.markdown("### 🗑️ Supprimer un client (écrit directement)")
-        if live_raw.drop(columns=["_RowID"]).empty: st.info("Aucun client.")
+        if live_raw.drop(columns=["_RowID"]).empty:
+            st.info("Aucun client.")
         else:
-            opts = [(int(r["_RowID"]), f'{int(r.get(DOSSIER_COL,0))} — {_safe_str(r.get("ID_Client"))} — {_safe_str(r.get("Nom"))}') for _,r in live_raw.iterrows()]
-            label = st.selectbox("Sélection", [lab for _,lab in opts])
+            opts = [(int(r["_RowID"]), f'{int(r.get(DOSSIER_COL,0))} — {_safe_str(r.get("ID_Client"))} — {_safe_str(r.get("Nom"))}')
+                    for _,r in live_raw.iterrows()]
+            label = st.selectbox("Sélection", [lab for _,lab in opts], key="del_select")
             sel_rowid = [rid for rid,lab in opts if lab==label][0]
             idx = live_raw.index[live_raw["_RowID"]==sel_rowid][0]
             st.error("⚠️ Action irréversible.")
-            if st.button("Supprimer (dans le fichier)"):
+            if st.button("Supprimer (dans le fichier)", key="del_btn"):
                 live = live_raw.drop(columns=["_RowID"]).copy()
                 key = _safe_str(live_raw.at[idx, "ID_Client"])
                 if key and "ID_Client" in live.columns:
@@ -785,7 +879,8 @@ with tabs[2]:
     visa_ref = read_visa_reference(current_path)
     dfA_raw = read_sheet(current_path, client_target_sheet, normalize=False)
     dfA = normalize_dataframe(dfA_raw, visa_ref=visa_ref).copy()
-    if dfA.empty: st.info("Aucune donnée pour analyser."); st.stop()
+    if dfA.empty:
+        st.info("Aucune donnée pour analyser."); st.stop()
 
     with st.container():
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -828,7 +923,7 @@ with tabs[2]:
         if include_na_dates: mask_range = mask_range | fA["Date"].isna()
         fA = fA[mask_range]
 
-    # Période
+    # Période (YYYY-MM si demandé, sinon MM)
     if agg_with_year:
         fA["Periode"] = fA["Date"].apply(lambda x: f"{x.year}-{x.month:02d}" if pd.notna(x) else "NA")
     else:
@@ -844,7 +939,7 @@ with tabs[2]:
         return "En attente"
     fA["Statut"] = fA.apply(derive_statut, axis=1)
 
-    # Volumes
+    # ---- Graphiques Volumes
     st.markdown("### 📈 Volumes")
     vol_crees = fA.groupby("Periode").size().reset_index(name="Créés")
     df_vol = vol_crees.rename(columns={"Créés":"Volume"}).assign(Indic="Créés")
@@ -861,7 +956,7 @@ with tabs[2]:
         except Exception:
             st.dataframe(df_vol, use_container_width=True)
 
-    # Financier
+    # ---- Graphiques Financier
     st.markdown("### 💵 Financier")
     fin = fA.groupby("Periode", dropna=False)[[HONO, AUTRE, TOTAL, "Payé","Reste"]].sum().reset_index()
     if not fin.empty:
@@ -877,7 +972,20 @@ with tabs[2]:
         except Exception:
             st.dataframe(ca, use_container_width=True)
 
-    # Répartition par Catégorie/Visa
+        enc = fin.melt(id_vars="Periode", value_vars=["Payé","Reste"], var_name="Indicateur", value_name="Montant")
+        enc = _clean_for_chart(enc, ["Periode","Indicateur"], ["Montant"], ["Periode","Indicateur","Montant"])
+        try:
+            chart_enc = alt.Chart(enc).mark_line(point=True).encode(
+                x=alt.X("Periode:N", title="Période"),
+                y=alt.Y("Montant:Q"),
+                color=alt.Color("Indicateur:N", legend=alt.Legend(title="Indicateur")),
+                tooltip=["Periode","Indicateur", alt.Tooltip("Montant:Q", format="$.2f")]
+            ).properties(title="Encaissements vs Solde restant", height=280)
+            st.altair_chart(chart_enc, use_container_width=True)
+        except Exception:
+            st.dataframe(enc, use_container_width=True)
+
+    # ---- Répartition par Catégorie / Visa
     st.markdown("### 🧭 Répartition par Catégorie / Visa")
     rep = fA.groupby(["Catégorie","Visa"]).agg(
         Dossiers=("Visa","count"),
@@ -906,7 +1014,8 @@ with tabs[2]:
     details_cols = [c for c in ["Periode",DOSSIER_COL,"ID_Client","Nom","Catégorie","Visa","Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut"] if c in fA.columns]
     details = fA[details_cols].copy()
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
-        if col in details.columns: details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
+        if col in details.columns:
+            details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
     d1, d2 = st.columns(2)
     statut_filter = d1.multiselect("Filtrer par statut", ["Approuvé","Refusé","Annulé","En attente"], key="anal_statut_filter")
     search = d2.text_input("Recherche (Nom / Catégorie / Visa / ID / Dossier N)", key="anal_search")
@@ -919,6 +1028,81 @@ with tabs[2]:
                                    (s in str(r.get(DOSSIER_COL,"")).lower()), axis=1)
         details = details[mask_s.values]
     st.dataframe(details.sort_values(["Periode","Catégorie","Nom"]), use_container_width=True)
+
+    # ---- Fiche & règlements du client (avec ajout de paiement) ----
+    st.markdown("#### 🧾 Fiche & règlements du client")
+    base_live = read_sheet(current_path, client_target_sheet, normalize=False).copy()
+    base_norm = normalize_dataframe(base_live.copy(), visa_ref=visa_ref)
+    if base_norm.empty:
+        st.info("Aucune donnée client.")
+    else:
+        base_norm["_label"] = base_norm.apply(lambda r: f'{r.get(DOSSIER_COL,"")} — {r.get("ID_Client","")} — {r.get("Nom","")} — {r.get("Catégorie","")}/{r.get("Visa","")}', axis=1)
+        labels = base_norm["_label"].tolist()
+        sel_lab = st.selectbox("Sélectionne un client :", labels, index=0, key="detail_sel")
+        sel_id = base_norm.loc[base_norm["_label"]==sel_lab, "ID_Client"].iloc[0]
+
+        rowN = base_norm.loc[base_norm["ID_Client"]==sel_id].iloc[0]
+        k1,k2,k3,k4,k5 = st.columns(5)
+        k1.metric("Honoraires", _fmt_money_us(float(rowN.get(HONO,0.0))))
+        k2.metric("Autres frais", _fmt_money_us(float(rowN.get(AUTRE,0.0))))
+        k3.metric("Total", _fmt_money_us(float(rowN.get(TOTAL,0.0))))
+        k4.metric("Payé", _fmt_money_us(float(rowN.get("Payé",0.0))))
+        k5.metric("Reste", _fmt_money_us(float(rowN.get("Reste",0.0))))
+
+        rlive = base_live.loc[base_live.get("ID_Client","").astype(str)==str(sel_id)]
+        plist = _parse_json_list(rlive.iloc[0].get("Paiements","")) if not rlive.empty else []
+        st.markdown("**Historique des règlements**")
+        if plist:
+            dfp = pd.DataFrame(plist)
+            if "date" in dfp.columns: dfp["date"] = pd.to_datetime(dfp["date"], errors="coerce").dt.date.astype(str)
+            if "amount" in dfp.columns: dfp["Montant (US $)"] = dfp["amount"].apply(lambda x: _fmt_money_us(float(x) if pd.notna(x) else 0.0))
+            for col in ["mode","note"]:
+                if col not in dfp.columns: dfp[col] = ""
+            show_cols = [c for c in ["date","mode","Montant (US $)","note"] if c in dfp.columns]
+            st.table(dfp[show_cols].rename(columns={"date":"Date","mode":"Mode","note":"Note"}))
+        else:
+            st.caption("Aucun paiement enregistré pour ce client.")
+
+        st.markdown("**Ajouter un règlement**")
+        cA, cB, cC, cD = st.columns([1,1,1,2])
+        pay_date = cA.date_input("Date", value=date.today(), key=f"pay_date_{sel_id}")
+        pay_mode = cB.selectbox("Mode", ["CB","Chèque","Espèces","Virement","Venmo","Autre"], key=f"pay_mode_{sel_id}")
+        pay_amt  = cC.number_input("Montant ($)", min_value=0.0, step=10.0, format="%.2f", key=f"pay_amt_{sel_id}")
+        pay_note = cD.text_input("Note", "", key=f"pay_note_{sel_id}")
+        if st.button("💾 Enregistrer ce règlement (dans le fichier)", key=f"pay_add_btn_{sel_id}"):
+            try:
+                live = read_sheet(current_path, client_target_sheet, normalize=False)
+                if "Paiements" not in live.columns: live["Paiements"] = ""
+                idxs = live.index[live.get("ID_Client","").astype(str)==str(sel_id)]
+                if len(idxs)==0:
+                    st.error("Dossier introuvable."); st.stop()
+                i = idxs[0]
+                pay_list = _parse_json_list(live.at[i, "Paiements"])
+                add = float(pay_amt or 0.0)
+                if add <= 0:
+                    st.warning("Le montant doit être > 0.")
+                    st.stop()
+                norm = normalize_dataframe(live.copy(), visa_ref=visa_ref)
+                mask_id = norm["ID_Client"].astype(str) == str(sel_id)
+                reste_curr = float(norm.loc[mask_id, "Reste"].sum()) if mask_id.any() else 0.0
+                if add > reste_curr + 1e-9:
+                    add = reste_curr
+                pay_list.append({"date": str(pay_date), "amount": float(add), "mode": pay_mode, "note": pay_note})
+                live.at[i, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
+                for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+                    if c not in live.columns: live[c] = 0.0
+                total_paid = _sum_payments(pay_list)
+                hono = _to_num(pd.Series([live.at[i, HONO]])).iloc[0] if HONO in live.columns else 0.0
+                autr = _to_num(pd.Series([live.at[i, AUTRE]])).iloc[0] if AUTRE in live.columns else 0.0
+                total = float(hono + autr)
+                live.at[i, "Payé"]  = float(total_paid)
+                live.at[i, "Reste"] = max(total - float(total_paid), 0.0)
+                live.at[i, TOTAL]   = total
+                write_sheet_inplace(current_path, client_target_sheet, live)
+                st.success("Règlement ajouté **dans le fichier**. ✅")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erreur : {e}")
 
 # ================= ESCROW =================
 with tabs[3]:
@@ -984,3 +1168,23 @@ with tabs[3]:
         for col in [HONO,"Payé",ESC_TR,"ESCROW dispo"]:
             show[col] = show[col].map(_fmt_money_us)
         st.dataframe(show, use_container_width=True)
+
+    st.divider()
+    st.markdown("### 🧾 Historique des transferts (journal)")
+    has_journal = live[live[ESC_JR].astype(str).str.len()>0]
+    if has_journal.empty:
+        st.caption("Aucun journal de transfert pour le moment.")
+    else:
+        rows = []
+        for _, r in has_journal.iterrows():
+            entries = _parse_json_list(r[ESC_JR])
+            for e in entries:
+                rows.append({
+                    DOSSIER_COL: r.get(DOSSIER_COL, ""),
+                    "ID_Client": r["ID_Client"], "Nom": r["Nom"], "Visa": r["Visa"],
+                    "Date": r.get("Date"), "Horodatage": e.get("ts"),
+                    "Montant (US $)": float(e.get("amount",0.0)), "Note": e.get("note","")
+                })
+        jdf = pd.DataFrame(rows).sort_values("Horodatage")
+        jdf["Montant (US $)"] = jdf["Montant (US $)"].map(_fmt_money_us)
+        st.dataframe(jdf, use_container_width=True)
