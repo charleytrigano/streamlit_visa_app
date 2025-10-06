@@ -238,19 +238,52 @@ def write_sheet_inplace(path: Path, sheet_to_replace: str, new_df: pd.DataFrame)
 
 # ==== Source (sidebar) — persistance du dernier fichier ====
 st.sidebar.header("Source")
+
+def _find_latest_xlsx(paths: list[Path]) -> Path | None:
+    cand = []
+    for base in paths:
+        try:
+            if base.exists():
+                cand.extend([p for p in base.glob("*.xlsx") if p.is_file()])
+        except Exception:
+            pass
+    if not cand:
+        return None
+    # le plus récent par date de modification
+    return sorted(cand, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+
+# 1) Essaie le workspace
 current_path = load_workspace_path()
+
+# 2) Si rien en workspace, cherche le .xlsx le plus récent dans WORK_DIR et /mnt/data
+if (current_path is None) or (not current_path.exists()):
+    search_dirs = [WORK_DIR] if WORK_DIR else []
+    if Path("/mnt/data").exists():
+        search_dirs.append(Path("/mnt/data"))
+    latest = _find_latest_xlsx(search_dirs)
+    if latest:
+        current_path = latest
+        save_workspace_path(current_path)
+
+# 3) Fallback: fichiers “connus” si toujours rien
+if (current_path is None) or (not current_path.exists()):
+    defaults = [
+        Path("/mnt/data/donnees_visa_clients.xlsx"),
+        Path("/mnt/data/modele_clients_visa.xlsx"),
+        Path("/mnt/data/Visa_Clients_20251001-114844.xlsx"),
+        Path("/mnt/data/visa_analytics_datecol.xlsx"),
+    ]
+    current_path = next((p for p in defaults if p.exists()), None)
+    if current_path:
+        save_workspace_path(current_path)
+
+# Affichage état
 if current_path and current_path.exists():
     st.sidebar.success(f"Fichier courant : {current_path.name}")
 else:
-    defaults = ["/mnt/data/Visa_Clients_20251001-114844.xlsx", "/mnt/data/visa_analytics_datecol.xlsx"]
-    cand = next((Path(p) for p in defaults if Path(p).exists()), None)
-    if cand:
-        current_path = cand
-        save_workspace_path(current_path)
-        st.sidebar.success(f"Fichier courant : {current_path.name}")
-    else:
-        st.sidebar.warning("Aucun fichier trouvé. Importez un Excel pour démarrer.")
+    st.sidebar.warning("Aucun fichier trouvé. Importez un Excel pour démarrer.")
 
+# Uploader = remplacement direct + mémorisation
 up = st.sidebar.file_uploader("Remplacer par un Excel (.xlsx, .xls)", type=["xlsx","xls"])
 if up is not None:
     new_path = copy_upload_to_workspace(up)
@@ -264,11 +297,12 @@ if up is not None:
     st.sidebar.success(f"Nouveau fichier chargé : {new_path.name}")
     st.rerun()
 
+# Si rien, on ne va pas plus loin
 if current_path is None or not current_path.exists():
     st.stop()
 
 # Alimente le bouton de téléchargement avec le fichier courant
-if "download_bytes" not in st.session_state or st.session_state.get("download_name") != current_path.name:
+if ("download_bytes" not in st.session_state) or (st.session_state.get("download_name") != current_path.name):
     try:
         st.session_state["download_bytes"] = current_path.read_bytes()
         st.session_state["download_name"] = current_path.name
@@ -276,6 +310,7 @@ if "download_bytes" not in st.session_state or st.session_state.get("download_na
         st.session_state["download_bytes"] = b""
         st.session_state["download_name"] = current_path.name
 
+# Lecture des feuilles disponibles
 try:
     sheet_names = pd.ExcelFile(current_path).sheet_names
 except Exception as e:
@@ -286,29 +321,7 @@ preferred_order = ["Clients","Visa","Données normalisées"]
 default_sheet = next((s for s in preferred_order if s in sheet_names), sheet_names[0])
 sheet_choice = st.sidebar.selectbox("Feuille (Dashboard)", sheet_names, index=sheet_names.index(default_sheet))
 
-# Feuille CRUD détectée
-valid_client_sheets = []
-for s in sheet_names:
-    try:
-        df_tmp = read_sheet(current_path, s, normalize=False)
-        if is_clients_like(df_tmp): valid_client_sheets.append(s)
-    except Exception:
-        pass
-
-if not valid_client_sheets:
-    st.sidebar.error("Aucune feuille 'clients' valide (au minimum Nom & Visa).")
-    client_target_sheet = None
-else:
-    default_client_sheet = "Clients" if "Clients" in valid_client_sheets else valid_client_sheets[0]
-    if "client_sheet_select" in st.session_state and st.session_state["client_sheet_select"] not in valid_client_sheets:
-        del st.session_state["client_sheet_select"]
-    client_target_sheet = st.sidebar.selectbox(
-        "Feuille *Clients* (cible CRUD)",
-        valid_client_sheets,
-        index=valid_client_sheets.index(default_client_sheet),
-        key="client_sheet_select"
-    )
-
+# Feuille *Clients* (cible CRUD) détectée automatiquement plus bas…
 st.sidebar.caption(f"Édition **directe** dans : `{current_path}`")
 st.sidebar.download_button(
     "⬇️ Télécharger une copie",
@@ -1044,3 +1057,4 @@ with tabs[3]:
         jdf = pd.DataFrame(rows).sort_values("Horodatage")
         jdf["Montant (US $)"] = jdf["Montant (US $)"].map(_fmt_money_us)
         st.dataframe(jdf, use_container_width=True)
+
