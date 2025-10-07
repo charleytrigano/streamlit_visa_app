@@ -625,8 +625,7 @@ with tabs[0]:
     if "Date" in view.columns: view["Date"] = view["Date"].astype(str)
     st.dataframe(view[cols_show], use_container_width=True)
 
-
-# ==========================
+==========================
 # 📊 ANALYSES — Volume & Financier
 # ==========================
 st.markdown("## 📊 Analyses — Volumes & Financier")
