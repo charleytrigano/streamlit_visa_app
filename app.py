@@ -235,7 +235,7 @@ def next_dossier_number(df: pd.DataFrame) -> int:
     return m + 1
 
 def _make_client_id_from_row(row: dict) -> str:
-    # ID client basé sur Nom + Date (tel ignoré)
+    # ID client basé sur Nom + Date
     nom = _safe_str(row.get("Nom"))
     try:
         d = pd.to_datetime(row.get("Date")).date()
@@ -373,95 +373,118 @@ def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) 
 
     return df
 
-# ---------- Hiérarchie Catégorie / Sous-catégories / Visa ----------
+# ---------- HIERARCHIE FIXE (5 niveaux) : Catégorie + Sous1..Sous4 + Visa ----------
+FIXED_HIER_COLS = ["Catégorie", "Sous-catégorie 1", "Sous-catégorie 2", "Sous-catégorie 3", "Sous-catégorie 4", "Visa"]
+
 def read_visa_reference_hier(path: Path) -> pd.DataFrame:
-    """Lit la feuille Visa telle quelle, en conservant toutes les colonnes hiérarchiques."""
+    """Lit la feuille Visa et normalise les colonnes de hiérarchie fixes."""
     try:
         dfv = pd.read_excel(path, sheet_name="Visa")
     except Exception:
-        return pd.DataFrame(columns=["Catégorie","Visa"])
-    def _norm(c):
-        c = str(c).strip()
-        c_low = (c.lower()
-                   .replace("é","e").replace("è","e").replace("ê","e")
-                   .replace("à","a").replace("ô","o").replace("ï","i").replace("ç","c"))
-        return c, c_low
+        return pd.DataFrame(columns=FIXED_HIER_COLS)
+
+    # Normalise noms (accents/variantes)
     rename = {}
     for c in dfv.columns:
-        raw, low = _norm(c)
-        if low in ("categorie","catégorie"): rename[c] = "Catégorie"
-        elif low.startswith("sous-categorie") or low.startswith("sous-catégorie") or low.startswith("sous categorie"):
-            rename[c] = " ".join([w.capitalize() for w in raw.split()])  # ex: "Sous-catégorie 2"
+        raw = str(c).strip()
+        low = (raw.lower()
+                  .replace("é","e").replace("è","e").replace("ê","e")
+                  .replace("à","a").replace("ô","o").replace("ï","i").replace("ç","c"))
+        if low in ("categorie","catégorie"):
+            rename[c] = "Catégorie"
+        elif low in ("sous-categorie 1","sous-catégorie 1","sous categorie 1","sc1","sous cat 1"):
+            rename[c] = "Sous-catégorie 1"
+        elif low in ("sous-categorie 2","sous-catégorie 2","sous categorie 2","sc2","sous cat 2"):
+            rename[c] = "Sous-catégorie 2"
+        elif low in ("sous-categorie 3","sous-catégorie 3","sous categorie 3","sc3","sous cat 3"):
+            rename[c] = "Sous-catégorie 3"
+        elif low in ("sous-categorie 4","sous-catégorie 4","sous categorie 4","sc4","sous cat 4"):
+            rename[c] = "Sous-catégorie 4"
         elif low == "visa":
             rename[c] = "Visa"
     if rename:
         dfv = dfv.rename(columns=rename)
-    for c in dfv.columns:
-        if dfv[c].dtype == "object":
-            dfv[c] = dfv[c].fillna("").astype(str).str.strip()
-    return dfv
 
-def get_hierarchy_columns(df_ref: pd.DataFrame) -> list[str]:
-    """Retourne l’ordre des colonnes hiérarchiques : [Catégorie, Sous-catégorie 1..n, Visa?]."""
-    if df_ref is None or df_ref.empty:
-        return ["Catégorie","Visa"]
-    cols = [c for c in df_ref.columns if isinstance(c, str)]
-    out = []
-    if "Catégorie" in cols: out.append("Catégorie")
-    subs = []
-    for c in cols:
-        low = c.lower().replace("é","e").replace("è","e")
-        if low.startswith("sous-categorie"):
-            subs.append(c)
-    def _num_key(c):
-        m = re.search(r"(\d+)", c)
-        return int(m.group(1)) if m else 999
-    subs = sorted(subs, key=_num_key)
-    out.extend(subs)
-    if "Visa" in cols: out.append("Visa")
-    return out
+    # Ajoute colonnes manquantes
+    for c in FIXED_HIER_COLS:
+        if c not in dfv.columns:
+            dfv[c] = ""
 
-def cascading_visa_picker(df_ref: pd.DataFrame, key_prefix: str, init: dict | None = None) -> dict:
-    """Affiche les selectbox en cascade. Renvoie {col: valeur}. 'Visa' peut être '' si la branche n'a pas de visa."""
+    # Nettoie
+    for c in FIXED_HIER_COLS:
+        dfv[c] = dfv[c].fillna("").astype(str).str.strip()
+
+    # Supprime lignes complètement vides
+    mask_all_empty = (dfv[FIXED_HIER_COLS].apply(lambda s: s.astype(str).str.strip()=="")).all(axis=1)
+    dfv = dfv[~mask_all_empty].reset_index(drop=True)
+
+    return dfv[FIXED_HIER_COLS].copy()
+
+def cascading_visa_picker_fixed(df_ref: pd.DataFrame, key_prefix: str, init: dict | None = None) -> dict:
+    """
+    Affiche EXACTEMENT 5 filtres (Catégorie + Sous1..Sous4) puis montre le Visa résolu s’il existe.
+    Retourne { "Catégorie":..., "Sous-catégorie 1":..., ..., "Sous-catégorie 4":..., "Visa": ... }
+    """
+    result = {k: "" for k in FIXED_HIER_COLS}
     if df_ref is None or df_ref.empty:
-        st.info("Référentiel Visa vide."); return {"Catégorie":"", "Visa":""}
-    cols = get_hierarchy_columns(df_ref)
-    sel = {}
-    df_work = df_ref.copy()
-    for col in cols:
-        # filtre sur les niveaux précédents
-        for prev_col, prev_val in sel.items():
-            if prev_val != "":
-                df_work = df_work[df_work[prev_col].astype(str) == prev_val]
-        options = sorted([v for v in df_work[col].astype(str).unique() if v != ""])
-        if not options:
-            if col == "Visa": sel[col] = ""
-            break
-        default_idx = 0
+        st.info("Référentiel Visa vide."); 
+        return result
+
+    # Niveaux hiérarchiques sans Visa
+    levels = FIXED_HIER_COLS[:-1]  # 5 filtres
+    dfw = df_ref.copy()
+
+    # Sélecteurs en cascade
+    for col in levels:
+        # Filtrer le dataframe en fonction des sélections précédentes
+        for prev in levels:
+            val = result.get(prev, "")
+            if val and prev in dfw.columns:
+                dfw = dfw[dfw[prev] == val]
+            if prev == col:
+                break
+        # Options possibles pour ce niveau, uniquement non vides
+        options = sorted([v for v in dfw[col].astype(str).unique() if v != ""])
+        # Valeur par défaut (si init)
+        idx = 0
         if init and init.get(col, "") in options:
-            default_idx = options.index(init[col])
-        sel[col] = st.selectbox(col, [""] + options, index=default_idx+1 if options else 0, key=f"{key_prefix}_{col}")
-        if sel[col] == "":
-            for c2 in cols[cols.index(col)+1:]:
-                sel[c2] = ""
-            break
-    for c in cols:
-        sel.setdefault(c, "")
-    sel.setdefault("Catégorie",""); sel.setdefault("Visa","")
-    return sel
+            idx = options.index(init[col]) + 1
+        result[col] = st.selectbox(col, [""] + options, index=idx, key=f"{key_prefix}_{col}")
 
-def visas_autorises_depuis_cascade(df_ref_full: pd.DataFrame, sel_path: dict) -> list[str]:
-    """Calcule la liste des visas autorisés à partir de la sélection hiérarchique."""
-    if df_ref_full is None or df_ref_full.empty:
-        return []
-    cols = get_hierarchy_columns(df_ref_full)
-    dfw = df_ref_full.copy()
-    for c in cols:
-        val = sel_path.get(c, "")
+        # Si rien choisi, on ne restreint pas sur ce niveau pour le suivant
+        if result[col] == "":
+            continue
+        else:
+            dfw = dfw[dfw[col] == result[col]]
+
+    # Déduire VISA à partir du chemin choisi
+    dfvv = df_ref.copy()
+    for col in levels:
+        val = result[col]
         if val:
-            dfw = dfw[dfw[c].astype(str) == val]
-    if "Visa" not in dfw.columns:
+            dfvv = dfvv[dfvv[col] == val]
+    visas = sorted([v for v in dfvv["Visa"].astype(str).unique() if v != ""])
+    result["Visa"] = visas[0] if len(visas) == 1 else ("" if len(visas)==0 else visas[0])
+
+    # Affichage informatif du visa (non bloquant)
+    if len(visas) == 0:
+        st.caption("Visa : (aucun pour ce chemin)")
+    elif len(visas) == 1:
+        st.caption(f"Visa : **{visas[0]}**")
+    else:
+        st.caption(f"Visa possibles : {', '.join(visas)} (prend le 1er par défaut)")
+
+    return result
+
+def visas_autorises_depuis_fixed(df_ref: pd.DataFrame, sel_path: dict) -> list[str]:
+    """Retourne la liste des visas compatibles avec le chemin de 5 filtres."""
+    if df_ref is None or df_ref.empty:
         return []
+    dfw = df_ref.copy()
+    for col in FIXED_HIER_COLS[:-1]:
+        val = _safe_str(sel_path.get(col, ""))
+        if val:
+            dfw = dfw[dfw[col] == val]
     visas = sorted([v for v in dfw["Visa"].astype(str).unique() if v != ""])
     return visas
 
@@ -552,73 +575,32 @@ st.title("🛂 Visa Manager — US $")
 # ---------- Onglets ----------
 tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses", "ESCROW"])
 
-# ---------- Référentiel Visa (pour cascade & mapping) ----------
-visa_ref_full = read_visa_reference_hier(current_path)
-visa_ref_simple = read_visa_reference(current_path)
+# ---------- Référentiel Visa (pour cascade fixe) ----------
+visa_ref_full = read_visa_reference_hier(current_path)   # Catégorie + Sous1..Sous4 + Visa
+visa_ref_simple = read_visa_reference(current_path)      # Catégorie/Visa simples
 
 # ================= DASHBOARD =================
 with tabs[0]:
     df_raw = read_sheet(current_path, sheet_choice, normalize=False)
 
-    # Si on est sur la feuille Visa, gestion CRUD basique de ce référentiel
+    # Si on est sur la feuille Visa, gestion CRUD minimaliste de ce référentiel
     if looks_like_reference(df_raw) and sheet_choice == "Visa":
-        st.subheader("📄 Référentiel — Catégories / Sous-catégories / Visa")
+        st.subheader("📄 Référentiel — Catégories / Sous-catégories (1..4) / Visa")
         st.dataframe(visa_ref_full, use_container_width=True)
-
-        st.markdown("### ✏️ Gestion simple (Catégorie / Visa)")
-        base = visa_ref_full.copy()
-        if "Catégorie" not in base.columns: base["Catégorie"] = ""
-        if "Visa" not in base.columns: base["Visa"] = ""
-        base_min = base[["Catégorie","Visa"]].copy()
-
-        mode = st.radio("Action", ["Ajouter", "Renommer", "Supprimer"], horizontal=True, key="visa_ref_action")
-        options = base_min.assign(_label=base_min["Catégorie"].str.cat(base_min["Visa"], sep=" — "))
-
-        if mode == "Ajouter":
-            cA, cB = st.columns(2)
-            new_cat = cA.text_input("Catégorie").strip()
-            new_vis = cB.text_input("Visa (facultatif)").strip()
-            if st.button("➕ Ajouter"):
-                out = pd.concat([visa_ref_full, pd.DataFrame([{"Catégorie": new_cat, "Visa": new_vis}])], ignore_index=True)
-                write_sheet_inplace(current_path, "Visa", out); st.success("Ajouté."); st.rerun()
-
-        elif mode == "Renommer":
-            if options.empty: st.info("Aucune entrée.")
-            else:
-                sel_lab = st.selectbox("Sélection (Catégorie — Visa)", options["_label"].tolist())
-                row = options.loc[options["_label"]==sel_lab].iloc[0]
-                cA, cB = st.columns(2)
-                new_cat = cA.text_input("Nouvelle catégorie", value=row["Catégorie"]).strip()
-                new_vis = cB.text_input("Nouveau visa", value=row["Visa"]).strip()
-                if st.button("📝 Renommer"):
-                    out = visa_ref_full.copy()
-                    mask = (out["Catégorie"]==row["Catégorie"]) & (out["Visa"]==row["Visa"])
-                    out.loc[mask, ["Catégorie","Visa"]] = [new_cat, new_vis]
-                    write_sheet_inplace(current_path, "Visa", out); st.success("Renommé."); st.rerun()
-
-        else:  # Supprimer
-            if options.empty: st.info("Aucune entrée.")
-            else:
-                sel_lab = st.selectbox("Sélection (Catégorie — Visa)", options["_label"].tolist())
-                st.error("⚠️ Action irréversible (ligne correspondante).")
-                if st.button("🗑️ Supprimer"):
-                    cat0, vis0 = sel_lab.split(" — ", 1)
-                    out = visa_ref_full[~((visa_ref_full["Catégorie"]==cat0) & (visa_ref_full["Visa"]==vis0))].reset_index(drop=True)
-                    write_sheet_inplace(current_path, "Visa", out); st.success("Supprimé."); st.rerun()
         st.stop()
 
     # Données normalisées pour Dashboard
     df = read_sheet(current_path, sheet_choice, normalize=True, visa_ref=visa_ref_simple)
 
-    # --- Filtres (cascade + "Afficher tous") ---
-    st.markdown("### 🔎 Filtres")
+    # --- Filtres : EXACTEMENT 5 sélecteurs fixes ---
+    st.markdown("### 🔎 Filtres (Catégorie → Sous-catégorie 1 → 2 → 3 → 4)")
     with st.container():
         cTopL, cTopR = st.columns([1,2])
         show_all = cTopL.checkbox("Afficher tous les dossiers", value=False, key="dash_show_all")
-        cTopL.caption("Sélection hiérarchique (Catégorie → Sous-catégories → Visa)")
+        cTopL.caption("Sélection hiérarchique (5 filtres fixes) pour découvrir le Visa")
         with cTopL:
-            sel_path_dash = cascading_visa_picker(visa_ref_full, key_prefix="dash_cascade")
-        visas_aut = visas_autorises_depuis_cascade(visa_ref_full, sel_path_dash)
+            sel_path_dash = cascading_visa_picker_fixed(visa_ref_full, key_prefix="dash_fixed")
+        visas_aut = visas_autorises_depuis_fixed(visa_ref_full, sel_path_dash)
 
         cR1, cR2, cR3 = cTopR.columns(3)
         years  = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
@@ -629,12 +611,13 @@ with tabs[0]:
 
     f = df.copy()
     if not show_all:
-        hier_cols = get_hierarchy_columns(visa_ref_full)
-        for col in hier_cols:
-            val = sel_path_dash.get(col, "")
-            if val and col in f.columns:
-                f = f[f[col].astype(str) == val]
-        if (not sel_path_dash.get("Visa","")) and visas_aut and "Visa" in f.columns:
+        for col in FIXED_HIER_COLS[:-1]:  # 5 filtres
+            if col in f.columns:
+                val = _safe_str(sel_path_dash.get(col, ""))
+                if val:
+                    f = f[f[col].astype(str) == val]
+        # Si pas de Visa explicitement choisi, on limite aux visas autorisés du chemin
+        if "Visa" in f.columns and visas_aut:
             f = f[f["Visa"].astype(str).isin(visas_aut)]
 
     if "Date" in f.columns and sel_years:
@@ -665,7 +648,8 @@ with tabs[0]:
     st.divider()
     st.subheader("📋 Données (aperçu)")
     cols_show = [c for c in [
-        DOSSIER_COL,"ID_Client","Nom","Date","Mois","Catégorie","Visa",
+        DOSSIER_COL,"ID_Client","Nom","Date","Mois",
+        "Catégorie","Sous-catégorie 1","Sous-catégorie 2","Sous-catégorie 3","Sous-catégorie 4","Visa",
         HONO, AUTRE, TOTAL, "Payé","Reste",
         S_ENVOYE, D_ENVOYE, S_APPROUVE, D_APPROUVE, S_RFE, D_RFE, S_REFUSE, D_REFUSE, S_ANNULE, D_ANNULE
     ] if c in f.columns]
@@ -697,11 +681,14 @@ with tabs[1]:
     # --- CREER ---
     if action == "Créer":
         st.markdown("### ➕ Nouveau client")
-        for must in [DOSSIER_COL,"ID_Client","Nom","Date","Mois","Catégorie","Visa",
+        # Colonnes minimales
+        for must in [DOSSIER_COL,"ID_Client","Nom","Date","Mois",
+                     "Catégorie","Sous-catégorie 1","Sous-catégorie 2","Sous-catégorie 3","Sous-catégorie 4","Visa",
                      HONO, AUTRE, TOTAL, "Payé","Reste", ESC_TR, ESC_JR] + STATUS_COLS + STATUS_DATES + ["Paiements"]:
             if must not in live_raw.columns:
                 if must in {HONO, AUTRE, TOTAL, "Payé","Reste", ESC_TR}: live_raw[must]=0.0
-                elif must in {"Paiements", ESC_JR, "Nom","Date","Mois","Catégorie","Visa"}: live_raw[must]=""
+                elif must in {"Paiements", ESC_JR, "Nom","Date","Mois","Catégorie","Sous-catégorie 1","Sous-catégorie 2","Sous-catégorie 3","Sous-catégorie 4","Visa"}:
+                    live_raw[must]=""
                 elif must in STATUS_DATES: live_raw[must]=""
                 elif must in STATUS_COLS: live_raw[must]=False
                 elif must==DOSSIER_COL: live_raw[must]=0
@@ -714,10 +701,10 @@ with tabs[1]:
             nom_in = c1.text_input("Nom")
             d = c2.date_input("Date", value=date.today())
 
-            st.caption("Sélection hiérarchique du visa")
-            sel_path = cascading_visa_picker(visa_ref_full, key_prefix="create_cascade")
-            sel_cat = sel_path.get("Catégorie","")
-            visa    = sel_path.get("Visa","")
+            st.caption("Sélection hiérarchique (5 filtres fixes)")
+            sel_path = cascading_visa_picker_fixed(visa_ref_full, key_prefix="create_fixed")
+            cat = sel_path.get("Catégorie",""); sc1 = sel_path.get("Sous-catégorie 1",""); sc2 = sel_path.get("Sous-catégorie 2","")
+            sc3 = sel_path.get("Sous-catégorie 3",""); sc4 = sel_path.get("Sous-catégorie 4",""); visa = sel_path.get("Visa","")
 
             c5,c6 = st.columns(2)
             honoraires = c5.number_input(HONO, value=0.0, step=10.0, format="%.2f")
@@ -758,7 +745,9 @@ with tabs[1]:
             total = float((honoraires or 0.0)+(autres or 0.0))
             new_row = {
                 DOSSIER_COL: int(next_num), "ID_Client": new_id, "Nom": use_name,
-                "Date": str(d), "Mois": f"{d.month:02d}", "Catégorie": _safe_str(sel_cat), "Visa": _safe_str(visa),
+                "Date": str(d), "Mois": f"{d.month:02d}",
+                "Catégorie": _safe_str(cat), "Sous-catégorie 1": _safe_str(sc1), "Sous-catégorie 2": _safe_str(sc2),
+                "Sous-catégorie 3": _safe_str(sc3), "Sous-catégorie 4": _safe_str(sc4), "Visa": _safe_str(visa),
                 HONO: float(honoraires or 0.0), AUTRE: float(autres or 0.0),
                 TOTAL: total, "Payé": 0.0, "Reste": max(total, 0.0),
                 ESC_TR: 0.0, ESC_JR: "", "Paiements": "",
@@ -799,11 +788,18 @@ with tabs[1]:
                     d_init = date.today()
                 d = c2.date_input("Date", value=d_init, key=f"edit_date_{sel_rowid}")
 
-                st.caption("Sélection hiérarchique du visa")
-                init_path = {"Catégorie": _safe_str(init.get("Catégorie")), "Visa": _safe_str(init.get("Visa"))}
-                sel_path = cascading_visa_picker(visa_ref_full, key_prefix=f"edit_cascade_{sel_rowid}", init=init_path)
-                sel_cat = sel_path.get("Catégorie","")
-                visa    = sel_path.get("Visa","")
+                st.caption("Sélection hiérarchique (5 filtres fixes)")
+                init_path = {
+                    "Catégorie": _safe_str(init.get("Catégorie")),
+                    "Sous-catégorie 1": _safe_str(init.get("Sous-catégorie 1")),
+                    "Sous-catégorie 2": _safe_str(init.get("Sous-catégorie 2")),
+                    "Sous-catégorie 3": _safe_str(init.get("Sous-catégorie 3")),
+                    "Sous-catégorie 4": _safe_str(init.get("Sous-catégorie 4")),
+                    "Visa": _safe_str(init.get("Visa")),
+                }
+                sel_path = cascading_visa_picker_fixed(visa_ref_full, key_prefix=f"edit_fixed_{sel_rowid}", init=init_path)
+                cat = sel_path.get("Catégorie",""); sc1 = sel_path.get("Sous-catégorie 1",""); sc2 = sel_path.get("Sous-catégorie 2","")
+                sc3 = sel_path.get("Sous-catégorie 3",""); sc4 = sel_path.get("Sous-catégorie 4",""); visa = sel_path.get("Visa","")
 
                 def _f(v, alt=0.0):
                     try: return float(v)
@@ -872,7 +868,9 @@ with tabs[1]:
 
                 total = float((honoraires or 0.0)+(autres or 0.0))
                 for c in [HONO, AUTRE, TOTAL, "Payé","Reste","Paiements", ESC_TR, ESC_JR,
-                          "Nom","Date","Mois","Catégorie","Visa"] + STATUS_COLS + STATUS_DATES + [DOSSIER_COL]:
+                          "Nom","Date","Mois",
+                          "Catégorie","Sous-catégorie 1","Sous-catégorie 2","Sous-catégorie 3","Sous-catégorie 4","Visa"
+                          ] + STATUS_COLS + STATUS_DATES + [DOSSIER_COL]:
                     if c not in live.columns:
                         live[c] = 0.0 if c in [HONO,AUTRE,TOTAL,"Payé","Reste",ESC_TR] else ""
                 for b in STATUS_COLS:
@@ -881,7 +879,11 @@ with tabs[1]:
                 live.at[t_idx,"Nom"]=_safe_str(nom)
                 live.at[t_idx,"Date"]=str(d)
                 live.at[t_idx,"Mois"]=f"{d.month:02d}"
-                live.at[t_idx,"Catégorie"]=_safe_str(sel_cat)
+                live.at[t_idx,"Catégorie"]= _safe_str(cat)
+                live.at[t_idx,"Sous-catégorie 1"]= _safe_str(sc1)
+                live.at[t_idx,"Sous-catégorie 2"]= _safe_str(sc2)
+                live.at[t_idx,"Sous-catégorie 3"]= _safe_str(sc3)
+                live.at[t_idx,"Sous-catégorie 4"]= _safe_str(sc4)
                 live.at[t_idx,"Visa"]=_safe_str(visa if isinstance(visa,str) else "")
                 live.at[t_idx, HONO]=float(honoraires or 0.0)
                 live.at[t_idx, AUTRE]=float(autres or 0.0)
@@ -995,7 +997,7 @@ with tabs[1]:
                 write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
                 st.success("Client supprimé **dans le fichier**. ✅"); st.rerun()
 
-# ================= ANALYSES (comparaisons + filtres cascade) =================
+# ================= ANALYSES (avec 5 filtres) =================
 with tabs[2]:
     st.subheader("📊 Analyses — Volumes, Financier & Comparaisons")
     if client_target_sheet is None:
@@ -1006,14 +1008,14 @@ with tabs[2]:
     dfA = normalize_dataframe(dfA_raw, visa_ref=visa_ref_simple).copy()
     if dfA.empty: st.info("Aucune donnée pour analyser."); st.stop()
 
-    # Filtres (cascade + "Afficher tous")
+    # Filtres fixes (5 niveaux)
     with st.container():
         cL, cR = st.columns([1,2])
         show_all_A = cL.checkbox("Afficher tous les dossiers", value=False, key="anal_show_all")
-        cL.caption("Sélection hiérarchique (Catégorie → Sous-catégories → Visa)")
+        cL.caption("Sélection hiérarchique (5 filtres fixes)")
         with cL:
-            sel_path_anal = cascading_visa_picker(read_visa_reference_hier(current_path), key_prefix="anal_cascade")
-        visas_aut_A = visas_autorises_depuis_cascade(read_visa_reference_hier(current_path), sel_path_anal)
+            sel_path_anal = cascading_visa_picker_fixed(read_visa_reference_hier(current_path), key_prefix="anal_fixed")
+        visas_aut_A = visas_autorises_depuis_fixed(read_visa_reference_hier(current_path), sel_path_anal)
 
         cR1, cR2, cR3 = cR.columns(3)
         yearsA  = sorted({d.year for d in dfA["Date"] if pd.notna(d)}) if "Date" in dfA.columns else []
@@ -1024,12 +1026,12 @@ with tabs[2]:
 
     fA = dfA.copy()
     if not show_all_A:
-        hier_cols = get_hierarchy_columns(read_visa_reference_hier(current_path))
-        for col in hier_cols:
-            val = sel_path_anal.get(col, "")
-            if val and col in fA.columns:
-                fA = fA[fA[col].astype(str) == val]
-        if (not sel_path_anal.get("Visa","")) and visas_aut_A and "Visa" in fA.columns:
+        for col in FIXED_HIER_COLS[:-1]:
+            if col in fA.columns:
+                val = _safe_str(sel_path_anal.get(col, ""))
+                if val:
+                    fA = fA[fA[col].astype(str) == val]
+        if "Visa" in fA.columns and visas_aut_A:
             fA = fA[fA["Visa"].astype(str).isin(visas_aut_A)]
 
     if "Date" in fA.columns and sel_years:
@@ -1195,7 +1197,9 @@ with tabs[2]:
 
     st.divider()
     st.markdown("### 🔎 Détails (clients)")
-    details_cols = [c for c in ["Periode",DOSSIER_COL,"ID_Client","Nom","Catégorie","Visa","Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut","Année","MoisNum"] if c in fA.columns]
+    details_cols = [c for c in ["Periode",DOSSIER_COL,"ID_Client","Nom",
+                                "Catégorie","Sous-catégorie 1","Sous-catégorie 2","Sous-catégorie 3","Sous-catégorie 4","Visa",
+                                "Date", HONO, AUTRE, TOTAL, "Payé","Reste","Statut","Année","MoisNum"] if c in fA.columns]
     details = fA[details_cols].copy()
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
         if col in details.columns: details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
