@@ -1,4 +1,4 @@
-# app.py — COMPLET (2/2) — Partie 1
+# app.py — COMPLET (Partie 1/2)
 import io, json, hashlib
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -10,7 +10,7 @@ import altair as alt
 alt.data_transformers.disable_max_rows()
 alt.renderers.set_embed_options(actions=False)
 st.set_page_config(page_title="📊 Visas — Edition directe + ESCROW + Analyses", layout="wide")
-st.title("📊 Visas — Edition DIRECTE du fichier (ESCROW + Analyses)")
+st.title("📊 Visas — Edition DIRECTE du fichier (ESCROW + Analyses + Cascade)")
 
 # -------- Constantes colonnes --------
 HONO   = "Honoraires (US $)"
@@ -161,7 +161,7 @@ def next_dossier_number(df_existing: pd.DataFrame) -> int:
     s = _to_int(df_existing[DOSSIER_COL]); s = s[s > 0]
     return int(s.max() + 1) if not s.empty else DOSSIER_START
 
-# Référentiel Catégorie↔Visa
+# ---------- Référentiel Visa : plat & hiérarchique ----------
 def read_visa_reference(path: Path) -> pd.DataFrame:
     try: dfv = pd.read_excel(path, sheet_name="Visa")
     except Exception: return pd.DataFrame(columns=["Catégorie","Visa"])
@@ -175,13 +175,87 @@ def read_visa_reference(path: Path) -> pd.DataFrame:
         if c in dfv.columns: dfv[c] = dfv[c].astype(str).fillna("").str.strip()
     return dfv[["Catégorie","Visa"]]
 
+# --- Hiérarchie complète : Catégorie, Sous-catégorie 1..n, Visa (facultatif) ---
+def read_visa_reference_hier(path: Path) -> pd.DataFrame:
+    try:
+        dfv = pd.read_excel(path, sheet_name="Visa")
+    except Exception:
+        return pd.DataFrame(columns=["Catégorie","Visa"])
+    def _norm(c):
+        c = str(c).strip()
+        c_low = (c.lower()
+                   .replace("é","e").replace("è","e").replace("ê","e")
+                   .replace("à","a").replace("ô","o").replace("ï","i")
+                   .replace("ç","c"))
+        return c, c_low
+    rename = {}
+    for c in dfv.columns:
+        raw, low = _norm(c)
+        if low in ("categorie","catégorie"): rename[c] = "Catégorie"
+        elif low.startswith("sous-categorie") or low.startswith("sous-catégorie") or low.startswith("sous categorie"):
+            rename[c] = " ".join([w.capitalize() for w in raw.split()])
+        elif low == "visa": rename[c] = "Visa"
+    if rename: dfv = dfv.rename(columns=rename)
+    # trim
+    for c in dfv.columns:
+        if dfv[c].dtype == "object":
+            dfv[c] = dfv[c].fillna("").astype(str).str.strip()
+    return dfv
+
+def get_hierarchy_columns(df_ref: pd.DataFrame) -> list[str]:
+    cols = [c for c in df_ref.columns if isinstance(c, str)]
+    out = []
+    if "Catégorie" in cols: out.append("Catégorie")
+    subs = []
+    for c in cols:
+        low = c.lower().replace("é","e").replace("è","e")
+        if low.startswith("sous-categorie"): subs.append(c)
+    def _num_key(c):
+        import re
+        m = re.search(r"(\d+)", c)
+        return int(m.group(1)) if m else 999
+    subs = sorted(subs, key=_num_key)
+    out.extend(subs)
+    if "Visa" in cols: out.append("Visa")
+    return out
+
+def cascading_visa_picker(df_ref: pd.DataFrame, key_prefix: str, init: dict | None = None) -> dict:
+    """Sélecteurs en cascade. Retourne {col: valeur} (Visa peut être '')."""
+    if df_ref is None or df_ref.empty:
+        st.info("Référentiel Visa vide."); return {"Catégorie":"", "Visa":""}
+    cols = get_hierarchy_columns(df_ref)
+    sel = {}
+    df_work = df_ref.copy()
+    for col in cols:
+        # filtre par choix précédents
+        for prev_col, prev_val in sel.items():
+            if prev_val != "":
+                df_work = df_work[df_work[prev_col].astype(str) == prev_val]
+        # options du niveau
+        options = sorted([v for v in df_work[col].astype(str).unique() if v != ""])
+        if not options:
+            if col == "Visa": sel[col] = ""
+            break
+        # défaut
+        default_idx = 0
+        if init and init.get(col, "") in options:
+            default_idx = options.index(init[col])
+        sel[col] = st.selectbox(col, [""] + options, index=default_idx+1 if options else 0, key=f"{key_prefix}_{col}")
+        if sel[col] == "":
+            for c2 in cols[cols.index(col)+1:]:
+                sel[c2] = ""
+            break
+    for c in cols: sel.setdefault(c, "")
+    sel.setdefault("Catégorie",""); sel.setdefault("Visa","")
+    return sel
+
+# -------- Normalisation des feuilles clients --------
 def map_category_from_ref(visalib: str, ref_df: pd.DataFrame) -> str:
     if ref_df is None or ref_df.empty: return ""
     tmp = ref_df[ref_df["Visa"].astype(str).str.strip().str.lower() == _safe_str(visalib).lower()]
     if tmp.empty: return ""
     return _safe_str(tmp.iloc[0]["Catégorie"])
 
-# Normalisation
 def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) -> pd.DataFrame:
     df = df.copy()
     df["Date"] = _to_date(df["Date"]) if "Date" in df.columns else pd.NaT
@@ -236,7 +310,7 @@ def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) 
     if ESC_JR not in df.columns: df[ESC_JR]=""
     # Dossier N
     df = ensure_dossier_numbers(df)
-    # Nettoyage visibles (on retire Téléphone/Email si présents)
+    # Nettoyage (on retire Téléphone/Email si présents)
     for dropcol in ["Telephone","Email"]:
         if dropcol in df.columns: df = df.drop(columns=[dropcol])
     ordered = [DOSSIER_COL,"ID_Client","Nom","Date","Mois","Catégorie","Visa",
@@ -245,7 +319,7 @@ def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) 
     cols = [c for c in ordered if c in df.columns] + [c for c in df.columns if c not in ordered]
     return df[cols]
 
-# IO Excel
+# -------- IO Excel --------
 def read_sheet(path: Path, sheet: str, normalize: bool, visa_ref: pd.DataFrame | None = None) -> pd.DataFrame:
     xls = pd.ExcelFile(path)
     if sheet not in xls.sheet_names:
@@ -281,7 +355,7 @@ def write_sheet_inplace(path: Path, sheet_to_replace: str, new_df: pd.DataFrame)
     except Exception:
         pass
 
-# -------- Source (sidebar) --------
+# -------- Sidebar / Source --------
 st.sidebar.header("Source")
 def _find_latest_xlsx(paths: list[Path]) -> Path | None:
     cand = []
@@ -302,7 +376,8 @@ if (current_path is None) or (not current_path.exists()):
     defaults = [Path("/mnt/data/donnees_visa_clients.xlsx"),
                 Path("/mnt/data/modele_clients_visa.xlsx"),
                 Path("/mnt/data/Visa_Clients_20251001-114844.xlsx"),
-                Path("/mnt/data/visa_analytics_datecol.xlsx")]
+                Path("/mnt/data/visa_analytics_datecol.xlsx"),
+                Path("/mnt/data/donnees_visa_clients1.xlsx")]
     current_path = next((p for p in defaults if p.exists()), None)
     if current_path: save_workspace_path(current_path)
 
@@ -375,105 +450,115 @@ st.sidebar.download_button(
 # -------- Onglets --------
 tabs = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses", "ESCROW"])
 
+
 # app.py — COMPLET (2/2) — Partie 2
+# (Nécessite en Partie 1 : read_visa_reference_hier, get_hierarchy_columns, cascading_visa_picker)
+
+# ---------- utilitaire filtre à partir de la cascade ----------
+def visas_autorises_depuis_cascade(df_ref_full: pd.DataFrame, sel_path: dict) -> list[str]:
+    """À partir de la sélection hiérarchique, calcule la liste des visas autorisés.
+       Si la branche n'a pas de 'Visa', on renvoie [] (aucun filtre sur Visa).
+    """
+    if df_ref_full is None or df_ref_full.empty:
+        return []
+    cols = get_hierarchy_columns(df_ref_full)
+    dfw = df_ref_full.copy()
+    for c in cols:
+        val = sel_path.get(c, "")
+        if val:
+            dfw = dfw[dfw[c].astype(str) == val]
+    if "Visa" not in dfw.columns:
+        return []
+    visas = sorted([v for v in dfw["Visa"].astype(str).unique() if v != ""])
+    return visas
 
 # ================= DASHBOARD =================
 with tabs[0]:
-    visa_ref = read_visa_reference(current_path)
+    visa_ref_full = read_visa_reference_hier(current_path)
+    visa_ref_simple = read_visa_reference(current_path)
     df_raw = read_sheet(current_path, sheet_choice, normalize=False)
 
     # Référentiel Visa (CRUD complet si on est sur la feuille Visa)
     if looks_like_reference(df_raw) and sheet_choice == "Visa":
-        st.subheader("📄 Référentiel — Catégories & Types de Visa")
-        df_ref = df_raw.copy()
-        if "Visa" not in df_ref.columns: df_ref["Visa"] = ""
-        if "Catégorie" not in df_ref.columns: df_ref["Catégorie"] = ""
-        df_ref = df_ref[["Catégorie","Visa"]].astype(str).fillna("").applymap(lambda s: s.strip())
+        st.subheader("📄 Référentiel — Catégories / Sous-catégories / Visa")
+        df_ref = visa_ref_full.copy()
+        if df_ref.empty:
+            st.info("Feuille Visa vide.")
+        else:
+            st.dataframe(df_ref, use_container_width=True)
 
-        # Filtres
-        c1, c2 = st.columns(2)
-        cats = sorted([c for c in df_ref["Catégorie"].astype(str).unique() if c!=""])
-        visas = sorted([v for v in df_ref["Visa"].astype(str).unique() if v!=""])
-        f_cat = c1.multiselect("Filtrer Catégorie", cats, default=[])
-        f_vis = c2.multiselect("Filtrer Visa", visas, default=[])
-        view = df_ref.copy()
-        if f_cat: view = view[view["Catégorie"].isin(f_cat)]
-        if f_vis: view = view[view["Visa"].isin(f_vis)]
-        st.dataframe(view, use_container_width=True)
+        st.markdown("### ✏️ Gestion simple (Catégorie / Visa)")
+        # On propose la gestion de base Catégorie/Visa (les sous-catégories restent telles quelles)
+        base = df_ref.copy()
+        # Assure au moins ces deux colonnes pour l'édition minimale :
+        if "Catégorie" not in base.columns: base["Catégorie"] = ""
+        if "Visa" not in base.columns: base["Visa"] = ""
+        base_min = base[["Catégorie","Visa"]].copy()
 
-        st.markdown("### ✏️ Gérer le référentiel")
         mode = st.radio("Action", ["Ajouter", "Renommer", "Supprimer"], horizontal=True, key="visa_ref_action")
-        options = df_ref.assign(_label=df_ref["Catégorie"].str.cat(df_ref["Visa"], sep=" — "))
+        options = base_min.assign(_label=base_min["Catégorie"].str.cat(base_min["Visa"], sep=" — "))
 
         if mode == "Ajouter":
             cA, cB = st.columns(2)
             new_cat = cA.text_input("Catégorie").strip()
-            new_vis = cB.text_input("Visa").strip()
+            new_vis = cB.text_input("Visa (facultatif)").strip()
             if st.button("➕ Ajouter"):
-                if not new_vis:
-                    st.warning("Visa requis.")
-                else:
-                    dup = ((df_ref["Catégorie"].str.lower()==new_cat.lower()) & (df_ref["Visa"].str.lower()==new_vis.lower()))
-                    if dup.any(): st.info("Déjà présent.")
-                    else:
-                        out = pd.concat([df_ref, pd.DataFrame([{"Catégorie": new_cat, "Visa": new_vis}])], ignore_index=True)
-                        write_sheet_inplace(current_path, "Visa", out); st.success("Ajouté."); st.rerun()
+                out = pd.concat([df_ref, pd.DataFrame([{"Catégorie": new_cat, "Visa": new_vis}])], ignore_index=True)
+                write_sheet_inplace(current_path, "Visa", out); st.success("Ajouté."); st.rerun()
 
         elif mode == "Renommer":
             if options.empty: st.info("Aucune entrée.")
             else:
-                sel_lab = st.selectbox("Sélection", options["_label"].tolist())
+                sel_lab = st.selectbox("Sélection (Catégorie — Visa)", options["_label"].tolist())
                 row = options.loc[options["_label"]==sel_lab].iloc[0]
                 cA, cB = st.columns(2)
                 new_cat = cA.text_input("Nouvelle catégorie", value=row["Catégorie"]).strip()
                 new_vis = cB.text_input("Nouveau visa", value=row["Visa"]).strip()
                 if st.button("📝 Renommer"):
-                    if not new_vis: st.warning("Visa requis.")
-                    else:
-                        out = df_ref.copy()
-                        mask = (out["Catégorie"]==row["Catégorie"]) & (out["Visa"]==row["Visa"])
-                        out.loc[mask, ["Catégorie","Visa"]] = [new_cat, new_vis]
-                        write_sheet_inplace(current_path, "Visa", out); st.success("Renommé."); st.rerun()
+                    out = df_ref.copy()
+                    mask = (out["Catégorie"]==row["Catégorie"]) & (out["Visa"]==row["Visa"])
+                    out.loc[mask, ["Catégorie","Visa"]] = [new_cat, new_vis]
+                    write_sheet_inplace(current_path, "Visa", out); st.success("Renommé."); st.rerun()
 
         else:  # Supprimer
             if options.empty: st.info("Aucune entrée.")
             else:
-                sel_lab = st.selectbox("Sélection", options["_label"].tolist())
-                st.error("⚠️ Action irréversible.")
+                sel_lab = st.selectbox("Sélection (Catégorie — Visa)", options["_label"].tolist())
+                st.error("⚠️ Action irréversible (ligne correspondante).")
                 if st.button("🗑️ Supprimer"):
-                    out = df_ref[options["_label"]!=sel_lab].reset_index(drop=True)
+                    cat0, vis0 = sel_lab.split(" — ", 1)
+                    out = df_ref[~((df_ref["Catégorie"]==cat0) & (df_ref["Visa"]==vis0))].reset_index(drop=True)
                     write_sheet_inplace(current_path, "Visa", out); st.success("Supprimé."); st.rerun()
         st.stop()
 
-    # Données normalisées
-    df = read_sheet(current_path, sheet_choice, normalize=True, visa_ref=read_visa_reference(current_path))
+    # Données normalisées pour affichage Dashboard
+    df = read_sheet(current_path, sheet_choice, normalize=True, visa_ref=visa_ref_simple)
 
-    # Filtres
+    # Filtres (avec cascade)
+    st.markdown("### 🔎 Filtres")
     with st.container():
-        c1, c2, c3 = st.columns(3)
-        cats = sorted(df["Catégorie"].dropna().astype(str).unique()) if "Catégorie" in df.columns else []
-        visas = sorted(df["Visa"].dropna().astype(str).unique()) if "Visa" in df.columns else []
-        sel_cats  = c1.multiselect("Catégorie", cats, default=[])
-        sel_visas = c2.multiselect("Type de visa", visas, default=[])
-        years = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
-        sel_years = c3.multiselect("Année", years, default=[])
-        d1, d2, d3 = st.columns(3)
-        months = sorted(df["Mois"].dropna().unique()) if "Mois" in df.columns else []
-        sel_months = d1.multiselect("Mois (MM)", months, default=[])
-        include_na_dates = d2.checkbox("Inclure lignes sans date", value=True)
-        def make_slider(_df, col, lab, container):
-            if col not in _df.columns or _df[col].dropna().empty:
-                container.caption(f"{lab} : aucune donnée"); return None
-            vmin, vmax = float(_df[col].min()), float(_df[col].max())
-            if not (vmin < vmax):
-                container.caption(f"{lab} : valeur unique = {_fmt_money_us(vmin)}"); return (vmin, vmax)
-            step = 1.0 if (vmax - vmin) > 1000 else 0.1 if (vmax - vmin) > 10 else 0.01
-            return container.slider(lab, min_value=vmin, max_value=vmax, value=(vmin, vmax), step=step)
-        total_range = make_slider(df, TOTAL, "Total (US $) min-max", d3)
+        cL, cR = st.columns([1,2])
+        cL.caption("Sélection hiérarchique (réduit la liste des visas)")
+        with cL:
+            sel_path_dash = cascading_visa_picker(visa_ref_full, key_prefix="dash_cascade")
+        visas_aut = visas_autorises_depuis_cascade(visa_ref_full, sel_path_dash)
 
+        cR1, cR2, cR3 = cR.columns(3)
+        years = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
+        sel_years = cR1.multiselect("Année", years, default=[])
+        months = sorted(df["Mois"].dropna().unique()) if "Mois" in df.columns else []
+        sel_months = cR2.multiselect("Mois (MM)", months, default=[])
+        include_na_dates = cR3.checkbox("Inclure lignes sans date", value=True)
+
+    # Application des filtres
     f = df.copy()
-    if "Catégorie" in f.columns and sel_cats:  f = f[f["Catégorie"].astype(str).isin(sel_cats)]
-    if "Visa" in f.columns and sel_visas:      f = f[f["Visa"].astype(str).isin(sel_visas)]
+    # Catégorie (si choisie dans la cascade)
+    if sel_path_dash.get("Catégorie", ""):
+        f = f[f["Catégorie"].astype(str) == sel_path_dash["Catégorie"]]
+    # Visa (liste autorisée selon la branche)
+    if visas_aut:
+        f = f[f["Visa"].astype(str).isin(visas_aut)]
+    # Année/Mois
     if "Date" in f.columns and sel_years:
         mask = f["Date"].apply(lambda x: (pd.notna(x) and x.year in sel_years))
         if include_na_dates: mask |= f["Date"].isna()
@@ -482,8 +567,6 @@ with tabs[0]:
         mask = f["Mois"].isin(sel_months)
         if include_na_dates: mask |= f["Mois"].isna()
         f = f[mask]
-    if TOTAL in f.columns and total_range is not None:
-        f = f[(f[TOTAL] >= total_range[0]) & (f[TOTAL] <= total_range[1])]
 
     hidden = len(df) - len(f)
     if hidden > 0: st.caption(f"🔎 {hidden} ligne(s) masquée(s) par les filtres.")
@@ -522,13 +605,12 @@ with tabs[1]:
     if st.button("🔄 Recharger le fichier", key="reload_btn"):
         st.rerun()
 
-    visa_ref = read_visa_reference(current_path)
+    visa_ref_full = read_visa_reference_hier(current_path)
+    visa_ref_simple = read_visa_reference(current_path)
+
     live_raw = read_sheet(current_path, client_target_sheet, normalize=False).copy()
     live_raw = ensure_dossier_numbers(live_raw)
     live_raw["_RowID"] = range(len(live_raw))
-
-    cats_ref  = sorted([c for c in visa_ref["Catégorie"].astype(str).unique() if c!=""]) if not visa_ref.empty else []
-    visas_all = sorted(visa_ref["Visa"].astype(str).unique()) if not visa_ref.empty else []
 
     action = st.radio("Action", ["Créer", "Modifier", "Supprimer"], horizontal=True, key="crud_action")
 
@@ -552,10 +634,13 @@ with tabs[1]:
             c0.metric("Prochain Dossier N", f"{next_num}")
             nom_in = c1.text_input("Nom")
             d = c2.date_input("Date", value=date.today())
-            cC, cV = st.columns(2)
-            sel_cat = cC.selectbox("Catégorie", [""] + cats_ref, index=0, key="create_cat")
-            visas_opt = sorted(visa_ref.loc[visa_ref["Catégorie"]==sel_cat, "Visa"].unique().tolist()) if sel_cat else visas_all
-            visa = cV.selectbox("Visa", visas_opt) if visas_opt else cV.text_input("Visa")
+
+            # --- Sélection en cascade ---
+            st.caption("Sélection hiérarchique du visa")
+            sel_path = cascading_visa_picker(visa_ref_full, key_prefix="create_cascade")
+            sel_cat = sel_path.get("Catégorie","")
+            visa    = sel_path.get("Visa","")  # peut être ""
+
             c5,c6 = st.columns(2)
             honoraires = c5.number_input("Montant honoraires (US $)", value=0.0, step=10.0, format="%.2f")
             autres     = c6.number_input("Autres frais (US $)", value=0.0, step=10.0, format="%.2f")
@@ -638,16 +723,12 @@ with tabs[1]:
                     d_init = date.today()
                 d = c2.date_input("Date", value=d_init, key=f"edit_date_{sel_rowid}")
 
-                cC, cV = st.columns(2)
-                init_cat = _safe_str(init.get("Catégorie"))
-                sel_cat = cC.selectbox("Catégorie", [""] + cats_ref,
-                                       index=([""]+cats_ref).index(init_cat) if init_cat in ([""]+cats_ref) else 0,
-                                       key=f"edit_cat_{sel_rowid}")
-                visas_opt = sorted(visa_ref.loc[visa_ref["Catégorie"]==sel_cat, "Visa"].unique().tolist()) if sel_cat else visas_all
-                init_visa = _safe_str(init.get("Visa"))
-                visa = cV.selectbox("Visa", visas_opt if visas_opt else [init_visa or ""],
-                                    index=(visas_opt.index(init_visa) if init_visa in visas_opt else 0) if visas_opt else 0,
-                                    key=f"edit_visa_{sel_rowid}")
+                # --- Sélection en cascade (préremplie) ---
+                st.caption("Sélection hiérarchique du visa")
+                init_path = {"Catégorie": _safe_str(init.get("Catégorie")), "Visa": _safe_str(init.get("Visa"))}
+                sel_path = cascading_visa_picker(visa_ref_full, key_prefix=f"edit_cascade_{sel_rowid}", init=init_path)
+                sel_cat = sel_path.get("Catégorie","")
+                visa    = sel_path.get("Visa","")
 
                 def _f(v, alt=0.0):
                     try: return float(v)
@@ -794,7 +875,7 @@ with tabs[1]:
                     try:
                         add = float(pay_amt or 0.0)
                         if add <= 0: st.warning("Le montant doit être > 0."); st.stop()
-                        norm = normalize_dataframe(live_now.copy(), visa_ref=visa_ref)
+                        norm = normalize_dataframe(live_now.copy(), visa_ref=visa_ref_simple)
                         mask_id = norm["ID_Client"].astype(str) == _safe_str(init.get("ID_Client"))
                         reste_curr = float(norm.loc[mask_id, "Reste"].sum()) if mask_id.any() else 0.0
                         if add > reste_curr + 1e-9: add = reste_curr
@@ -838,46 +919,38 @@ with tabs[1]:
                 write_sheet_inplace(current_path, client_target_sheet, live); save_workspace_path(current_path)
                 st.success("Client supprimé **dans le fichier**. ✅"); st.rerun()
 
-# ================= ANALYSES (avec comparaisons) =================
+# ================= ANALYSES (avec comparaisons + filtres cascade) =================
 with tabs[2]:
     st.subheader("📊 Analyses — Volumes, Financier & Comparaisons")
     if client_target_sheet is None:
         st.info("Choisis d’abord une **feuille clients** valide (Nom & Visa)."); st.stop()
 
-    visa_ref = read_visa_reference(current_path)
+    visa_ref_full = read_visa_reference_hier(current_path)
+    visa_ref_simple = read_visa_reference(current_path)
     dfA_raw = read_sheet(current_path, client_target_sheet, normalize=False)
-    dfA = normalize_dataframe(dfA_raw, visa_ref=visa_ref).copy()
+    dfA = normalize_dataframe(dfA_raw, visa_ref=visa_ref_simple).copy()
     if dfA.empty: st.info("Aucune donnée pour analyser."); st.stop()
 
-    # Filtres
+    # Filtres (avec cascade)
     with st.container():
-        c1, c2, c3, c4, c5 = st.columns(5)
-        catsA  = sorted(dfA["Catégorie"].dropna().astype(str).unique()) if "Catégorie" in dfA.columns else []
-        visasA = sorted(dfA["Visa"].dropna().astype(str).unique()) if "Visa" in dfA.columns else []
-        sel_cats  = c1.multiselect("Catégorie", catsA, default=[], key="anal_cats")
-        sel_visas = c2.multiselect("Type de visa", visasA, default=[], key="anal_visa")
-        yearsA  = sorted({d.year for d in dfA["Date"] if pd.notna(d)}) if "Date" in dfA.columns else []
-        sel_years  = c3.multiselect("Année (filtre)", yearsA, default=[], key="anal_years")
-        monthsA = [f"{m:02d}" for m in range(1,13)]
-        sel_months = c4.multiselect("Mois (MM)", monthsA, default=[], key="anal_months")
-        include_na_dates = c5.checkbox("Inclure lignes sans date", value=True, key="anal_na_dates")
+        cL, cR = st.columns([1,2])
+        cL.caption("Sélection hiérarchique (réduit la liste des visas)")
+        with cL:
+            sel_path_anal = cascading_visa_picker(visa_ref_full, key_prefix="anal_cascade")
+        visas_aut = visas_autorises_depuis_cascade(visa_ref_full, sel_path_anal)
 
-    with st.container():
-        d1, d2 = st.columns(2)
-        today = date.today()
-        if ("Date" in dfA.columns) and dfA["Date"].notna().any():
-            dmin = min([d for d in dfA["Date"] if pd.notna(d)]); dmax = max([d for d in dfA["Date"] if pd.notna(d)])
-        else:
-            dmin, dmax = today - timedelta(days=365), today
-        date_from = d1.date_input("Du", value=dmin, key="anal_date_from")
-        date_to   = d2.date_input("Au", value=dmax, key="anal_date_to")
-        c3a, c3b = st.columns(2)
-        agg_with_year = c3a.toggle("Agrégation par Année-Mois (YYYY-MM)", value=False, key="anal_agg_with_year")
-        show_tables   = c3b.toggle("Voir les tableaux détaillés", value=True, key="anal_show_tables")
+        cR1, cR2, cR3 = cR.columns(3)
+        yearsA  = sorted({d.year for d in dfA["Date"] if pd.notna(d)}) if "Date" in dfA.columns else []
+        sel_years  = cR1.multiselect("Année (filtre)", yearsA, default=[])
+        monthsA = [f"{m:02d}" for m in range(1,13)]
+        sel_months = cR2.multiselect("Mois (MM)", monthsA, default=[])
+        include_na_dates = cR3.checkbox("Inclure lignes sans date", value=True)
 
     fA = dfA.copy()
-    if sel_cats:  fA = fA[fA["Catégorie"].astype(str).isin(sel_cats)]
-    if sel_visas: fA = fA[fA["Visa"].astype(str).isin(sel_visas)]
+    if sel_path_anal.get("Catégorie", ""):
+        fA = fA[fA["Catégorie"].astype(str) == sel_path_anal["Catégorie"]]
+    if visas_aut:
+        fA = fA[fA["Visa"].astype(str).isin(visas_aut)]
     if "Date" in fA.columns and sel_years:
         mask_year = fA["Date"].apply(lambda x: (pd.notna(x) and x.year in sel_years))
         if include_na_dates: mask_year = mask_year | fA["Date"].isna()
@@ -886,15 +959,11 @@ with tabs[2]:
         mask_month = fA["Mois"].isin(sel_months)
         if include_na_dates: mask_month = mask_month | fA["Mois"].isna()
         fA = fA[mask_month]
-    if "Date" in fA.columns and (date_from or date_to):
-        mask_range = fA["Date"].apply(lambda x: pd.notna(x) and (x >= date_from) and (x <= date_to))
-        if include_na_dates: mask_range = mask_range | fA["Date"].isna()
-        fA = fA[mask_range]
 
     # Colonnes temps & numériques
     fA["Année"] = fA["Date"].apply(lambda x: x.year if pd.notna(x) else pd.NA)
     fA["MoisNum"] = fA["Date"].apply(lambda x: int(x.month) if pd.notna(x) else pd.NA)
-    fA["Periode"] = fA["Date"].apply(lambda x: f"{x.year}-{x.month:02d}" if pd.notna(x) else "NA") if agg_with_year else fA["Mois"].fillna("NA")
+    fA["Periode"] = fA["Date"].apply(lambda x: f"{x.year}-{x.month:02d}" if pd.notna(x) else "NA")
 
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
         if col in fA.columns: fA[col] = pd.to_numeric(fA[col], errors="coerce").fillna(0.0)
@@ -1091,21 +1160,14 @@ with tabs[2]:
         if col in details.columns: details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
     st.dataframe(details.sort_values(["Année","MoisNum","Catégorie","Nom"]), use_container_width=True)
 
-    if show_tables:
-        st.divider()
-        st.markdown("#### Tableaux récap (pour export)")
-        st.write("• Année — global");           st.dataframe(by_year, use_container_width=True)
-        st.write("• Année & Mois — récap");     st.dataframe(by_year_month, use_container_width=True)
-        st.write("• Année & Visa — récap");     st.dataframe(by_year_visa, use_container_width=True)
-
 # ================= ESCROW =================
 with tabs[3]:
     st.subheader("🏦 ESCROW — dépôts sur honoraires & transferts")
     if client_target_sheet is None:
         st.info("Choisis d’abord une **feuille clients** valide (Nom & Visa)."); st.stop()
-    visa_ref = read_visa_reference(current_path)
+    visa_ref_simple = read_visa_reference(current_path)
     live_raw = read_sheet(current_path, client_target_sheet, normalize=False)
-    live = normalize_dataframe(live_raw, visa_ref=visa_ref).copy()
+    live = normalize_dataframe(live_raw, visa_ref=visa_ref_simple).copy()
     if ESC_TR not in live.columns: live[ESC_TR] = 0.0
     else: live[ESC_TR] = pd.to_numeric(live[ESC_TR], errors="coerce").fillna(0.0)
     live["ESCROW dispo"] = live.apply(escrow_available_from_row, axis=1)
@@ -1141,7 +1203,7 @@ with tabs[3]:
                         idxs = live_w.index[live_w.get("ID_Client","").astype(str)==str(r["ID_Client"])]
                         if len(idxs)==0: st.error("Ligne introuvable."); st.stop()
                         i = idxs[0]
-                        tmp = normalize_dataframe(live_w.copy(), visa_ref=visa_ref)
+                        tmp = normalize_dataframe(live_w.copy(), visa_ref=visa_ref_simple)
                         disp = float(tmp.loc[tmp["ID_Client"].astype(str)==str(r["ID_Client"]), :].apply(escrow_available_from_row, axis=1).iloc[0])
                         add = float(min(max(amt,0.0), disp))
                         live_w.at[i, ESC_TR] = float(pd.to_numeric(pd.Series([live_w.at[i, ESC_TR]]), errors="coerce").fillna(0.0).iloc[0] + add)
