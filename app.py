@@ -79,17 +79,24 @@ def _fmt_money_us(x: float) -> str:
         return "$0.00"
 
 def _to_num(s: pd.Series) -> pd.Series:
-    """Nettoie les nombres (US/EU) -> float"""
+    """Convertit une Series (ou 1ère colonne d’un DataFrame) en float propre.
+       Gère les cas où df[col] retourne un DataFrame (colonnes dupliquées)."""
     if s is None:
         return pd.Series(dtype=float)
+    if isinstance(s, pd.DataFrame):
+        if s.shape[1] == 0:
+            return pd.Series(dtype=float, index=s.index if hasattr(s, "index") else None)
+        s = s.iloc[:, 0]  # prend la 1ère colonne
     s = s.astype(str)
-    s = s.str.replace(r"[^\d,.\-]", "", regex=True)
+    s = s.str.replace(r"[^\d,.\-]", "", regex=True)  # supprime symboles
     def _clean_one(v: str) -> float:
         if v == "" or v == "-":
             return 0.0
-        if v.count(",")==1 and v.count(".")==0:   # 1 234,56 -> 1234.56
+        # format EU 1 234,56 -> 1234.56
+        if v.count(",")==1 and v.count(".")==0:
             v = v.replace(",", ".")
-        if v.count(".")==1 and v.count(",")>=1:   # 1,234.56 -> 1234.56
+        # format US 1,234.56 -> 1234.56
+        if v.count(".")==1 and v.count(",")>=1:
             v = v.replace(",", "")
         try:
             return float(v)
@@ -228,7 +235,7 @@ def next_dossier_number(df: pd.DataFrame) -> int:
     return m + 1
 
 def _make_client_id_from_row(row: dict) -> str:
-    # ID client basé sur Nom + Date (tel autrefois ignoré)
+    # ID client basé sur Nom + Date (tel ignoré)
     nom = _safe_str(row.get("Nom"))
     try:
         d = pd.to_datetime(row.get("Date")).date()
@@ -237,6 +244,40 @@ def _make_client_id_from_row(row: dict) -> str:
     base = f"{nom}-{d.strftime('%Y%m%d')}"
     base = re.sub(r"[^A-Za-z0-9\-]+", "", base.replace(" ", "-"))
     return base.lower()
+
+# ---------- Fusion des colonnes dupliquées ----------
+def _collapse_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Fusionne les colonnes dupliquées (même nom).
+       Numériques -> somme ligne par ligne. Sinon -> 1ère valeur non vide."""
+    if df is None or df.empty:
+        return df
+    cols = df.columns.astype(str)
+    if not cols.duplicated().any():
+        return df
+
+    out = pd.DataFrame(index=df.index)
+    for col in pd.unique(cols):
+        same = df.loc[:, cols == col]
+        if same.shape[1] == 1:
+            out[col] = same.iloc[:, 0]
+            continue
+        # Essai: tout convertir en numérique et sommer si possible
+        try:
+            same_num = same.apply(pd.to_numeric, errors="coerce")
+            if same_num.notna().any().any():
+                out[col] = same_num.sum(axis=1, skipna=True)
+                continue
+        except Exception:
+            pass
+        # Sinon, 1ère valeur non vide
+        def _first_non_empty(row):
+            for v in row:
+                if pd.notna(v) and str(v).strip() != "":
+                    return v
+            return ""
+        out[col] = same.apply(_first_non_empty, axis=1)
+
+    return out
 
 def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) -> pd.DataFrame:
     """Nettoie les champs, calcule Total/Payé/Reste, Date/Mois (MM), map Catégorie si vide."""
@@ -263,6 +304,9 @@ def normalize_dataframe(df: pd.DataFrame, visa_ref: pd.DataFrame | None = None) 
             rename[c] = "Payé"
     if rename:
         df = df.rename(columns=rename)
+
+    # ⚠️ Écrase les colonnes dupliquées après renommage
+    df = _collapse_duplicate_columns(df)
 
     # Colonnes minimales
     for c in [DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", HONO, AUTRE, TOTAL, "Payé", "Reste", "Paiements", "Date", "Mois"]:
