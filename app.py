@@ -488,9 +488,7 @@ with tabs[0]:
             st.dataframe(df_ref, use_container_width=True)
 
         st.markdown("### ✏️ Gestion simple (Catégorie / Visa)")
-        # On propose la gestion de base Catégorie/Visa (les sous-catégories restent telles quelles)
         base = df_ref.copy()
-        # Assure au moins ces deux colonnes pour l'édition minimale :
         if "Catégorie" not in base.columns: base["Catégorie"] = ""
         if "Visa" not in base.columns: base["Visa"] = ""
         base_min = base[["Catégorie","Visa"]].copy()
@@ -545,20 +543,17 @@ with tabs[0]:
 
         cR1, cR2, cR3 = cR.columns(3)
         years = sorted({d.year for d in df["Date"] if pd.notna(d)}) if "Date" in df.columns else []
-        sel_years = cR1.multiselect("Année", years, default=[])
+        sel_years = cR1.multiselect("Année", years, default=[], key="dash_years")
         months = sorted(df["Mois"].dropna().unique()) if "Mois" in df.columns else []
-        sel_months = cR2.multiselect("Mois (MM)", months, default=[])
-        include_na_dates = cR3.checkbox("Inclure lignes sans date", value=True)
+        sel_months = cR2.multiselect("Mois (MM)", months, default=[], key="dash_months")
+        include_na_dates = cR3.checkbox("Inclure lignes sans date", value=True, key="dash_na")
 
     # Application des filtres
     f = df.copy()
-    # Catégorie (si choisie dans la cascade)
     if sel_path_dash.get("Catégorie", ""):
         f = f[f["Catégorie"].astype(str) == sel_path_dash["Catégorie"]]
-    # Visa (liste autorisée selon la branche)
     if visas_aut:
         f = f[f["Visa"].astype(str).isin(visas_aut)]
-    # Année/Mois
     if "Date" in f.columns and sel_years:
         mask = f["Date"].apply(lambda x: (pd.notna(x) and x.year in sel_years))
         if include_na_dates: mask |= f["Date"].isna()
@@ -617,7 +612,6 @@ with tabs[1]:
     # --- CREER ---
     if action == "Créer":
         st.markdown("### ➕ Nouveau client")
-        # garantir colonnes
         for must in [DOSSIER_COL,"ID_Client","Nom","Date","Mois","Catégorie","Visa",
                      HONO, AUTRE, TOTAL, "Payé","Reste", ESC_TR, ESC_JR] + STATUS_COLS + STATUS_DATES + ["Paiements"]:
             if must not in live_raw.columns:
@@ -941,10 +935,10 @@ with tabs[2]:
 
         cR1, cR2, cR3 = cR.columns(3)
         yearsA  = sorted({d.year for d in dfA["Date"] if pd.notna(d)}) if "Date" in dfA.columns else []
-        sel_years  = cR1.multiselect("Année (filtre)", yearsA, default=[])
+        sel_years  = cR1.multiselect("Année (filtre)", yearsA, default=[], key="anal_years")
         monthsA = [f"{m:02d}" for m in range(1,13)]
-        sel_months = cR2.multiselect("Mois (MM)", monthsA, default=[])
-        include_na_dates = cR3.checkbox("Inclure lignes sans date", value=True)
+        sel_months = cR2.multiselect("Mois (MM)", monthsA, default=[], key="anal_months")
+        include_na_dates = cR3.checkbox("Inclure lignes sans date", value=True, key="anal_na")
 
     fA = dfA.copy()
     if sel_path_anal.get("Catégorie", ""):
