@@ -582,6 +582,8 @@ def visas_autorises_from_tree(df_ref: pd.DataFrame, sel: dict) -> list[str]:
     if stype: dfw = dfw[dfw["Sous-type"]==stype]
     return sorted([v for v in dfw["Visa"].unique() if v])
 
+
+
 # =========================
 # VISA APP — PARTIE 2/5
 # =========================
