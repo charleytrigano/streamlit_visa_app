@@ -1,6 +1,7 @@
 # =========================
-# VISA APP — PARTIE 1/5
+# VISA APP — PARTIE 1/5 (NOUVELLE VERSION)
 # =========================
+
 from __future__ import annotations
 
 import json, re, unicodedata
@@ -83,8 +84,13 @@ def set_current_file_from_upload(up_file) -> Path | None:
         return None
 
 # ---------- Formats & conversions ----------
-def _safe_str(x):
-    return "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x)
+def _safe_str(x) -> str:
+    try:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+        return str(x).strip()
+    except Exception:
+        return ""
 
 def _fmt_money_us(x: float) -> str:
     try:
@@ -122,6 +128,31 @@ def _to_int(s: Any) -> pd.Series:
         return pd.to_numeric(pd.Series(s), errors="coerce").fillna(0).astype(int)
     except Exception:
         return pd.Series([0]*len(pd.Series(s)), dtype=int)
+
+# ---------- Normalisation texte ----------
+def _norm_txt(x: str) -> str:
+    """Normalise texte pour comparaisons tolérantes (accents, tirets, espaces)."""
+    s = _safe_str(x)
+    s = s.strip()
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"\s*[/\-]\s*", " ", s)
+    s = re.sub(r"[^a-zA-Z0-9\s]+", " ", s)
+    s = " ".join(s.lower().split())
+    return s
+
+def _norm_series(sr: pd.Series) -> pd.Series:
+    return sr.fillna("").astype(str).map(_norm_txt)
+
+def _visa_code_only(v: str) -> str:
+    """Ex.: 'B-1 COS' -> 'B-1' ; 'F-1' -> 'F-1' ; tolère espaces multiples."""
+    s = _safe_str(v)
+    if not s:
+        return ""
+    parts = s.split()
+    if len(parts) >= 2 and parts[-1].upper() in {"COS", "EOS"}:
+        return " ".join(parts[:-1]).strip()
+    return s.strip()
 
 # ---------- Paiements (JSON en cellule) ----------
 def _parse_json_list(val: Any) -> list:
@@ -205,7 +236,7 @@ def next_dossier_number(df: pd.DataFrame) -> int:
     return m + 1
 
 def _make_client_id_from_row(row: dict) -> str:
-    # ID client basé sur Nom + Date ; si collision, on suffixe -1, -2...
+    # ID client basé sur Nom + Date
     nom = _safe_str(row.get("Nom"))
     try:
         d = pd.to_datetime(row.get("Date")).date()
@@ -248,27 +279,9 @@ def _collapse_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = same.apply(_first_non_empty, axis=1)
     return out
 
-# ---------- Normalisation texte / visa ----------
-def _norm_txt(x: str) -> str:
-    """Normalise pour comparaisons tolérantes (accents, tirets, slash, espaces)."""
-    s = _safe_str(x)
-    s = s.strip()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r"\s*[/\-]\s*", " ", s)
-    s = re.sub(r"[^a-zA-Z0-9\s]+", " ", s)
-    s = " ".join(s.lower().split())
-    return s
-
-def _visa_code_only(v: str) -> str:
-    """Ex.: 'B-1 COS' -> 'B-1' ; 'F-1' -> 'F-1' ; tolère espaces multiples."""
-    s = _safe_str(v)
-    if not s:
-        return ""
-    parts = s.split()
-    if len(parts) >= 2 and parts[-1].upper() in {"COS", "EOS"}:
-        return " ".join(parts[:-1]).strip()
-    return s.strip()
+# ---------- Référentiel VISA (Catégorie -> SC1 -> SC2 -> SC3 -> SC4 -> Visa) ----------
+REF_COLS = ["Catégorie","SC1","SC2","SC3","SC4","Visa"]
+NREF_COLS = ["N_Cat","N_SC1","N_SC2","N_SC3","N_SC4","N_Visa"]
 
 def _find_col(df: pd.DataFrame, targets: list[str]) -> str | None:
     """Retrouve le nom réel d’une colonne par liste de candidats (tolérant accents/casse)."""
@@ -287,15 +300,123 @@ def _find_col(df: pd.DataFrame, targets: list[str]) -> str | None:
                 return orig
     return None
 
+def read_visa_reference_tree(path: Path) -> pd.DataFrame:
+    """
+    Feuille 'Visa' : A=Catégorie, B=Sous-categorie 1, C=Sous-categorie 2, D=Sous-categorie 3,
+    E=Sous-categorie 4, F=Visa (code).
+    """
+    try:
+        base = pd.read_excel(path, sheet_name="Visa")
+    except Exception:
+        return pd.DataFrame(columns=REF_COLS+NREF_COLS)
+
+    col_cat = _find_col(base, ["Catégorie","Categorie","Category"])
+    col_s1  = _find_col(base, ["Sous-categorie 1","Sous catégorie 1","SC1","Subcategory 1"])
+    col_s2  = _find_col(base, ["Sous-categorie 2","Sous catégorie 2","SC2","Subcategory 2"])
+    col_s3  = _find_col(base, ["Sous-categorie 3","Sous catégorie 3","SC3","Subcategory 3"])
+    col_s4  = _find_col(base, ["Sous-categorie 4","Sous catégorie 4","SC4","Subcategory 4"])
+    col_v   = _find_col(base, ["Visa"])
+
+    df = pd.DataFrame()
+    df["Catégorie"] = base[col_cat] if col_cat else ""
+    df["SC1"] = base[col_s1] if col_s1 else ""
+    df["SC2"] = base[col_s2] if col_s2 else ""
+    df["SC3"] = base[col_s3] if col_s3 else ""
+    df["SC4"] = base[col_s4] if col_s4 else ""
+    df["Visa"] = base[col_v] if col_v else ""
+
+    for c in REF_COLS:
+        df[c] = df[c].fillna("").astype(str).str.strip()
+
+    # ⚠️ On ne propage QUE la Catégorie (pas les sous-catégories)
+    df["Catégorie"] = df["Catégorie"].replace("", pd.NA).ffill().fillna("")
+
+    # Visa code pur (sans COS/EOS)
+    df["Visa"] = df["Visa"].map(_visa_code_only)
+
+    # Colonnes normalisées pour matching tolérant
+    df["N_Cat"]  = _norm_series(df["Catégorie"])
+    df["N_SC1"]  = _norm_series(df["SC1"])
+    df["N_SC2"]  = _norm_series(df["SC2"])
+    df["N_SC3"]  = _norm_series(df["SC3"])
+    df["N_SC4"]  = _norm_series(df["SC4"])
+    df["N_Visa"] = _norm_series(df["Visa"])
+
+    df = df[REF_COLS+NREF_COLS].drop_duplicates().reset_index(drop=True)
+    return df
+
+# ---------- Cascade de sélection robuste ----------
+def _select_with_memory(label: str, options: list[str], key: str) -> str:
+    """selectbox qui réinitialise automatiquement si la valeur précédente n'est plus valide."""
+    current = st.session_state.get(key, "")
+    if current not in options:
+        index = 0
+    else:
+        index = options.index(current)
+    return st.selectbox(label, options, index=index, key=key)
+
+def cascading_visa_picker_tree(df_ref: pd.DataFrame, key_prefix: str, init: dict | None = None) -> dict:
+    """
+    Affiche 6 selectbox en cascade. Retourne:
+    {"Catégorie":..., "SC1":..., "SC2":..., "SC3":..., "SC4":..., "Visa":...}
+    Reset auto des niveaux enfants si le parent change.
+    """
+    res = {"Catégorie":"", "SC1":"", "SC2":"", "SC3":"", "SC4":"", "Visa":""}
+    if df_ref is None or df_ref.empty:
+        st.info("Référentiel Visa vide.")
+        return res
+
+    # on travaille sur les colonnes "visibles"
+    dfv = df_ref.copy()
+
+    # 1) Catégorie
+    cats = [""] + sorted([v for v in dfv["Catégorie"].unique() if v])
+    res["Catégorie"] = _select_with_memory("Catégorie", cats, key=f"{key_prefix}_cat")
+    sub = dfv[dfv["Catégorie"] == res["Catégorie"]] if res["Catégorie"] else dfv
+
+    # 2) SC1
+    sc1s = [""] + sorted([v for v in sub["SC1"].unique() if v])
+    res["SC1"] = _select_with_memory("Sous-catégorie 1", sc1s, key=f"{key_prefix}_sc1")
+    sub = sub[sub["SC1"] == res["SC1"]] if res["SC1"] else sub
+
+    # 3) SC2
+    sc2s = [""] + sorted([v for v in sub["SC2"].unique() if v])
+    res["SC2"] = _select_with_memory("Sous-catégorie 2", sc2s, key=f"{key_prefix}_sc2")
+    sub = sub[sub["SC2"] == res["SC2"]] if res["SC2"] else sub
+
+    # 4) SC3
+    sc3s = [""] + sorted([v for v in sub["SC3"].unique() if v])
+    res["SC3"] = _select_with_memory("Sous-catégorie 3", sc3s, key=f"{key_prefix}_sc3")
+    sub = sub[sub["SC3"] == res["SC3"]] if res["SC3"] else sub
+
+    # 5) SC4
+    sc4s = [""] + sorted([v for v in sub["SC4"].unique() if v])
+    res["SC4"] = _select_with_memory("Sous-catégorie 4", sc4s, key=f"{key_prefix}_sc4")
+    sub = sub[sub["SC4"] == res["SC4"]] if res["SC4"] else sub
+
+    # 6) Visa
+    visas = [""] + sorted([v for v in sub["Visa"].unique() if v])
+    res["Visa"] = _select_with_memory("Visa", visas, key=f"{key_prefix}_visa")
+
+    # init éventuel (pré-sélection) : on n’impose pas, on laisse la mémoire gérer
+    if init:
+        for k, v in init.items():
+            if v and not st.session_state.get(f"{key_prefix}_{k.lower() if k!='Catégorie' else 'cat'}"):
+                st.session_state[f"{key_prefix}_{k.lower() if k!='Catégorie' else 'cat'}"] = v
+
+    if len(visas) == 1:
+        st.caption("Aucun visa à ce niveau. Laisse vide pour voir tous les dossiers correspondants.")
+    return res
+
 # ---------- Normalisation principale (clients) ----------
 def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoie champs, calcule Total/Payé/Reste, Date/Mois (MM), et canonise Visa."""
+    """Nettoie champs, calcule Total/Payé/Reste, Date/Mois (MM), canonise Visa, backfill Catégorie."""
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = df.copy()
 
-    # Renommages souples
+    # Renommages souples (compat retro)
     rename = {}
     for c in df.columns:
         lc = str(c).lower().strip()
@@ -316,7 +437,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if rename:
         df = df.rename(columns=rename)
 
-    # Fusion des doublons
+    # Écrase les colonnes dupliquées après renommage
     df = _collapse_duplicate_columns(df)
 
     # Colonnes minimales
@@ -356,7 +477,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # Total
     df[TOTAL] = _to_num(df.get(HONO, 0.0)) + _to_num(df.get(AUTRE, 0.0))
 
-    # Payé depuis JSON si présent
+    # Payé depuis JSON si présent (on prend le max entre colonne Payé et somme JSON)
     paid_from_json = []
     for _, r in df.iterrows():
         plist = _parse_json_list(r.get(PAY_JSON, ""))
@@ -367,135 +488,63 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # Reste
     df["Reste"] = (df[TOTAL] - df["Payé"]).clip(lower=0.0)
 
-    # Statuts & dates types
+    # Statuts & dates (types)
     for b in STATUS_COLS:
         df[b] = df[b].astype(bool)
     for dcol in STATUS_DATES:
         df[dcol] = df[dcol].astype(str)
 
+    # ESCROW types
+    df[ESC_TR] = _to_num(df[ESC_TR])
+
     # Dossier N auto
     df = ensure_dossier_numbers(df)
 
-    return df
-
-# ====== RÉFÉRENTIEL VISA (Catégorie -> SC1 -> SC2 -> SC3 -> SC4 -> Visa) ======
-REF_COLS = ["Catégorie","SC1","SC2","SC3","SC4","Visa"]
-
-def read_visa_reference_tree(path: Path) -> pd.DataFrame:
-    """
-    Feuille 'Visa' : A=Catégorie, B=Sous-categorie 1, C=Sous-categorie 2, D=Sous-categorie 3,
-    E=Sous-categorie 4, F=Visa (code).
-    """
+    # 🔁 Backfill Catégorie à partir du Visa si vide
     try:
-        base = pd.read_excel(path, sheet_name="Visa")
+        ref = st.session_state.get("__visa_ref_tree__")
+        if ref is not None and not ref.empty:
+            m = ref[["N_Visa","Catégorie"]].drop_duplicates()
+            m = m[m["N_Visa"]!=""]
+            df["__N_Visa"] = _norm_series(df["Visa"].map(_visa_code_only))
+            df = df.merge(m, how="left", left_on="__N_Visa", right_on="N_Visa")
+            # si Catégorie client vide -> on remplit
+            df["Catégorie"] = np.where(df["Catégorie"].astype(str).str.strip()=="",
+                                       df["Catégorie_y"].fillna(""),
+                                       df["Catégorie"])
+            df = df.drop(columns=[c for c in ["__N_Visa","N_Visa","Catégorie_y"] if c in df.columns])
+            df = df.rename(columns={"Catégorie_x":"Catégorie"}) if "Catégorie_x" in df.columns else df
     except Exception:
-        return pd.DataFrame(columns=REF_COLS)
+        pass
 
-    def _col(*names):
-        # map tolérant
-        target_norms = {_norm_txt(n) for n in names}
-        for c in base.columns:
-            if _norm_txt(c) in target_norms:
-                return c
-        return None
-
-    df = pd.DataFrame({
-        "Catégorie": base.get(_col("Catégorie","Categorie","Category"), ""),
-        "SC1": base.get(_col("Sous-categorie 1","Sous catégorie 1","SC1","Subcategory 1"), ""),
-        "SC2": base.get(_col("Sous-categorie 2","Sous catégorie 2","SC2","Subcategory 2"), ""),
-        "SC3": base.get(_col("Sous-categorie 3","Sous catégorie 3","SC3","Subcategory 3"), ""),
-        "SC4": base.get(_col("Sous-categorie 4","Sous catégorie 4","SC4","Subcategory 4"), ""),
-        "Visa": base.get(_col("Visa"), ""),
-    }).fillna("").astype(str)
-
-    # On ne propage QUE la Catégorie (pas les sous-catégories)
-    df["Catégorie"] = df["Catégorie"].replace("", pd.NA).ffill().fillna("")
-    # Nettoyage du Visa (code pur)
-    df["Visa"] = df["Visa"].map(_visa_code_only)
-
-    df = df[REF_COLS].drop_duplicates().reset_index(drop=True)
     return df
 
-def cascading_visa_picker_tree(df_ref: pd.DataFrame, key_prefix: str, init: dict | None = None) -> dict:
-    """
-    Affiche 6 selectbox en cascade. Retourne:
-    {"Catégorie":..., "SC1":..., "SC2":..., "SC3":..., "SC4":..., "Visa":...}
-    """
-    res = {"Catégorie":"", "SC1":"", "SC2":"", "SC3":"", "SC4":"", "Visa":""}
-    if df_ref is None or df_ref.empty:
-        st.info("Référentiel Visa vide.")
-        return res
-
-    # 1) Catégorie
-    cats = sorted([v for v in df_ref["Catégorie"].unique() if v])
-    idxC = 0
-    if init and init.get("Catégorie") in cats: idxC = cats.index(init["Catégorie"])+1
-    res["Catégorie"] = st.selectbox("Catégorie", [""]+cats, index=idxC, key=f"{key_prefix}_cat")
-    sub = df_ref.copy()
-    if res["Catégorie"]:
-        sub = sub[sub["Catégorie"] == res["Catégorie"]]
-
-    # 2) SC1
-    sc1s = sorted([v for v in sub["SC1"].unique() if v])
-    idx1 = 0
-    if init and init.get("SC1") in sc1s: idx1 = sc1s.index(init["SC1"])+1
-    res["SC1"] = st.selectbox("Sous-catégorie 1", [""]+sc1s, index=idx1, key=f"{key_prefix}_sc1")
-    if res["SC1"]:
-        sub = sub[sub["SC1"] == res["SC1"]]
-
-    # 3) SC2
-    sc2s = sorted([v for v in sub["SC2"].unique() if v])
-    idx2 = 0
-    if init and init.get("SC2") in sc2s: idx2 = sc2s.index(init["SC2"])+1
-    res["SC2"] = st.selectbox("Sous-catégorie 2", [""]+sc2s, index=idx2, key=f"{key_prefix}_sc2")
-    if res["SC2"]:
-        sub = sub[sub["SC2"] == res["SC2"]]
-
-    # 4) SC3
-    sc3s = sorted([v for v in sub["SC3"].unique() if v])
-    idx3 = 0
-    if init and init.get("SC3") in sc3s: idx3 = sc3s.index(init["SC3"])+1
-    res["SC3"] = st.selectbox("Sous-catégorie 3", [""]+sc3s, index=idx3, key=f"{key_prefix}_sc3")
-    if res["SC3"]:
-        sub = sub[sub["SC3"] == res["SC3"]]
-
-    # 5) SC4
-    sc4s = sorted([v for v in sub["SC4"].unique() if v])
-    idx4 = 0
-    if init and init.get("SC4") in sc4s: idx4 = sc4s.index(init["SC4"])+1
-    res["SC4"] = st.selectbox("Sous-catégorie 4", [""]+sc4s, index=idx4, key=f"{key_prefix}_sc4")
-    if res["SC4"]:
-        sub = sub[sub["SC4"] == res["SC4"]]
-
-    # 6) Visa
-    visas = sorted([v for v in sub["Visa"].unique() if v])
-    idxV = 0
-    if init and init.get("Visa") in visas: idxV = visas.index(init["Visa"])+1
-    res["Visa"] = st.selectbox("Visa", [""]+visas, index=idxV, key=f"{key_prefix}_visa")
-
-    if not visas:
-        st.caption("Aucun visa à ce niveau. Continue d’affiner ou laisse vide pour voir tous les dossiers correspondants.")
-    return res
-
+# ---------- Whitelist & filtre (comparaison normalisée) ----------
 def visas_autorises_from_tree(df_ref: pd.DataFrame, sel: dict) -> list[str]:
-    """Retourne la liste des visas compatibles avec les niveaux saisis (niveaux vides = ignorés)."""
+    """Retourne la liste des visas compatibles avec les niveaux saisis (comparaison normalisée)."""
     if df_ref is None or df_ref.empty:
         return []
     sub = df_ref.copy()
-    for key in ["Catégorie","SC1","SC2","SC3","SC4"]:
-        val = _safe_str(sel.get(key))
+    # applique filtres normalisés
+    def _apply(level_key, ncol):
+        val = _safe_str(sel.get(level_key))
         if val:
-            sub = sub[sub[key] == val]
+            sub_loc = sub[_norm_series(sub[level_key]) == _norm_txt(val)]
+            return sub_loc
+        return sub
+    for k, n in zip(["Catégorie","SC1","SC2","SC3","SC4"], ["N_Cat","N_SC1","N_SC2","N_SC3","N_SC4"]):
+        if _safe_str(sel.get(k)):
+            sub = sub[_norm_series(sub[k]) == _norm_txt(sel[k])]
     if _safe_str(sel.get("Visa")):
-        sub = sub[sub["Visa"] == sel["Visa"]]
-    return sorted(v for v in sub["Visa"].unique() if v)
+        sub = sub[_norm_series(sub["Visa"]) == _norm_txt(_visa_code_only(sel["Visa"]))]
+    return sorted([v for v in sub["Visa"].unique() if _safe_str(v)])
 
 def filter_by_selection(df: pd.DataFrame, sel: dict, df_ref_tree: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     Filtre le DataFrame clients selon Catégorie/SC1..SC4/Visa.
     - Comparaison tolérante (accents, /, -, espaces).
     - Côté clients, on compare Visa **canonisé** (code seul).
-    - Si seul Catégorie/SCx est choisi (Visa vide) et qu’un référentiel est fourni, on applique une whitelist.
+    - Si seul Catégorie/SCx est choisi (Visa vide), on applique une whitelist issue du référentiel.
     """
     if df is None or df.empty:
         return df
@@ -505,10 +554,9 @@ def filter_by_selection(df: pd.DataFrame, sel: dict, df_ref_tree: pd.DataFrame |
     col_cat  = _find_col(f, ["Catégorie","Categorie","Category"])
     col_visa = _find_col(f, ["Visa"])
 
-    # normalisation côté clients
-    f["__norm_cat"]  = f[col_cat].astype(str).map(_norm_txt) if col_cat else ""
+    f["__norm_cat"]  = _norm_series(f[col_cat]) if col_cat else ""
     f["__visa_code"] = f[col_visa].astype(str).map(_visa_code_only) if col_visa else ""
-    f["__norm_visa"] = f["__visa_code"].map(_norm_txt)
+    f["__norm_visa"] = _norm_series(f["__visa_code"])
 
     want_cat  = _norm_txt(sel.get("Catégorie",""))
     want_visa = _norm_txt(_visa_code_only(sel.get("Visa","")))
@@ -522,13 +570,14 @@ def filter_by_selection(df: pd.DataFrame, sel: dict, df_ref_tree: pd.DataFrame |
         f = f[f["__norm_visa"] == want_visa]
     else:
         # si pas de Visa choisi, mais Cat/SC* saisis -> restreindre aux visas compatibles
-        if df_ref_tree is not None and (sel.get("Catégorie") or sel.get("SC1") or sel.get("SC2") or sel.get("SC3") or sel.get("SC4")):
+        if df_ref_tree is not None and any(_safe_str(sel.get(k)) for k in ["Catégorie","SC1","SC2","SC3","SC4"]):
             wl = visas_autorises_from_tree(df_ref_tree, sel)
             if wl:
                 wl_norm = {_norm_txt(_visa_code_only(v)) for v in wl}
                 f = f[f["__norm_visa"].isin(wl_norm)]
 
     return f.drop(columns=[c for c in f.columns if c.startswith("__norm_")], errors="ignore")
+
 
 
 # =========================
@@ -604,6 +653,11 @@ tab_dash, tab_clients, tab_analyses, tab_escrow = st.tabs(
 # ---------- Référentiel Visa (6 niveaux) ----------
 visa_ref_tree = read_visa_reference_tree(current_path)
 
+
+# Après:
+visa_ref_tree = read_visa_reference_tree(current_path)
+# Ajoute:
+st.session_state["__visa_ref_tree__"] = visa_ref_tree
 # ================= DASHBOARD =================
 with tab_dash:
     # On lit la feuille choisie pour l'affichage (et on normalise pour KPI/filtre)
