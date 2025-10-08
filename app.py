@@ -559,7 +559,7 @@ def visas_autorises_from_tree(df_ref: pd.DataFrame, sel: dict) -> list[str]:
     return sorted([v for v in dfw["Visa"].unique() if v])
 
 
-# =========================
+========================
 # VISA APP — PARTIE 2/5
 # =========================
 
@@ -1046,7 +1046,8 @@ with tab_clients:
                 st.success("Client supprimé **dans le fichier**. ✅"); st.rerun()
 
 
-# =========================
+
+====================
 # VISA APP — PARTIE 4/5
 # =========================
 
@@ -1256,6 +1257,8 @@ with tab_analyses:
     for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
         if col in details.columns: details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
     st.dataframe(details.sort_values(["Année","MoisNum","Catégorie","Nom"]), use_container_width=True)
+
+
 
 
 # =========================
