@@ -72,6 +72,54 @@ def _safe_str(x) -> str:
     except Exception:
         return ""
 
+    import unicodedata
+
+def _norm_txt(x: str) -> str:
+    """Normalise pour comparaison: strip, minuscules, sans accents/doubles espaces."""
+    s = "" if x is None else str(x)
+    s = s.strip()
+    # retire les accents
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    # lower + espaces compacts
+    s = " ".join(s.lower().split())
+    return s
+
+def filter_by_selection(df: pd.DataFrame, sel: dict, visas_aut: list[str] | None = None) -> pd.DataFrame:
+    """Filtre df par Catégorie / Visa / Sous-type de manière tolérante."""
+    if df is None or df.empty:
+        return df
+
+    f = df.copy()
+
+    # prépare colonnes normalisées (sans écraser l'original pour l'affichage)
+    for col in ["Catégorie","Visa","Sous-type"]:
+        if col in f.columns:
+            f[f"__norm_{col}"] = f[col].astype(str).map(_norm_txt)
+        else:
+            f[f"__norm_{col}"] = ""
+
+    sel_cat  = _norm_txt(sel.get("Catégorie",""))
+    sel_visa = _norm_txt(sel.get("Visa",""))
+    sel_sub  = _norm_txt(sel.get("Sous-type",""))
+
+    if sel_cat:
+        f = f[f["__norm_Catégorie"] == sel_cat]
+    if sel_visa:
+        f = f[f["__norm_Visa"] == sel_visa]
+    if sel_sub:
+        f = f[f["__norm_Sous-type"] == sel_sub]
+
+    # Si on a une liste de visas autorisés, on l'applique aussi (normalisée)
+    if visas_aut:
+        visas_norm = {_norm_txt(v) for v in visas_aut}
+        f = f[f["__norm_Visa"].isin(visas_norm)]
+
+    # nettoie colonnes temporaires
+    drop_cols = [c for c in f.columns if c.startswith("__norm_")]
+    return f.drop(columns=drop_cols)
+
+
 def _fmt_money_us(x: float) -> str:
     try:
         return f"${x:,.2f}"
