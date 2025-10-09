@@ -1,4 +1,4 @@
-# =========================
+========================
 # VISA APP — PARTIE 1/5
 # =========================
 from __future__ import annotations
@@ -313,128 +313,38 @@ def read_visa_matrix(visa_path: Path) -> pd.DataFrame:
     return out
 
 
-# =========================
-# VISA APP — PARTIE 2/5
-# =========================
-
-st.set_page_config(page_title="Visa Manager — US $", layout="wide")
-st.title("🛂 Visa Manager — US $")
-
-# --- Barre latérale : chargement des fichiers ---
-st.sidebar.header("📁 Fichiers")
-last_clients, last_visa = _load_last_paths()
-
-# Clients
-up_clients = st.sidebar.file_uploader("Classeur Clients (.xlsx)", type=["xlsx"], key="up_clients")
-if up_clients is not None:
-    buf = up_clients.getvalue()
-    cpath = Path(up_clients.name).resolve()
-    cpath.write_bytes(buf)
-    _save_last_paths(clients=cpath)
-
-clients_path = st.sidebar.text_input("Chemin Clients", value=str(last_clients) if last_clients else "")
-clients_path = Path(clients_path) if clients_path else None
-
-# Visa.xlsx
-up_visa = st.sidebar.file_uploader("Référentiel Visa.xlsx (onglet 'Visa')", type=["xlsx"], key="up_visa")
-if up_visa is not None:
-    buf = up_visa.getvalue()
-    vpath = Path(up_visa.name).resolve()
-    vpath.write_bytes(buf)
-    _save_last_paths(visa=vpath)
-
-visa_path = st.sidebar.text_input("Chemin Visa.xlsx", value=str(last_visa) if last_visa else "")
-visa_path = Path(visa_path) if visa_path else None
-
-st.sidebar.markdown("---")
-if st.sidebar.button("🔄 Recharger", use_container_width=True):
-    st.rerun()
-
-# --- Contrôles ---
-if not clients_path or not clients_path.exists():
-    st.warning("Charge un **classeur Clients** (.xlsx)."); st.stop()
-if not visa_path or not visa_path.exists():
-    st.warning("Charge le **référentiel Visa.xlsx** (onglet 'Visa')."); st.stop()
-
-# --- Feuille Clients à utiliser ---
-sheets = list_sheets(clients_path)
-if not sheets:
-    st.error("Impossible de lire le classeur Clients."); st.stop()
-
-# Détection d'une feuille "clients"
-cand = None
-for sn in sheets:
-    df0 = read_sheet(clients_path, sn)
-    if {"Nom","Visa"}.issubset(set(df0.columns.astype(str))):
-        cand = sn; break
-
-sheet_choice = st.sidebar.selectbox("Feuille Clients :", sheets, index=(sheets.index(cand) if cand in sheets else 0), key="sheet_choice")
-
-# --- Lecture données ---
-df_clients_raw = read_sheet(clients_path, sheet_choice, normalize=False)
-df_clients     = read_sheet(clients_path, sheet_choice, normalize=True)
-
-df_visa = read_visa_matrix(visa_path)
-if df_visa.empty:
-    st.error("Onglet 'Visa' introuvable ou vide dans Visa.xlsx."); st.stop()
-
-# --- Onglets ---
-tab_dash, tab_clients, tab_analyses, tab_escrow = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses", "ESCROW"])
-
 # ================= DASHBOARD =================
 with tab_dash:
     st.subheader("📊 Dashboard")
-    st.caption("Filtres contextuels basés sur Visa.xlsx : coche des catégories, puis leurs sous-catégories s’affichent.")
 
-    # Filtres contextuels (cases ; passe as_toggle=True si tu veux des bascules)
-    sel = build_checkbox_filters_grouped(df_visa, keyprefix=f"flt_dash_{sheet_choice}", as_toggle=False)
+    # Charger le référentiel Visa
+    df_visa_safe = _ensure_visa_columns(df_visa if 'df_visa' in globals() else pd.DataFrame())
+    if df_visa_safe.empty:
+        st.warning("⚠️ Le référentiel Visa est vide ou mal formé. Charge d'abord ton fichier Visa.xlsx.")
+        sel = {"__whitelist_visa__": [], "Catégorie": []}
+        f = df_clients.copy()
+    else:
+        # Construction dynamique des filtres (checkboxes hiérarchiques)
+        sel = build_checkbox_filters_grouped(df_visa_safe, keyprefix=f"flt_dash_{sheet_choice}", as_toggle=False)
+        f = filter_clients_by_ref(df_clients, sel)
 
-    # Filtrage
-    f = filter_clients_by_ref(df_clients, sel)
-
-    # Filtres date simples en plus (Année/Mois)
-    cR1, cR2, cR3 = st.columns(3)
-    years  = sorted({d.year for d in f["Date"] if pd.notna(d)}) if "Date" in f.columns else []
-    months = sorted([m for m in f["Mois"].dropna().unique()]) if "Mois" in f.columns else []
-    sel_years  = cR1.multiselect("Année", years, default=[], key=f"dash_years_{sheet_choice}")
-    sel_months = cR2.multiselect("Mois (MM)", months, default=[], key=f"dash_months_{sheet_choice}")
-    include_na_dates = cR3.checkbox("Inclure lignes sans date", value=True, key=f"dash_na_{sheet_choice}")
-
-    if "Date" in f.columns and sel_years:
-        mask = f["Date"].apply(lambda x: (pd.notna(x) and x.year in sel_years))
-        if include_na_dates: mask |= f["Date"].isna()
-        f = f[mask]
-    if "Mois" in f.columns and sel_months:
-        mask = f["Mois"].isin(sel_months)
-        if include_na_dates: mask |= f["Mois"].isna()
-        f = f[mask]
-
-    hidden = len(df_clients) - len(f)
-    if hidden > 0:
-        st.caption(f"🔎 {hidden} ligne(s) masquée(s) par les filtres.")
-
-    # KPI compacts (robustes via _safe_num_series)
+    # --- KPI principaux ---
     st.markdown("""
     <style>.small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}.small-kpi [data-testid="stMetricLabel"]{font-size:.85rem;opacity:.8}</style>
     """, unsafe_allow_html=True)
     st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
     k1,k2,k3,k4 = st.columns(4)
     k1.metric("Dossiers", f"{len(f)}")
-    k2.metric("Honoraires", _fmt_money_us(_safe_num_series(f, HONO).sum()))
+    k2.metric("Honoraires", _fmt_money_us(_safe_num_series(f, "Montant honoraires (US $)").sum()))
     k3.metric("Payé",      _fmt_money_us(_safe_num_series(f, "Payé").sum()))
     k4.metric("Solde",     _fmt_money_us(_safe_num_series(f, "Reste").sum()))
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Tableau
-    st.divider()
-    st.subheader("📋 Dossiers filtrés")
-    cols_show = [c for c in [DOSSIER_COL,"ID_Client","Nom","Date","Mois","Catégorie","Visa",HONO,AUTRE,TOTAL,"Payé","Reste",
-                             S_ENVOYE,D_ENVOYE,S_APPROUVE,D_APPROUVE,S_RFE,D_RFE,S_REFUSE,D_REFUSE,S_ANNULE,D_ANNULE] if c in f.columns]
-    view = f.copy()
-    for col in [HONO,AUTRE,TOTAL,"Payé","Reste"]:
-        if col in view.columns: view[col] = pd.to_numeric(view[col], errors="coerce").fillna(0.0).map(_fmt_money_us)
-    if "Date" in view.columns: view["Date"] = view["Date"].astype(str)
-    st.dataframe(view[cols_show], use_container_width=True)
+    # --- Table des dossiers filtrés ---
+    if not f.empty:
+        st.dataframe(f.reset_index(drop=True))
+    else:
+        st.info("Aucun dossier ne correspond à la sélection actuelle.")
 
 
 # =========================
