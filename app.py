@@ -336,7 +336,7 @@ clients_path = st.sidebar.text_input("Chemin Clients", value=str(last_clients) i
 clients_path = Path(clients_path) if clients_path else None
 
 # Visa.xlsx
-up_visa = st.sidebar.file_uploader("Référentiel Visa.xlsx (onglet 'Visa' ou 'Visa_normalise')", type=["xlsx"], key="up_visa")
+up_visa = st.sidebar.file_uploader("Référentiel Visa.xlsx (onglet 'Visa')", type=["xlsx"], key="up_visa")
 if up_visa is not None:
     buf = up_visa.getvalue()
     vpath = Path(up_visa.name).resolve()
@@ -350,11 +350,11 @@ st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Recharger", use_container_width=True):
     st.rerun()
 
-# --- Guards ---
+# --- Contrôles ---
 if not clients_path or not clients_path.exists():
     st.warning("Charge un **classeur Clients** (.xlsx)."); st.stop()
 if not visa_path or not visa_path.exists():
-    st.warning("Charge le **référentiel Visa.xlsx**."); st.stop()
+    st.warning("Charge le **référentiel Visa.xlsx** (onglet 'Visa')."); st.stop()
 
 # --- Feuille Clients à utiliser ---
 sheets = list_sheets(clients_path)
@@ -386,77 +386,13 @@ with tab_dash:
     st.subheader("📊 Dashboard")
     st.caption("Filtres contextuels basés sur Visa.xlsx : coche des catégories, puis leurs sous-catégories s’affichent.")
 
-    # ---------- Filtres contextuels ----------
-    # (mettre as_toggle=True si vous préférez des bascules)
-    def _slug(s: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", _norm_txt(s))
-
-    def _multi_bool_inputs(options: list[str], label: str, keyprefix: str, as_toggle: bool=False) -> list[str]:
-        if not options:
-            st.caption(f"Aucune option pour **{label}**."); 
-            return []
-        with st.expander(label, expanded=False):
-            c1, c2 = st.columns(2)
-            all_on  = c1.toggle("Tout sélectionner", value=False, key=f"{keyprefix}_all")
-            none_on = c2.toggle("Tout désélectionner", value=False, key=f"{keyprefix}_none")
-            selected = []
-            cols = st.columns(3) if len(options) > 6 else st.columns(2)
-            for i, opt in enumerate(options):
-                k = f"{keyprefix}_{i}"
-                if all_on:  st.session_state[k] = True
-                if none_on: st.session_state[k] = False
-                with cols[i % len(cols)]:
-                    val = st.toggle(opt, value=st.session_state.get(k, False), key=k) if as_toggle \
-                          else st.checkbox(opt, value=st.session_state.get(k, False), key=k)
-                    if val: selected.append(opt)
-        return selected
-
-    def build_checkbox_filters_grouped(df_ref: pd.DataFrame, keyprefix: str, as_toggle: bool=False) -> dict:
-        res = {"Catégorie": [], "SC_map": {}, "__whitelist_visa__": []}
-        if df_ref is None or df_ref.empty:
-            st.info("Référentiel Visa vide.")
-            return res
-
-        cats = sorted([v for v in df_ref["Catégorie"].unique() if _safe_str(v)])
-        sel_cats = _multi_bool_inputs(cats, "Catégories", f"{keyprefix}_cat", as_toggle=as_toggle)
-        res["Catégorie"] = sel_cats
-
-        whitelist_union = set()
-        for cat in sel_cats:
-            sub = df_ref[df_ref["Catégorie"] == cat].copy()
-            cat_key = _slug(cat)
-            res["SC_map"][cat] = {}
-            st.markdown(f"#### 🧭 {cat}")
-            for i in range(1, 9):
-                col = f"Sous-categories {i}"
-                options = sorted([v for v in sub[col].unique() if _safe_str(v)])
-                label = f"{cat} — {col}"
-                picked = _multi_bool_inputs(options, label, f"{keyprefix}_{cat_key}_sc{i}", as_toggle=as_toggle)
-                res["SC_map"][cat][col] = picked
-                if picked:
-                    sub = sub[sub[col].isin(picked)]
-            whitelist_union.update(sub["VisaCode"].dropna().unique().tolist())
-
-        res["__whitelist_visa__"] = sorted(whitelist_union)
-        return res
-
-    def filter_clients_by_ref(df_clients: pd.DataFrame, sel: dict) -> pd.DataFrame:
-        if df_clients is None or df_clients.empty:
-            return df_clients
-        f = df_clients.copy()
-        f["__code"] = f["Visa"].astype(str).map(_visa_code_only)
-        wl = set(sel.get("__whitelist_visa__", []))
-        if wl:
-            f = f[f["__code"].isin(wl)]
-        cats = sel.get("Catégorie") or []
-        if cats and "Catégorie" in f.columns:
-            f = f[f["Catégorie"].astype(str).isin(cats)]
-        return f.drop(columns="__code", errors="ignore")
-
+    # Filtres contextuels (cases ; passe as_toggle=True si tu veux des bascules)
     sel = build_checkbox_filters_grouped(df_visa, keyprefix=f"flt_dash_{sheet_choice}", as_toggle=False)
+
+    # Filtrage
     f = filter_clients_by_ref(df_clients, sel)
 
-    # Filtres date simples
+    # Filtres date simples en plus (Année/Mois)
     cR1, cR2, cR3 = st.columns(3)
     years  = sorted({d.year for d in f["Date"] if pd.notna(d)}) if "Date" in f.columns else []
     months = sorted([m for m in f["Mois"].dropna().unique()]) if "Mois" in f.columns else []
@@ -477,16 +413,16 @@ with tab_dash:
     if hidden > 0:
         st.caption(f"🔎 {hidden} ligne(s) masquée(s) par les filtres.")
 
-    # KPI
+    # KPI compacts (robustes via _safe_num_series)
     st.markdown("""
     <style>.small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}.small-kpi [data-testid="stMetricLabel"]{font-size:.85rem;opacity:.8}</style>
     """, unsafe_allow_html=True)
     st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
     k1,k2,k3,k4 = st.columns(4)
     k1.metric("Dossiers", f"{len(f)}")
-    k2.metric("Honoraires", _fmt_money_us(float(f.get(HONO, pd.Series(dtype=float)).sum())))
-    k3.metric("Payé", _fmt_money_us(float(f.get("Payé", pd.Series(dtype=float)).sum())))
-    k4.metric("Solde", _fmt_money_us(float(f.get("Reste", pd.Series(dtype=float)).sum())))
+    k2.metric("Honoraires", _fmt_money_us(_safe_num_series(f, HONO).sum()))
+    k3.metric("Payé",      _fmt_money_us(_safe_num_series(f, "Payé").sum()))
+    k4.metric("Solde",     _fmt_money_us(_safe_num_series(f, "Reste").sum()))
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Tableau
@@ -715,6 +651,7 @@ with tab_clients:
             st.error("Ligne introuvable.")
 
 
+
 # =========================
 # VISA APP — PARTIE 4/5
 # =========================
@@ -755,19 +692,17 @@ with tab_analyses:
     fA["Année"] = fA["Date"].apply(lambda x: x.year if pd.notna(x) else pd.NA)
     fA["MoisNum"] = fA["Date"].apply(lambda x: int(x.month) if pd.notna(x) else pd.NA)
     fA["Periode"] = fA["Date"].apply(lambda x: f"{x.year}-{x.month:02d}" if pd.notna(x) else "NA")
-    for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
-        if col in fA.columns: fA[col] = pd.to_numeric(fA[col], errors="coerce").fillna(0.0)
 
-    # KPI
+    # KPI (robustes)
     st.markdown("""
     <style>.small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}.small-kpi [data-testid="stMetricLabel"]{font-size:.85rem;opacity:.8}</style>
     """, unsafe_allow_html=True)
     st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
     k1,k2,k3,k4 = st.columns(4)
     k1.metric("Dossiers", f"{len(fA)}")
-    k2.metric("Total (US $)", _fmt_money_us(float(fA.get(TOTAL, pd.Series(dtype=float)).sum())))
-    k3.metric("Payé (US $)", _fmt_money_us(float(fA.get("Payé", pd.Series(dtype=float)).sum())))
-    k4.metric("Solde (US $)", _fmt_money_us(float(fA.get("Reste", pd.Series(dtype=float)).sum())))
+    k2.metric("Honoraires", _fmt_money_us(_safe_num_series(fA, HONO).sum()))
+    k3.metric("Payé",      _fmt_money_us(_safe_num_series(fA, "Payé").sum()))
+    k4.metric("Solde",     _fmt_money_us(_safe_num_series(fA, "Reste").sum()))
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Volumes par période
@@ -794,6 +729,10 @@ with tab_analyses:
     st.divider()
 
     # Comparaisons YoY & par mois
+    for col in [HONO, AUTRE, TOTAL, "Payé","Reste"]:
+        if col in fA.columns:
+            fA[col] = _safe_num_series(fA, col)  # s'assure du type numérique
+
     st.markdown("## 🔁 Comparaisons (YoY & Mois)")
     by_year = fA.dropna(subset=["Année"]).groupby("Année").agg(
         Dossiers=("Nom","count"),
@@ -814,7 +753,7 @@ with tab_analyses:
         Reste=("Reste","sum"),
     ).reset_index()
 
-    c2.dataframe(by_year_month.pivot_table(index="MoisNum", columns="Année", values="Dossiers", fill_value=0), use_container_width=True)
+    c2.dataframe(by_year_month, use_container_width=True)
 
     st.divider()
     st.markdown("### 🔎 Détails (clients)")
@@ -826,7 +765,8 @@ with tab_analyses:
     ] if c in details.columns]
     for col in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
         if col in details.columns:
-            details[col] = details[col].apply(lambda x: _fmt_money_us(x) if pd.notna(x) else "")
+            details[col] = pd.to_numeric(details[col], errors="coerce").fillna(0.0).map(_fmt_money_us)
+    if "Date" in details.columns: details["Date"] = details["Date"].astype(str)
     st.dataframe(details[details_cols].sort_values(["Année","MoisNum","Catégorie","Nom"]), use_container_width=True)
 
 
