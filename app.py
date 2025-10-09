@@ -1,65 +1,27 @@
-# =========================
-# VISA APP — PARTIE 1/5
-# =========================
+# =============================================
+# 🧭 PARTIE 1/5 — INITIALISATION & CHARGEMENT
+# =============================================
 from __future__ import annotations
-
-import json, re, unicodedata
-from pathlib import Path
-from datetime import date, datetime
-from typing import Any
-
-import pandas as pd
-import numpy as np
 import streamlit as st
+import pandas as pd
+from pathlib import Path
+from datetime import datetime, date
+import json, re, unicodedata
 
-# ---------- Constantes colonnes Clients ----------
-DOSSIER_COL = "Dossier N"
-HONO  = "Montant honoraires (US $)"
-AUTRE = "Autres frais (US $)"
-TOTAL = "Total (US $)"
-PAY_JSON = "Paiements"  # JSON [{"date":"YYYY-MM-DD","mode":"CB","amount":123.45}, ...]
+st.set_page_config(
+    page_title="📑 Gestion des Visas — Villa Tobias",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# Statuts + dates associées (ordre demandé)
-S_ENVOYE,   D_ENVOYE   = "Dossier envoyé",  "Date envoyé"
-S_APPROUVE, D_APPROUVE = "Dossier approuvé","Date approuvé"
-S_RFE,      D_RFE      = "RFE",             "Date RFE"
-S_REFUSE,   D_REFUSE   = "Dossier refusé",  "Date refusé"
-S_ANNULE,   D_ANNULE   = "Dossier annulé",  "Date annulé"
-STATUS_COLS  = [S_ENVOYE, S_APPROUVE, S_RFE, S_REFUSE, S_ANNULE]
-STATUS_DATES = [D_ENVOYE, D_APPROUVE, D_RFE, D_REFUSE, D_ANNULE]
+# =============================================
+# 📁 FONCTIONS DE BASE
+# =============================================
 
-# ESCROW
-ESC_TR = "ESCROW transféré (US $)"     # cumul transféré vers compte ordinaire
-ESC_JR = "Journal ESCROW"              # JSON [{"ts": "...", "amount": float, "note": ""}]
-
-# Numérotation dossier initiale
-DOSSIER_START = 13057
-
-# ---------- Persistance chemins fichiers ----------
-STATE_FILE = Path(".visa_app_state.json")
-
-def _save_last_paths(clients: Path|None=None, visa: Path|None=None):
-    data = {}
-    if STATE_FILE.exists():
-        try: data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception: data = {}
-    if clients is not None: data["clients_path"] = str(clients)
-    if visa is not None:    data["visa_path"]    = str(visa)
-    STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-def _load_last_paths() -> tuple[Path|None, Path|None]:
-    if not STATE_FILE.exists(): return None, None
+def _safe_str(x):
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        c = Path(data.get("clients_path","")); v = Path(data.get("visa_path",""))
-        return (c if c.exists() else None, v if v.exists() else None)
-    except Exception:
-        return None, None
-
-# ---------- Helpers texte / nombres ----------
-def _safe_str(x) -> str:
-    try:
-        if x is None or (isinstance(x, float) and pd.isna(x)): return ""
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
         return str(x).strip()
     except Exception:
         return ""
@@ -72,338 +34,134 @@ def _norm_txt(x: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9\s]+", " ", s)
     return " ".join(s.lower().split())
 
-def _visa_code_only(v: str) -> str:
-    s = _safe_str(v)
-    if not s: return ""
-    parts = s.split()
-    if len(parts) >= 2 and parts[-1].upper() in {"COS","EOS"}:
-        return " ".join(parts[:-1]).strip()
-    return s.strip()
+def _to_num(s):
+    if isinstance(s, pd.Series):
+        s = s.astype(str).str.replace(r"[^\d,.\-]", "", regex=True)
+        def _one(x):
+            if x == "" or x == "-":
+                return 0.0
+            if x.count(",") == 1 and x.count(".") == 0:
+                x = x.replace(",", ".")
+            if x.count(".") == 1 and x.count(",") >= 1:
+                x = x.replace(",", "")
+            try:
+                return float(x)
+            except:
+                return 0.0
+        return s.map(_one)
+    return 0.0
 
-def _to_num(s: Any) -> pd.Series:
-    if s is None: return pd.Series(dtype=float)
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:,0] if s.shape[1] else pd.Series(dtype=float)
-    s = pd.Series(s).astype(str).str.replace(r"[^\d,.\-]", "", regex=True)
-    def _one(x):
-        if x=="" or x=="-": return 0.0
-        if x.count(",")==1 and x.count(".")==0: x=x.replace(",",".")
-        if x.count(".")==1 and x.count(",")>=1: x=x.replace(",","")
-        try: return float(x)
-        except: return 0.0
-    return s.map(_one)
+# =============================================
+# ⚙️ CHARGEMENT DES FICHIERS
+# =============================================
 
-def _to_int(s: Any) -> pd.Series:
-    try: return pd.to_numeric(pd.Series(s), errors="coerce").fillna(0).astype(int)
-    except Exception: return pd.Series([0]*len(pd.Series(s)), dtype=int)
-
-def _fmt_money_us(v: float) -> str:
-    try: return f"${v:,.2f}"
-    except: return "$0.00"
-
-# ---------- Paiements (JSON en cellule) ----------
-def _parse_json_list(val: Any) -> list:
-    if val is None: return []
-    if isinstance(val, list): return val
-    try:
-        out = json.loads(val)
-        return out if isinstance(out, list) else []
-    except Exception:
-        return []
-
-def _sum_payments(lst: list[dict]) -> float:
-    total = 0.0
-    for e in lst:
-        try: total += float(e.get("amount", 0.0))
-        except Exception: pass
-    return total
-
-# ---------- IO Excel ----------
-def list_sheets(path: Path) -> list[str]:
-    try: return pd.ExcelFile(path).sheet_names
-    except Exception: return []
-
-def read_sheet(path: Path, sheet: str, normalize: bool=False) -> pd.DataFrame:
-    try: df = pd.read_excel(path, sheet_name=sheet)
-    except Exception: return pd.DataFrame()
-    if normalize: return normalize_clients(df)
-    return df
-
-def write_sheet_inplace(path: Path, sheet: str, df: pd.DataFrame):
+@st.cache_data(show_spinner=False)
+def load_excel(path: str | Path, sheet_candidates=("Clients", "Clients_normalises")) -> pd.DataFrame:
+    """Lecture d’un fichier Excel de clients."""
     path = Path(path)
-    try:
-        if path.exists():
-            book = pd.ExcelFile(path)
-            sheets = {sn: pd.read_excel(path, sheet_name=sn) for sn in book.sheet_names}
-        else:
-            sheets = {}
-        sheets[sheet] = df
-        with pd.ExcelWriter(path, engine="openpyxl") as w:
-            for sn, sdf in sheets.items():
-                sdf.to_excel(w, sheet_name=sn, index=False)
-    except Exception as e:
-        st.error(f"Erreur écriture Excel: {e}")
-        raise
+    if not path.exists():
+        return pd.DataFrame()
+    xls = pd.ExcelFile(path)
+    for sn in sheet_candidates:
+        if sn in xls.sheet_names:
+            df = pd.read_excel(path, sheet_name=sn)
+            return df
+    # fallback: premier onglet
+    return pd.read_excel(path, sheet_name=xls.sheet_names[0])
 
-# ---------- Numérotation / IDs ----------
-def ensure_dossier_numbers(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    if DOSSIER_COL not in df.columns:
-        df[DOSSIER_COL] = 0
-    nums = _to_int(df[DOSSIER_COL])
-    if (nums == 0).all():
-        start = DOSSIER_START
-        df[DOSSIER_COL] = [start + i for i in range(len(df))]
-        return df
-    maxn = int(nums.max()) if len(nums) else (DOSSIER_START - 1)
-    for i in range(len(df)):
-        if int(nums.iat[i]) <= 0:
-            maxn += 1
-            df.at[i, DOSSIER_COL] = maxn
-    return df
 
-def next_dossier_number(df: pd.DataFrame) -> int:
-    if df is None or df.empty or DOSSIER_COL not in df.columns:
-        return DOSSIER_START
-    nums = _to_int(df[DOSSIER_COL])
-    m = int(nums.max()) if len(nums) else (DOSSIER_START - 1)
-    if m < DOSSIER_START - 1: m = DOSSIER_START - 1
-    return m + 1
+@st.cache_data(show_spinner=False)
+def load_visa_structure(path: str | Path, sheet_candidates=("Visa", "Visa_normalise")) -> pd.DataFrame:
+    """Lecture d’un référentiel Visa (Catégorie + Sous-catégories)."""
+    path = Path(path)
+    if not path.exists():
+        return pd.DataFrame()
+    xls = pd.ExcelFile(path)
+    for sn in sheet_candidates:
+        if sn in xls.sheet_names:
+            df = pd.read_excel(path, sheet_name=sn)
+            return df
+    return pd.read_excel(path, sheet_name=xls.sheet_names[0])
 
-def _make_client_id_from_row(row: dict) -> str:
-    # ID client basé sur Nom + Date
-    nom = _safe_str(row.get("Nom"))
-    try: d = pd.to_datetime(row.get("Date")).date()
-    except Exception: d = date.today()
-    base = f"{nom}-{d.strftime('%Y%m%d')}"
-    base = re.sub(r"[^A-Za-z0-9\-]+", "", base.replace(" ", "-"))
-    return base.lower()
 
-# ---------- Fusion colonnes dupliquées ----------
-def _collapse_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return df
-    cols = df.columns.astype(str)
-    if not cols.duplicated().any(): return df
-    out = pd.DataFrame(index=df.index)
-    for col in pd.unique(cols):
-        same = df.loc[:, cols == col]
-        if same.shape[1] == 1:
-            out[col] = same.iloc[:, 0]; continue
-        try:
-            same_num = same.apply(pd.to_numeric, errors="coerce")
-            if same_num.notna().any().any():
-                out[col] = same_num.sum(axis=1, skipna=True); continue
-        except Exception: pass
-        def _first_non_empty(row):
-            for v in row:
-                if pd.notna(v) and str(v).strip() != "": return v
-            return ""
-        out[col] = same.apply(_first_non_empty, axis=1)
-    return out
+# =============================================
+# 🎛️ INTERFACE DE CHOIX DE FICHIERS
+# =============================================
+st.sidebar.header("📂 Fichiers")
 
-# ---------- Normalisation Clients ----------
-def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return pd.DataFrame()
-    df = df.copy()
+# --- Chargement du fichier principal Clients ---
+clients_file = st.sidebar.file_uploader("Fichier Clients", type=["xlsx"], key="up_clients")
+default_clients_path = st.session_state.get("clients_last_path", "")
+clients_path_text = st.sidebar.text_input("Chemin Clients.xlsx", value=default_clients_path)
 
-    # Renommages souples
-    ren = {}
-    for c in df.columns:
-        lc = _norm_txt(c)
-        if "montant honoraires" in lc or lc=="honoraires": ren[c]=HONO
-        elif "autres frais" in lc or lc=="autres": ren[c]=AUTRE
-        elif lc.startswith("total"): ren[c]=TOTAL
-        elif lc in {"reste","solde"}: ren[c]="Reste"
-        elif "paye" in lc or "payé" in lc: ren[c]="Payé"
-        elif "categorie" in lc: ren[c]="Catégorie"
-        elif lc in {"visa"}: ren[c]="Visa"
-        elif lc in {"dossier n","dossier"}: ren[c]=DOSSIER_COL
-    if ren: df = df.rename(columns=ren)
+clients_path: Path | None = None
+if clients_file is not None:
+    clients_path = Path(clients_file.name).resolve()
+    clients_path.write_bytes(clients_file.getvalue())
+    st.session_state["clients_last_path"] = str(clients_path)
+elif clients_path_text:
+    p = Path(clients_path_text)
+    clients_path = p if p.exists() else None
 
-    df = _collapse_duplicate_columns(df)
+# --- Chargement du référentiel Visa ---
+visa_file = st.sidebar.file_uploader("Référentiel Visa", type=["xlsx"], key="up_visa")
+default_visa_path = st.session_state.get("visa_last_path", "")
+visa_path_text = st.sidebar.text_input("Chemin Visa.xlsx", value=default_visa_path)
 
-    # Colonnes minimales
-    for c in [DOSSIER_COL,"ID_Client","Nom","Catégorie","Visa","Date","Mois",
-              HONO,AUTRE,TOTAL,"Payé","Reste",PAY_JSON,ESC_TR,ESC_JR] + STATUS_COLS + STATUS_DATES:
-        if c not in df.columns:
-            if c in [HONO,AUTRE,TOTAL,"Payé","Reste",ESC_TR]:
-                df[c] = 0.0
-            elif c in [PAY_JSON,ESC_JR,"ID_Client","Nom","Catégorie","Visa","Date","Mois"]:
-                df[c] = ""
-            elif c in STATUS_COLS:
-                df[c] = False
-            elif c in STATUS_DATES:
-                df[c] = ""
+visa_path: Path | None = None
+if visa_file is not None:
+    visa_path = Path(visa_file.name).resolve()
+    visa_path.write_bytes(visa_file.getvalue())
+    st.session_state["visa_last_path"] = str(visa_path)
+elif visa_path_text:
+    p = Path(visa_path_text)
+    visa_path = p if p.exists() else None
 
-    # Canoniser Visa
-    df["Visa"] = df["Visa"].map(_visa_code_only)
+# --- Si aucun fichier n'est encore sélectionné ---
+if clients_path is None or not clients_path.exists():
+    st.warning("🟡 Veuillez d’abord choisir ou indiquer le fichier **Clients.xlsx**.")
+    st.stop()
 
-    # Numériques
-    for c in [HONO,AUTRE,TOTAL,"Payé","Reste",ESC_TR]:
-        df[c] = _to_num(df[c])
+if visa_path is None or not visa_path.exists():
+    st.warning("🟡 Veuillez d’abord choisir ou indiquer le fichier **Visa.xlsx**.")
+    st.stop()
 
-    # Date & Mois
-    def _to_date(x):
-        try:
-            if x=="" or pd.isna(x): return pd.NaT
-            return pd.to_datetime(x).date()
-        except: return pd.NaT
-    df["Date"] = df["Date"].map(_to_date)
-    df["Mois"] = df["Date"].apply(lambda d: f"{d.month:02d}" if pd.notna(d) else pd.NA)
+# =============================================
+# 🧾 CHARGEMENT EFFECTIF DES DONNÉES
+# =============================================
+df_clients = load_excel(clients_path)
+df_visa = load_visa_structure(visa_path)
 
-    # Payé depuis JSON si présent (max entre colonne et JSON)
-    paid_from_json = []
-    for _, r in df.iterrows():
-        plist = _parse_json_list(r.get(PAY_JSON, ""))
-        paid_from_json.append(_sum_payments(plist))
-    paid_from_json = pd.Series(paid_from_json, index=df.index, dtype=float)
-    df["Payé"] = pd.Series([max(a, b) for a, b in zip(_to_num(df["Payé"]), paid_from_json)], index=df.index)
+if df_clients.empty:
+    st.error("Le fichier Clients est vide ou illisible.")
+    st.stop()
 
-    # Totaux
-    df[TOTAL] = _to_num(df.get(HONO, 0.0)) + _to_num(df.get(AUTRE, 0.0))
-    df["Reste"] = (df[TOTAL] - df["Payé"]).clip(lower=0.0)
+if df_visa.empty:
+    st.error("Le fichier Visa est vide ou illisible.")
+    st.stop()
 
-    # Numéros
-    df = ensure_dossier_numbers(df)
-    return df
+st.sidebar.success(f"✅ {len(df_clients)} clients chargés.")
+st.sidebar.success(f"✅ {len(df_visa)} catégories Visa chargées.")
 
-# ---------- Référentiel VISA.xlsx : Catégorie + Sous-catégories 1..8 ----------
-REF_LEVELS = ["Catégorie"] + [f"Sous-categories {i}" for i in range(1,9)]
+# =============================================
+# 🧮 NORMALISATION DE BASE
+# =============================================
+for c in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Reste"]:
+    if c in df_clients.columns:
+        df_clients[c] = _to_num(df_clients[c])
+if "Total (US $)" in df_clients.columns:
+    df_clients["Total (US $)"] = df_clients["Montant honoraires (US $)"] + df_clients["Autres frais (US $)"]
+else:
+    df_clients["Total (US $)"] = df_clients["Montant honoraires (US $)"] + df_clients["Autres frais (US $)"]
 
-def _find_col(df: pd.DataFrame, candidates: list[str]) -> str|None:
-    if df is None or df.empty: return None
-    m = {_norm_txt(c): str(c) for c in df.columns.astype(str)}
-    for t in candidates:
-        nt = _norm_txt(t)
-        if nt in m: return m[nt]
-    for t in candidates:
-        nt = _norm_txt(t)
-        for k,orig in m.items():
-            if nt in k: return orig
-    return None
+df_clients["Reste"] = (df_clients["Total (US $)"] - df_clients["Payé"]).clip(lower=0.0)
 
-def read_visa_matrix(visa_path: Path) -> pd.DataFrame:
-    """Lit Visa.xlsx (onglet 'Visa') avec colonnes: Catégorie, Sous-categories 1..8"""
-    try:
-        base = pd.read_excel(visa_path, sheet_name="Visa")
-    except Exception:
-        return pd.DataFrame(columns=REF_LEVELS)
-
-    cols = {}
-    for lvl in REF_LEVELS:
-        col = _find_col(base, [lvl, lvl.replace("categories","catégories"), lvl.replace("categories","categorie")])
-        cols[lvl] = col
-
-    out = pd.DataFrame()
-    for lvl in REF_LEVELS:
-        out[lvl] = base[cols[lvl]] if cols[lvl] else ""
-
-    for c in REF_LEVELS:
-        out[c] = out[c].fillna("").astype(str).str.strip()
-
-    # Écarte lignes entièrement vides
-    out = out[~(out.apply(lambda r: "".join(r.values), axis=1)=="")].reset_index(drop=True)
-
-    # ffill uniquement la colonne Catégorie (si formaté comme sur tes images)
-    out["Catégorie"] = out["Catégorie"].replace("", pd.NA).ffill().fillna("")
-
-    # Crée une colonne « VisaCode » (le code de base = 1ère colonne, ex. E-2, B-1…)
-    out["VisaCode"] = out["Catégorie"].apply(_visa_code_only)
-
-    # Chemin lisible pour debug/exports
-    def path_str(row):
-        parts = [row["Catégorie"]] + [row[f"Sous-categories {i}"] for i in range(1,9)]
-        parts = [p for p in parts if _safe_str(p)]
-        return " > ".join(parts)
-    out["Path"] = out.apply(path_str, axis=1)
-
-    return out
-
-# ---------- UI filtres contextuels (cases ou bascules) ----------
-def _slug(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", _norm_txt(s))
-
-def _multi_bool_inputs(options: list[str], label: str, keyprefix: str, as_toggle: bool=False) -> list[str]:
-    if not options:
-        st.caption(f"Aucune option pour **{label}**."); 
-        return []
-    with st.expander(label, expanded=False):
-        c1, c2 = st.columns(2)
-        all_on  = c1.toggle("Tout sélectionner", value=False, key=f"{keyprefix}_all")
-        none_on = c2.toggle("Tout désélectionner", value=False, key=f"{keyprefix}_none")
-        selected = []
-        cols = st.columns(3) if len(options) > 6 else st.columns(2)
-        for i, opt in enumerate(options):
-            k = f"{keyprefix}_{i}"
-            if all_on:  st.session_state[k] = True
-            if none_on: st.session_state[k] = False
-            with cols[i % len(cols)]:
-                val = st.toggle(opt, value=st.session_state.get(k, False), key=k) if as_toggle \
-                      else st.checkbox(opt, value=st.session_state.get(k, False), key=k)
-                if val: selected.append(opt)
-    return selected
-
-def build_checkbox_filters_grouped(df_ref: pd.DataFrame, keyprefix: str, as_toggle: bool=False) -> dict:
-    """
-    UI contextuelle :
-      1) on coche une ou plusieurs Catégories
-      2) pour CHAQUE catégorie cochée, on affiche ses SC1..SC8 (uniquement les options valides)
-      3) la whitelist de visas est l'union des sous-ensembles retenus pour chaque catégorie
-
-    Retourne:
-    {
-      "Catégorie": [ ... ],
-      "SC_map": { "<cat>": { "Sous-categories 1": [...], ..., "Sous-categories 8": [...] }, ... },
-      "__whitelist_visa__": [ "B-1", "E-2", ... ]
-    }
-    """
-    res = {"Catégorie": [], "SC_map": {}, "__whitelist_visa__": []}
-    if df_ref is None or df_ref.empty:
-        st.info("Référentiel Visa vide.")
-        return res
-
-    # 1) sélection des catégories
-    cats = sorted([v for v in df_ref["Catégorie"].unique() if _safe_str(v)])
-    sel_cats = _multi_bool_inputs(cats, "Catégories", f"{keyprefix}_cat", as_toggle=as_toggle)
-    res["Catégorie"] = sel_cats
-
-    whitelist_union = set()
-
-    # 2) pour chaque catégorie sélectionnée, bloc des sous-catégories
-    for cat in sel_cats:
-        sub = df_ref[df_ref["Catégorie"] == cat].copy()
-        cat_key = _slug(cat)
-        res["SC_map"][cat] = {}
-
-        st.markdown(f"#### 🧭 {cat}")
-
-        for i in range(1, 9):
-            col = f"Sous-categories {i}"
-            options = sorted([v for v in sub[col].unique() if _safe_str(v)])
-            label = f"{cat} — {col}"
-            picked = _multi_bool_inputs(options, label, f"{keyprefix}_{cat_key}_sc{i}", as_toggle=as_toggle)
-            res["SC_map"][cat][col] = picked
-            if picked:
-                sub = sub[sub[col].isin(picked)]
-
-        whitelist_union.update(sub["VisaCode"].dropna().unique().tolist())
-
-    res["__whitelist_visa__"] = sorted(whitelist_union)
-    return res
-
-# ---------- Filtrage Clients selon la whitelist ----------
-def filter_clients_by_ref(df_clients: pd.DataFrame, sel: dict) -> pd.DataFrame:
-    if df_clients is None or df_clients.empty:
-        return df_clients
-    f = df_clients.copy()
-    f["__code"] = f["Visa"].astype(str).map(_visa_code_only)
-    wl = set(sel.get("__whitelist_visa__", []))
-    if wl:
-        f = f[f["__code"].isin(wl)]
-    cats = sel.get("Catégorie") or []
-    if cats and "Catégorie" in f.columns:
-        f = f[f["Catégorie"].astype(str).isin(cats)]
-    return f.drop(columns="__code", errors="ignore")
+# =============================================
+# ✅ RÉSULTAT DE CHARGEMENT
+# =============================================
+st.success(f"Fichier **{clients_path.name}** et référentiel **{visa_path.name}** chargés avec succès.")
+st.write("Aperçu des 5 premiers clients :")
+st.dataframe(df_clients.head())
 
 
 # =========================
