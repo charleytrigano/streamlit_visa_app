@@ -83,6 +83,43 @@ def load_visa_structure(path: str | Path, sheet_candidates=("Visa", "Visa_normal
             return df
     return pd.read_excel(path, sheet_name=xls.sheet_names[0])
 
+# --- Persistance des derniers chemins utilisés (safe) ---
+from pathlib import Path
+import json
+
+STATE_FILE = Path(".visa_app_state.json")
+
+def _save_last_paths(clients: Path | None = None, visa: Path | None = None) -> None:
+    """Sauvegarde les derniers chemins (clients/visa) dans un petit JSON local."""
+    data = {}
+    if STATE_FILE.exists():
+        try:
+            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    if clients is not None:
+        data["clients_path"] = str(clients)
+    if visa is not None:
+        data["visa_path"] = str(visa)
+    STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _load_last_paths() -> tuple[Path | None, Path | None]:
+    """Charge les derniers chemins si disponibles et existants, sinon (None, None)."""
+    if not STATE_FILE.exists():
+        return None, None
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        cp = Path(data.get("clients_path", "")) if data.get("clients_path") else None
+        vp = Path(data.get("visa_path", "")) if data.get("visa_path") else None
+        if cp is not None and not cp.exists():
+            cp = None
+        if vp is not None and not vp.exists():
+            vp = None
+        return cp, vp
+    except Exception:
+        # JSON illisible/corrompu → on oublie
+        return None, None
+
 
 # =============================================
 # 🎛️ INTERFACE DE CHOIX DE FICHIERS
