@@ -12,6 +12,58 @@ from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
+from io import BytesIO
+import openpyxl
+
+# Colonnes minimales pour la feuille Clients
+CLIENTS_COLUMNS = [
+    "Dossier N","ID_Client","Nom","Date","Mois",
+    "Categorie","Visa",
+    "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste",
+    "Paiements","ESCROW transféré (US $)","Journal ESCROW",
+    "Dossier envoyé","Date envoyé",
+    "Dossier approuvé","Date approuvé",
+    "RFE","Date RFE",
+    "Dossier refusé","Date refusé",
+    "Dossier annulé","Date annulé",
+]
+
+# Colonnes minimales pour la feuille Visa (sans accents)
+VISA_COLUMNS = [
+    "Categorie","Sous-categorie 1","COS","EOS"  # tu peux en rajouter (Premium, etc.)
+]
+
+def _create_clients_template(path: str|Path, sheet_name: str="Clients") -> None:
+    df = pd.DataFrame(columns=CLIENTS_COLUMNS)
+    with pd.ExcelWriter(path, engine="openpyxl", mode="w") as wr:
+        df.to_excel(wr, sheet_name=sheet_name, index=False)
+
+def _create_visa_template(path: str|Path, sheet_name: str="Visa") -> None:
+    # Exemple de lignes : adapte si besoin
+    rows = [
+        {"Categorie":"B-1","Sous-categorie 1":"Affaires","COS":"x","EOS":""},
+        {"Categorie":"B-2","Sous-categorie 1":"Tourisme","COS":"x","EOS":"x"},
+        {"Categorie":"F-1","Sous-categorie 1":"Etudiant","COS":"x","EOS":"x"},
+    ]
+    df = pd.DataFrame(rows, columns=VISA_COLUMNS)
+    with pd.ExcelWriter(path, engine="openpyxl", mode="w") as wr:
+        df.to_excel(wr, sheet_name=sheet_name, index=False)
+
+def ensure_files_exist(clients_path: str|Path, visa_path: str|Path) -> None:
+    clients_path = Path(clients_path)
+    visa_path = Path(visa_path)
+    if not clients_path.exists():
+        _create_clients_template(clients_path)
+    if not visa_path.exists():
+        _create_visa_template(visa_path)
+
+def safe_excel_first_sheet(path: str|Path, preferred: str|None=None) -> str:
+    """Retourne le nom de feuille à lire : `preferred` si présent, sinon la 1re."""
+    with pd.ExcelFile(path) as xls:
+        sheets = xls.sheet_names
+    if preferred and preferred in sheets:
+        return preferred
+    return sheets[0] if sheets else "Clients"  # fallback
 
 # ------------------ CONFIG -------------------
 st.set_page_config(page_title="Visa Manager", layout="wide")
@@ -256,28 +308,50 @@ def next_dossier_number(df: pd.DataFrame, start: int = 13057) -> int:
 
 # ------------------ BARRE LATERALE ------------
 st.sidebar.header("📂 Fichiers")
-clients_path = st.sidebar.text_input("Fichier Clients (.xlsx)", value=DEFAULT_CLIENTS)
-visa_path    = st.sidebar.text_input("Fichier Visa (.xlsx)",    value=DEFAULT_VISA)
+clients_path = st.sidebar.text_input("Fichier Clients (.xlsx)", value=DEFAULT_CLIENTS, key="cli_path")
+visa_path    = st.sidebar.text_input("Fichier Visa (.xlsx)",    value=DEFAULT_VISA,    key="visa_path")
 
-# chargement
+# Crée les fichiers modèles si absents
+ensure_files_exist(clients_path, visa_path)
+
+# Déterminer une feuille valide
 try:
-    with pd.ExcelFile(clients_path) as xls:
-        client_sheets = xls.sheet_names
-    sheet_choice = "Clients" if "Clients" in client_sheets else client_sheets[0]
-except Exception:
+    sheet_choice = safe_excel_first_sheet(clients_path, preferred="Clients")
+except Exception as e:
+    st.error(f"Impossible d’ouvrir {clients_path} : {e}")
+    # on recrée un modèle propre et on retente
+    _create_clients_template(clients_path)
     sheet_choice = "Clients"
 
-df_clients = read_sheet(clients_path, sheet_choice)
-visa_choices_by_category = parse_visa_sheet(visa_path, sheet_name="Visa")
+# Charger les données clients (avec normalisation)
+try:
+    df_clients = read_sheet(clients_path, sheet_choice)
+except FileNotFoundError:
+    _create_clients_template(clients_path)
+    df_clients = read_sheet(clients_path, "Clients")
+except Exception as e:
+    st.error(f"Erreur lecture Clients: {e}")
+    _create_clients_template(clients_path)
+    df_clients = read_sheet(clients_path, "Clients")
 
-# affichage court
+# Charger les choix VISA depuis l’onglet Visa
+try:
+    visa_choices_by_category = parse_visa_sheet(visa_path, sheet_name="Visa")
+except FileNotFoundError:
+    _create_visa_template(visa_path)
+    visa_choices_by_category = parse_visa_sheet(visa_path, sheet_name="Visa")
+except Exception as e:
+    st.warning(f"Référentiel Visa non lisible ({e}). Utilisation d’un modèle.")
+    _create_visa_template(visa_path)
+    visa_choices_by_category = parse_visa_sheet(visa_path, sheet_name="Visa")
+
+# Affichage court
 with st.sidebar.expander("🔎 Vérif Visa détectés", expanded=False):
     if visa_choices_by_category:
         for cat, vals in visa_choices_by_category.items():
             st.write(f"**{cat}** → {', '.join(vals)}")
     else:
-        st.caption("Aucune structure Visa détectée (vérifie l'onglet ‘Visa’).")
-
+        st.caption("Aucune structure Visa détectée (onglet ‘Visa’ vide).")
 # ------------------ TABS ----------------------
 tab_dash, tab_clients, tab_analyses, tab_escrow = st.tabs([
     "Dashboard", "Clients", "Analyses", "ESCROW"
