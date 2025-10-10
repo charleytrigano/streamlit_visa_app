@@ -1055,14 +1055,13 @@ with tab_analyses:
     st.markdown("---")
 
 
-# --- 6) Détails des dossiers correspondants (liste clients) ---
+# # --- 6) Détails des dossiers correspondants (liste clients) ---
 st.markdown("### 📋 Détails des dossiers filtrés")
+
 detail = ff.copy()
 for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
     if c in detail.columns:
-        detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
-if "Date" in detail.columns:
-    detail["Date"] = detail["Date"].astype(str)
+        detail[c] = _safe_num
 
 show_cols = [c for c in [
     DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
