@@ -396,207 +396,21 @@ def filter_clients_by_ref(df_clients: pd.DataFrame, sel: dict) -> pd.DataFrame:
         f = f[f["Catégorie"].astype(str).isin(wl)]
     return f
 
-# ---------- I/O Excel ----------
-def list_sheets(xlsx_path: Path) -> List[str]:
-    try:
-        return pd.ExcelFile(xlsx_path).sheet_names
-    except Exception:
-        return []
-
-def read_sheet(xlsx_path: Path, sheet_name: str, normalize: bool=True) -> pd.DataFrame:
-    df = pd.read_excel(xlsx_path, sheet_name=sheet_name)
-    return normalize_clients(df) if normalize else df
-
-def write_sheet_inplace(xlsx_path: Path, sheet_name: str, df: pd.DataFrame) -> None:
-    """Écrit df dans sheet_name en conservant les autres feuilles."""
-    try:
-        xls = pd.ExcelFile(xlsx_path)
-        sheets = xls.sheet_names
-    except Exception:
-        sheets = []
-    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as w:
-        wrote = False
-        for sn in sheets:
-            if sn == sheet_name:
-                (df if isinstance(df, pd.DataFrame) else pd.DataFrame(df)).to_excel(w, sheet_name=sn, index=False)
-                wrote = True
-            else:
-                pd.read_excel(xlsx_path, sheet_name=sn).to_excel(w, sheet_name=sn, index=False)
-        if not wrote:
-            df.to_excel(w, sheet_name=sheet_name, index=False)
-
-# ---------- Chemins : par défaut + upload + saisie ----------
-st.sidebar.header("📁 Fichiers")
-
-# Valeurs par défaut si présents sur disque
-clients_path: Path | None = Path(DEFAULT_CLIENTS_XLSX) if Path(DEFAULT_CLIENTS_XLSX).exists() else None
-visa_path: Path | None = Path(DEFAULT_VISA_XLSX) if Path(DEFAULT_VISA_XLSX).exists() else None
-
-up_clients = st.sidebar.file_uploader("Classeur **Clients** (.xlsx)", type=["xlsx"], key="up_clients")
-up_visa    = st.sidebar.file_uploader("Référentiel **Visa** (.xlsx)", type=["xlsx"], key="up_visa")
-
-clients_text = st.sidebar.text_input("Chemin Clients", value=str(clients_path) if clients_path else "")
-visa_text    = st.sidebar.text_input("Chemin Visa", value=str(visa_path) if visa_path else "")
-
-# Sauvegarde des uploads localement
-if up_clients is not None:
-    p = Path(up_clients.name).resolve()
-    p.write_bytes(up_clients.getvalue())
-    clients_path = p
-
-if up_visa is not None:
-    p = Path(up_visa.name).resolve()
-    p.write_bytes(up_visa.getvalue())
-    visa_path = p
-
-# Si l’utilisateur a saisi un chemin
-if clients_text:
-    p = Path(clients_text)
-    if p.exists():
-        clients_path = p
-if visa_text:
-    p = Path(visa_text)
-    if p.exists():
-        visa_path = p
-
-# Lecture sécurisée
-if clients_path is None or not clients_path.exists():
-    st.error("Charge ou indique le **classeur Clients** (.xlsx). Fichier attendu : donnees_visa_clients1_adapte.xlsx")
-    st.stop()
-
-sheets = list_sheets(clients_path)
-if not sheets:
-    st.error("Aucune feuille détectée dans le classeur Clients.")
-    st.stop()
-
-# Heuristique de feuille Clients
-if "Clients" in sheets:
-    sheet_choice = "Clients"
-elif "Clients_normalises" in sheets:
-    sheet_choice = "Clients_normalises"
-else:
-    sheet_choice = sheets[0]
-
-df_clients = read_sheet(clients_path, sheet_choice, normalize=True)
-
-# Référentiel Visa : fichier séparé ou feuille dans le classeur Clients
-if visa_path and visa_path.exists():
-    try:
-        xlv = pd.ExcelFile(visa_path)
-        visa_sn = "Visa" if "Visa" in xlv.sheet_names else ("Visa_normalise" if "Visa_normalise" in xlv.sheet_names else xlv.sheet_names[0])
-        df_visa = pd.read_excel(visa_path, sheet_name=visa_sn)
-    except Exception:
-        df_visa = pd.DataFrame()
-else:
-    if "Visa" in sheets:
-        df_visa = pd.read_excel(clients_path, sheet_name="Visa")
-    elif "Visa_normalise" in sheets:
-        df_visa = pd.read_excel(clients_path, sheet_name="Visa_normalise")
-    else:
-        df_visa = pd.DataFrame()
-
-df_visa = _ensure_visa_columns(df_visa)
-
-# ---------- Création des onglets ----------
-tab_dash, tab_clients, tab_analyses, tab_escrow = st.tabs(["Dashboard", "Clients (CRUD)", "Analyses", "ESCROW"])
-
-
-# ============================================
-# VISA APP — PARTIE 2/5
-# Dashboard : filtres hiérarchiques + KPI + tableau
-# ============================================
-
-with tab_dash:
-    st.subheader("📊 Dashboard")
-
-    # --- 1) Filtres VISA (hiérarchiques) ---
-    df_visa_safe = _ensure_visa_columns(df_visa)
-    if df_visa_safe.empty:
-        st.warning("⚠️ Le référentiel Visa est vide ou mal formé. Charge un fichier Visa valide.")
-        sel = {"__whitelist_visa__": [], "Catégorie": []}
-        f = df_clients.copy()
-    else:
-        sel = build_checkbox_filters_grouped(
-            df_visa_safe,
-            keyprefix=f"flt_dash_{sheet_choice}",
-            as_toggle=False,  # Passe à True si tu veux des boutons bascule au lieu de checkboxes
-        )
-        f = filter_clients_by_ref(df_clients, sel)
-
-    # --- 2) Filtres additionnels (Année / Mois / Solde / Recherche) ---
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-
-    # Champs dérivés nécessaires aux filtres (si pas déjà créés en normalisation)
-    if "_Année_" not in f.columns:
-        f["_Année_"] = f["Date"].apply(lambda x: x.year if pd.notna(x) else pd.NA)
-    if "_MoisNum_" not in f.columns:
-        f["_MoisNum_"] = f["Date"].apply(lambda x: int(x.month) if pd.notna(x) else pd.NA)
-
-    yearsA = sorted([int(y) for y in f["_Année_"].dropna().unique()]) if not f.empty else []
-    monthsA = [f"{m:02d}" for m in sorted([int(m) for m in f["_MoisNum_"].dropna().unique()])] if not f.empty else []
-
-    with c1:
-        sel_years = st.multiselect("Année", yearsA, default=[], key=f"yr_{sheet_choice}")
-    with c2:
-        sel_months = st.multiselect("Mois (MM)", monthsA, default=[], key=f"mo_{sheet_choice}")
-    with c3:
-        solde_mode = st.selectbox(
-            "Solde",
-            ["Tous", "Soldé (Reste = 0)", "Non soldé (Reste > 0)"],
-            index=0,
-            key=f"solde_{sheet_choice}",
-        )
-    with c4:
-        q = st.text_input("Recherche (nom, ID, visa…)", "", key=f"q_{sheet_choice}")
-
-    # Application des filtres additionnels
-    ff = f.copy()
-    if sel_years:
-        ff = ff[ff["_Année_"].isin(sel_years)]
-    if sel_months:
-        ff = ff[ff["Mois"].astype(str).isin(sel_months)]
-    if solde_mode == "Soldé (Reste = 0)":
-        ff = ff[_safe_num_series(ff, "Reste") <= 1e-9]
-    elif solde_mode == "Non soldé (Reste > 0)":
-        ff = ff[_safe_num_series(ff, "Reste") > 1e-9]
-    if q:
-        qn = q.lower().strip()
-        def _row_match(r):
-            hay = " ".join([
-                _safe_str(r.get("Nom","")),
-                _safe_str(r.get("ID_Client","")),
-                _safe_str(r.get("Catégorie","")),
-                _safe_str(r.get("Visa","")),
-                str(r.get(DOSSIER_COL,"")),
-            ]).lower()
-            return qn in hay
-        ff = ff[ff.apply(_row_match, axis=1)]
-
-    # --- 3) Bouton réinitialiser les filtres ---
-    if st.button("🔄 Réinitialiser les filtres", key=f"reset_dash_{sheet_choice}"):
-        for k in list(st.session_state.keys()):
-            if k.startswith(f"flt_dash_{sheet_choice}") or \
-               k in {f"yr_{sheet_choice}", f"mo_{sheet_choice}", f"solde_{sheet_choice}", f"q_{sheet_choice}"}:
-                del st.session_state[k]
-        st.rerun()
-
-    # --- 4) KPI (sécurisés) ---
-    st.markdown("""
-    <style>
-    .small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}
-    .small-kpi [data-testid="stMetricLabel"]{font-size:.85rem;opacity:.8}
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Dossiers", f"{len(ff)}")
-    k2.metric("Honoraires", _fmt_money_us(_safe_num_series(ff, HONO).sum()))
-    k3.metric("Payé",      _fmt_money_us(_safe_num_series(ff, "Payé").sum()))
-    k4.metric("Solde",     _fmt_money_us(_safe_num_series(ff, "Reste").sum()))
-    st.markdown('</div>', unsafe_allow_html=True)
-
-  # --- 5) Tableau (montants formatés) ---
+def _uniquify_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Renomme les colonnes dupliquées en ajoutant des suffixes (_2, _3, ...)."""
+    cols = list(map(str, df.columns))
+    seen = {}
+    new_cols = []
+    for c in cols:
+        if c not in seen:
+            seen[c] = 1
+            new_cols.append(c)
+        else:
+            seen[c] += 1
+            new_cols.append(f"{c}_{seen[c]}")
+    df = df.copy()
+    df.columns = new_cols
+    return # --- 5) Tableau (montants formatés) ---
 view = ff.copy()
 for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
     if c in view.columns:
@@ -609,21 +423,14 @@ show_cols = [c for c in [
     HONO, AUTRE, TOTAL, "Payé", "Reste"
 ] if c in view.columns]
 
-# Tri d'abord sur le DF complet (contient colonnes dérivées)
 sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in view.columns]
 view_sorted = view.sort_values(by=sort_keys) if sort_keys else view
 
-# ✅ Sélection + dédoublonnage des colonnes AVANT affichage
+# ✅ Sélection puis dédoublonnage (renommage des doublons)
 df_disp = view_sorted[show_cols].copy()
-df_disp = df_disp.loc[:, ~pd.Index(df_disp.columns).duplicated(keep="first")]
+df_disp = _uniquify_columns(df_disp)
 
 st.dataframe(df_disp.reset_index(drop=True), use_container_width=True)
-
-    # Rappel concis des filtres actifs (pas d'expander ici → zéro risque d'indentation)
-    st.caption("🧾 Filtres actifs : "
-               f"Catégories={sel.get('Catégorie', [])} | "
-               f"Années={sel_years} | Mois={sel_months} | "
-               f"Solde={solde_mode} | Recherche='{q}'")
 
 
 # ============================================
@@ -1058,7 +865,7 @@ with tab_analyses:
 
     st.markdown("---")
 
-    # --- 6) Détails des dossiers correspondants (liste clients) ---
+    (liste clients) ---
 st.markdown("### 📋 Détails des dossiers filtrés")
 
 detail = ff.copy()
@@ -1092,7 +899,6 @@ st.caption(
     f"Solde={solde_mode} | Recherche='{q}'"
 )
 
-    
 # ============================================
 # VISA APP — PARTIE 5/5
 # ESCROW : calculs, transferts, journal & alertes
