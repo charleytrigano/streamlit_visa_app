@@ -540,7 +540,10 @@ with tab_dash:
 
     st.caption(f"📊 {len(view_sorted)} dossiers affichés.")
 
-# ============================================
+
+
+
+===========================================
 # VISA APP — PARTIE 3/5
 # Clients : créer / modifier / supprimer / paiements multiples
 # ============================================
