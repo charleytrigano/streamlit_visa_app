@@ -12,6 +12,135 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+# =============================
+# 🧩 Filtres contextuels VISA — version robuste
+# =============================
+import re
+import pandas as pd
+import streamlit as st
+
+# --- Liste hiérarchique des niveaux de catégories ---
+REF_LEVELS = ["Catégorie"] + [f"Sous-categories {i}" for i in range(1,9)]
+
+def _ensure_visa_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Nettoie et structure le fichier Visa pour éviter les erreurs."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=REF_LEVELS + ["Actif"])
+    out = df.copy()
+
+    # normalisation des noms de colonnes
+    norm = {re.sub(r"[^a-z0-9]+","", str(c).lower()): str(c) for c in out.columns}
+    def find_col(*cands):
+        for cand in cands:
+            key = re.sub(r"[^a-z0-9]+","", cand.lower())
+            if key in norm:
+                return norm[key]
+            for k, orig in norm.items():
+                if key in k:
+                    return orig
+        return None
+
+    # renommer les colonnes
+    cat = find_col("Catégorie","Categorie","Category")
+    out = out.rename(columns={cat: "Catégorie"}) if cat else out.assign(**{"Catégorie": ""})
+    for i in range(1,9):
+        sc = find_col(f"Sous-categories {i}", f"Sous categorie {i}", f"SC{i}")
+        if sc:
+            out = out.rename(columns={sc: f"Sous-categories {i}"})
+        else:
+            out[f"Sous-categories {i}"] = ""
+    act = find_col("Actif","Active","Inclure","Afficher")
+    out = out.rename(columns={act: "Actif"}) if act else out.assign(**{"Actif": 1})
+
+    # ne garder que les colonnes utiles
+    out = out.reindex(columns=REF_LEVELS + ["Actif"])
+    for c in REF_LEVELS + ["Actif"]:
+        out[c] = out[c].fillna("").astype(str).str.strip()
+    out["Catégorie"] = out["Catégorie"].replace("", pd.NA).ffill().fillna("")
+    try:
+        out["Actif_num"] = pd.to_numeric(out["Actif"], errors="coerce").fillna(0).astype(int)
+        out = out[out["Actif_num"] == 1].drop(columns=["Actif_num"])
+    except Exception:
+        pass
+    mask = out[REF_LEVELS].apply(lambda r: "".join(r.values), axis=1) != ""
+    out = out[mask].reset_index(drop=True)
+    return out
+
+def _slug(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")
+
+def _multi_bool_inputs(options: list[str], label: str, keyprefix: str, as_toggle: bool=False) -> list[str]:
+    """Affiche une sélection multi-case (checkbox ou toggle)"""
+    options = [o for o in options if str(o).strip() != ""]
+    if not options:
+        st.caption(f"Aucune option pour **{label}**.")
+        return []
+    with st.expander(label, expanded=False):
+        c1, c2 = st.columns(2)
+        all_on = c1.toggle("Tout sélectionner", value=False, key=f"{keyprefix}_all")
+        none_on = c2.toggle("Tout désélectionner", value=False, key=f"{keyprefix}_none")
+        selected = []
+        cols = st.columns(3 if len(options) > 6 else 2)
+        for i, opt in enumerate(sorted(options)):
+            k = f"{keyprefix}_{i}"
+            if all_on: st.session_state[k] = True
+            if none_on: st.session_state[k] = False
+            with cols[i % len(cols)]:
+                val = st.toggle(opt, value=st.session_state.get(k, False), key=k) if as_toggle \
+                      else st.checkbox(opt, value=st.session_state.get(k, False), key=k)
+                if val:
+                    selected.append(opt)
+    return selected
+
+def build_checkbox_filters_grouped(df_ref_in: pd.DataFrame, keyprefix: str, as_toggle: bool=False) -> dict:
+    """Construit l’arborescence dynamique de filtres"""
+    df_ref = _ensure_visa_columns(df_ref_in)
+    res = {"Catégorie": [], "SC_map": {}, "__whitelist_visa__": []}
+
+    if df_ref.empty:
+        st.info("Référentiel Visa vide ou invalide.")
+        return res
+
+    cats = sorted([v for v in df_ref["Catégorie"].unique() if str(v).strip() != ""])
+    sel_cats = _multi_bool_inputs(cats, "Catégories", f"{keyprefix}_cat", as_toggle=as_toggle)
+    res["Catégorie"] = sel_cats
+
+    whitelist = set()
+    for cat in sel_cats:
+        sub = df_ref[df_ref["Catégorie"] == cat].copy()
+        res["SC_map"][cat] = {}
+        st.markdown(f"#### 🧭 {cat}")
+        for i in range(1,9):
+            col = f"Sous-categories {i}"
+            options = sorted([v for v in sub[col].unique() if str(v).strip() != ""])
+            picked = _multi_bool_inputs(options, f"{cat} — {col}", f"{keyprefix}_{_slug(cat)}_sc{i}", as_toggle=as_toggle)
+            res["SC_map"][cat][col] = picked
+            if picked:
+                sub = sub[sub[col].isin(picked)]
+        whitelist.add(cat)
+
+    res["__whitelist_visa__"] = sorted(whitelist)
+    return res
+
+def filter_clients_by_ref(df_clients: pd.DataFrame, sel: dict) -> pd.DataFrame:
+    """Applique le filtre de sélection au tableau des clients"""
+    if df_clients is None or df_clients.empty:
+        return df_clients
+    f = df_clients.copy()
+    wl = set(sel.get("__whitelist_visa__", []))
+    if wl and "Catégorie" in f.columns:
+        f = f[f["Catégorie"].astype(str).isin(wl)]
+    return f
+
+# --- Helper additionnel pour colonnes dupliquées (sécurité KPI) ---
+def _safe_num_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([], dtype=float)
+    s = df[col]
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
 # ---------- Constantes colonnes ----------
 DOSSIER_COL = "Dossier N"
 HONO  = "Montant honoraires (US $)"
