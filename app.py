@@ -435,86 +435,105 @@ st.dataframe(df_disp.reset_index(drop=True), use_container_width=True)
 
 # ============================================
 # VISA APP — PARTIE 2/5
-# Tableau de bord principal (KPI + filtres + vue synthèse)
+# Tableau de bord (Dashboard)
 # ============================================
 
 with tab_dash:
-    st.subheader("📊 Tableau de bord — Synthèse des dossiers")
+    st.subheader("📊 Tableau de bord — Synthèse financière")
 
-    # --- 1) Chargement / préparation des données
-    base = df_clients.copy()
+    # --- 1) Filtres principaux (catégories, années, soldes) ---
+    df_visa_safe = _ensure_visa_columns(df_visa)
+    if df_visa_safe.empty:
+        st.warning("⚠️ Référentiel Visa vide. Les filtres de catégories sont désactivés.")
+        sel = {"__whitelist_visa__": [], "Catégorie": []}
+        base = df_clients.copy()
+    else:
+        sel = build_checkbox_filters_grouped(
+            df_visa_safe,
+            keyprefix=f"flt_dash_{sheet_choice}",
+            as_toggle=False,
+        )
+        base = filter_clients_by_ref(df_clients, sel)
 
-    if base.empty:
-        st.warning("⚠️ Aucun client disponible dans cette feuille.")
-        st.stop()
+    base = base.copy()
 
-    # Vérification colonnes
-    for col in ["Date", HONO, AUTRE, TOTAL, "Payé", "Reste"]:
-        if col not in base.columns:
-            base[col] = 0
-
-    # Colonnes dérivées (année / mois)
+    # --- 2) Ajout de colonnes dérivées (année, mois) ---
     if "_Année_" not in base.columns:
-        base["_Année_"] = pd.to_datetime(base["Date"], errors="coerce").dt.year
+        base["_Année_"] = base["Date"].apply(lambda x: x.year if pd.notna(x) else pd.NA)
     if "_MoisNum_" not in base.columns:
-        base["_MoisNum_"] = pd.to_datetime(base["Date"], errors="coerce").dt.month
-    base["_Mois_"] = base["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) else "")
+        base["_MoisNum_"] = base["Date"].apply(lambda x: int(x.month) if pd.notna(x) else pd.NA)
+    base["_Mois_"] = base["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) else pd.NA)
 
-    # --- 2) Filtres principaux
-    st.markdown("### 🎯 Filtres rapides")
+    years = sorted([int(y) for y in base["_Année_"].dropna().unique()]) if not base.empty else []
+    months = [f"{m:02d}" for m in sorted([int(m) for m in base["_MoisNum_"].dropna().unique()])] if not base.empty else []
 
-    years = sorted([int(y) for y in base["_Année_"].dropna().unique()])
-    months = sorted([f"{int(m):02d}" for m in base["_MoisNum_"].dropna().unique()])
-    categories = sorted(base["Catégorie"].dropna().unique())
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    with c1:
+        sel_years = st.multiselect("Année", years, default=[], key=f"dash_year_{sheet_choice}")
+    with c2:
+        sel_months = st.multiselect("Mois (MM)", months, default=[], key=f"dash_month_{sheet_choice}")
+    with c3:
+        solde_mode = st.selectbox(
+            "Solde",
+            ["Tous", "Soldé (Reste = 0)", "Non soldé (Reste > 0)"],
+            index=0,
+            key=f"dash_solde_{sheet_choice}",
+        )
+    with c4:
+        q = st.text_input("Recherche (nom, ID, visa…)", "", key=f"dash_q_{sheet_choice}")
 
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        sel_year = st.multiselect("Année", years, default=years, key="dash_year")
-    with f2:
-        sel_month = st.multiselect("Mois (MM)", months, default=months, key="dash_month")
-    with f3:
-        sel_cats = st.multiselect("Catégorie", categories, default=categories, key="dash_cat")
-    with f4:
-        q = st.text_input("Recherche (Nom / ID / Visa…)", "", key="dash_search")
-
-    # --- 3) Application des filtres
+    # --- 3) Application des filtres ---
     ff = base.copy()
 
-    if sel_year:
-        ff = ff[ff["_Année_"].isin(sel_year)]
-    if sel_month:
-        ff = ff[ff["_Mois_"].isin(sel_month)]
-    if sel_cats:
-        ff = ff[ff["Catégorie"].isin(sel_cats)]
+    if sel_years:
+        ff = ff[ff["_Année_"].isin(sel_years)]
+    if sel_months:
+        ff = ff[ff["_Mois_"].astype(str).isin(sel_months)]
+    if solde_mode == "Soldé (Reste = 0)":
+        ff = ff[_safe_num_series(ff, "Reste") <= 1e-9]
+    elif solde_mode == "Non soldé (Reste > 0)":
+        ff = ff[_safe_num_series(ff, "Reste") > 1e-9]
+
     if q:
-        ql = q.lower().strip()
-        ff = ff[ff.apply(lambda r:
-            ql in str(r.get("Nom","")).lower() or
-            ql in str(r.get("ID_Client","")).lower() or
-            ql in str(r.get("Visa","")).lower(), axis=1)]
+        qn = q.lower().strip()
+        def _match(r):
+            hay = " ".join([
+                _safe_str(r.get("Nom", "")),
+                _safe_str(r.get("ID_Client", "")),
+                _safe_str(r.get("Catégorie", "")),
+                _safe_str(r.get("Visa", "")),
+                str(r.get(DOSSIER_COL, "")),
+            ]).lower()
+            return qn in hay
+        ff = ff[ff.apply(_match, axis=1)]
 
-    # --- 4) KPI synthétiques
-    st.markdown("### 📈 Indicateurs clés")
+    st.info(f"**{len(ff)} dossiers** correspondant(s) à la sélection.")
 
+    # --- 4) Indicateurs (KPI) ---
+    st.markdown("""
+    <style>
+      .small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}
+      .small-kpi [data-testid="stMetricLabel"]{font-size:.85rem;opacity:.8}
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total dossiers", len(ff))
+    k1.metric("Dossiers", f"{len(ff)}")
     k2.metric("Honoraires", _fmt_money_us(_safe_num_series(ff, HONO).sum()))
     k3.metric("Payé", _fmt_money_us(_safe_num_series(ff, "Payé").sum()))
-    k4.metric("Reste dû", _fmt_money_us(_safe_num_series(ff, "Reste").sum()))
+    k4.metric("Reste", _fmt_money_us(_safe_num_series(ff, "Reste").sum()))
+    st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # --- 5) Tableau synthèse
-    # ✅ Patch pour éviter “ff non défini”
+    # --- 5) Tableau principal (avec garde-fou ff) ---
     if "ff" not in locals():
-        if "base" in locals():
-            ff = base.copy()
-        else:
-            ff = df_clients.copy()
-
-    st.markdown("### 📋 Vue synthèse")
+        ff = df_clients.copy()
 
     view = ff.copy()
+
+    # Formater les montants
     for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
         if c in view.columns:
             view[c] = _safe_num_series(view, c).map(_fmt_money_us)
@@ -522,23 +541,16 @@ with tab_dash:
         view["Date"] = view["Date"].astype(str)
 
     show_cols = [c for c in [
-        DOSSIER_COL, "Nom", "ID_Client", "Date", "Catégorie", "Visa", "Mois",
+        DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
         HONO, AUTRE, TOTAL, "Payé", "Reste",
         "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
     ] if c in view.columns]
 
-    # Supprime doublons éventuels
-    view = _uniquify_columns(view)
-
     sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in view.columns]
     view_sorted = view.sort_values(by=sort_keys) if sort_keys else view
 
-    st.dataframe(
-        view_sorted[show_cols].reset_index(drop=True),
-        use_container_width=True
-    )
-
-    st.caption(f"📊 {len(view_sorted)} dossiers affichés.")
+    df_disp = _uniquify_columns(view_sorted[show_cols].reset_index(drop=True))
+    st.dataframe(df_disp, use_container_width=True)
 
 
 
