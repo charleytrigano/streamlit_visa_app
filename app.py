@@ -808,6 +808,7 @@ with tab_clients:
         st.rerun()
 
 
+
 # ============================================
 # VISA APP — PARTIE 4/5
 # Analyses : filtres + KPI + comparaisons + détails
@@ -1007,7 +1008,6 @@ st.caption(
     f"Années={sel_years} | Mois={sel_months} | "
     f"Solde={solde_mode} | Recherche='{q}'"
 )
-
 
 
 # ============================================
