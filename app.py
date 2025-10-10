@@ -898,6 +898,210 @@ st.caption(
     f"Solde={solde_mode} | Recherche='{q}'"
 )
 
+
+
+# ============================================
+# VISA APP — PARTIE 4/5
+# Analyses : filtres + KPI + comparaisons + détails
+# ============================================
+
+with tab_analyses:
+    st.subheader("📈 Analyses — Volumes & Financier")
+
+    # --- 1) Filtres VISA hiérarchiques (référentiel) ---
+    df_visa_safe = _ensure_visa_columns(df_visa)
+    if df_visa_safe.empty:
+        st.warning("⚠️ Référentiel Visa vide ou mal formé. Les filtres de catégories sont désactivés.")
+        sel = {"__whitelist_visa__": [], "Catégorie": []}
+        base = df_clients.copy()
+    else:
+        sel = build_checkbox_filters_grouped(
+            df_visa_safe,
+            keyprefix=f"flt_ana_{sheet_choice}",
+            as_toggle=False,   # passe à True pour des toggles
+        )
+        base = filter_clients_by_ref(df_clients, sel)
+
+    # --- 2) Filtres additionnels (Année / Mois / Solde / Recherche) ---
+    base = base.copy()
+
+    # sécurise les colonnes dérivées si besoin
+    if "_Année_" not in base.columns:
+        base["_Année_"] = base["Date"].apply(lambda x: x.year if pd.notna(x) else pd.NA)
+    if "_MoisNum_" not in base.columns:
+        base["_MoisNum_"] = base["Date"].apply(lambda x: int(x.month) if pd.notna(x) else pd.NA)
+    base["_Mois_"] = base["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) else pd.NA)
+
+    yearsA  = sorted([int(y) for y in base["_Année_"].dropna().unique()]) if not base.empty else []
+    monthsA = [f"{m:02d}" for m in sorted([int(m) for m in base["_MoisNum_"].dropna().unique()])] if not base.empty else []
+
+    cR1, cR2, cR3, cR4 = st.columns([1, 1, 1, 2])
+    with cR1:
+        sel_years  = st.multiselect("Année", yearsA, default=[], key=f"ana_year_{sheet_choice}")
+    with cR2:
+        sel_months = st.multiselect("Mois (MM)", monthsA, default=[], key=f"ana_month_{sheet_choice}")
+    with cR3:
+        solde_mode = st.selectbox(
+            "Solde",
+            ["Tous", "Soldé (Reste = 0)", "Non soldé (Reste > 0)"],
+            index=0,
+            key=f"ana_solde_{sheet_choice}"
+        )
+    with cR4:
+        q = st.text_input("Recherche (nom, ID, visa…)", "", key=f"ana_q_{sheet_choice}")
+
+    # --- 3) Application des filtres ET garantie d'existence de ff ---
+    ff = base.copy()
+    if sel_years:
+        ff = ff[ff["_Année_"].isin(sel_years)]
+    if sel_months:
+        ff = ff[ff["_Mois_"].astype(str).isin(sel_months)]
+    if solde_mode == "Soldé (Reste = 0)":
+        ff = ff[_safe_num_series(ff, "Reste") <= 1e-9]
+    elif solde_mode == "Non soldé (Reste > 0)":
+        ff = ff[_safe_num_series(ff, "Reste") > 1e-9]
+    if q:
+        qn = q.lower().strip()
+        def _row_match(r):
+            hay = " ".join([
+                _safe_str(r.get("Nom","")),
+                _safe_str(r.get("ID_Client","")),
+                _safe_str(r.get("Catégorie","")),
+                _safe_str(r.get("Visa","")),
+                str(r.get(DOSSIER_COL,"")),
+            ]).lower()
+            return qn in hay
+        ff = ff[ff.apply(_row_match, axis=1)]
+
+    st.info(f"**{len(ff)} dossiers** correspondent à la sélection.")
+
+    # --- 4) KPI globaux ---
+    st.markdown("""
+    <style>
+      .small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}
+      .small-kpi [data-testid="stMetricLabel"]{font-size:.85rem;opacity:.8}
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Dossiers", f"{len(ff)}")
+    k2.metric("Honoraires", _fmt_money_us(_safe_num_series(ff, HONO).sum()))
+    k3.metric("Encaissements (Payé)", _fmt_money_us(_safe_num_series(ff, "Payé").sum()))
+    k4.metric("Solde à encaisser", _fmt_money_us(_safe_num_series(ff, "Reste").sum()))
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # --- 5) Comparaison Année → Année ---
+    st.markdown("### 📆 Comparaison Année → Année")
+    if not ff.empty and ff["_Année_"].notna().any():
+        def _sum_col(df_loc, col):
+            return _safe_num_series(df_loc, col).sum()
+
+        grpY = ff.groupby("_Année_", dropna=True).apply(
+            lambda g: pd.Series({
+                "Dossiers": int(g.shape[0]),
+                "Honoraires": _sum_col(g, HONO),
+                "Paye": _sum_col(g, "Payé"),
+                "Reste": _sum_col(g, "Reste"),
+            })
+        ).reset_index().rename(columns={"_Année_":"Année"}).sort_values("Année")
+
+        st.dataframe(grpY, use_container_width=True)
+
+        try:
+            import altair as alt
+            ch1 = alt.Chart(grpY).mark_bar().encode(
+                x=alt.X("Année:O", sort=None),
+                y=alt.Y("Dossiers:Q")
+            ).properties(height=220)
+            st.altair_chart(ch1, use_container_width=True)
+        except Exception:
+            pass
+
+        try:
+            import altair as alt
+            g_long = grpY.melt(id_vars=["Année"], value_vars=["Honoraires","Paye","Reste"],
+                               var_name="Type", value_name="Montant")
+            ch2 = alt.Chart(g_long).mark_line(point=True).encode(
+                x=alt.X("Année:O", sort=None),
+                y=alt.Y("Montant:Q"),
+                color="Type:N"
+            ).properties(height=240)
+            st.altair_chart(ch2, use_container_width=True)
+        except Exception:
+            pass
+    else:
+        st.info("Aucune date exploitable pour la comparaison annuelle.")
+
+    st.markdown("---")
+
+    # --- 6) Par Mois (toutes années confondues) ---
+    st.markdown("### 🗓️ Par mois (toutes années)")
+    if not ff.empty and ff["_Mois_"].notna().any():
+        def _sum_col(df_loc, col):
+            return _safe_num_series(df_loc, col).sum()
+
+        grpM = ff.groupby("_Mois_", dropna=True).apply(
+            lambda g: pd.Series({
+                "Dossiers": int(g.shape[0]),
+                "Honoraires": _sum_col(g, HONO),
+                "Paye": _sum_col(g, "Payé"),
+                "Reste": _sum_col(g, "Reste"),
+            })
+        ).reset_index().rename(columns={"_Mois_":"Mois"}).sort_values("Mois")
+
+        st.dataframe(grpM, use_container_width=True)
+
+        try:
+            import altair as alt
+            ch3 = alt.Chart(grpM).mark_bar().encode(
+                x=alt.X("Mois:O", sort=None),
+                y=alt.Y("Dossiers:Q")
+            ).properties(height=200)
+            st.altair_chart(ch3, use_container_width=True)
+        except Exception:
+            pass
+    else:
+        st.info("Aucun mois exploitable.")
+
+    st.markdown("---")
+
+    # --- 7) Détails des dossiers correspondants (liste clients) ---
+    st.markdown("### 📋 Détails des dossiers filtrés")
+
+    detail = ff.copy()
+    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+        if c in detail.columns:
+            detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
+    if "Date" in detail.columns:
+        detail["Date"] = detail["Date"].astype(str)
+
+    show_cols = [c for c in [
+        DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
+        HONO, AUTRE, TOTAL, "Payé", "Reste",
+        "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
+    ] if c in detail.columns]
+
+    # Tri puis sélection + dédoublonnage (renommage des doublons)
+    sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in detail.columns]
+    detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
+    df_disp = detail_sorted[show_cols].copy()
+    df_disp = _uniquify_columns(df_disp)
+
+    st.dataframe(df_disp.reset_index(drop=True), use_container_width=True)
+
+    # Récap filtres actifs
+    st.caption(
+        "🧾 Filtres actifs — "
+        f"Catégories={sel.get('Catégorie', [])} | "
+        f"Années={sel_years} | Mois={sel_months} | "
+        f"Solde={solde_mode} | Recherche='{q}'"
+    )
+
+
+
 # ============================================
 # VISA APP — PARTIE 5/5
 # ESCROW : calculs, transferts, journal & alertes
