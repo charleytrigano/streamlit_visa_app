@@ -597,24 +597,27 @@ with tab_dash:
     st.markdown('</div>', unsafe_allow_html=True)
 
     # --- 5) Tableau (montants formatés) ---
-    view = ff.copy()
-    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
-        if c in view.columns:
-            view[c] = _safe_num_series(view, c).map(_fmt_money_us)
-    if "Date" in view.columns:
-        view["Date"] = view["Date"].astype(str)
+view = ff.copy()
+for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+    if c in view.columns:
+        view[c] = _safe_num_series(view, c).map(_fmt_money_us)
+if "Date" in view.columns:
+    view["Date"] = view["Date"].astype(str)
 
-    show_cols = [c for c in [
-        DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
-        HONO, AUTRE, TOTAL, "Payé", "Reste"
-    ] if c in view.columns]
+show_cols = [c for c in [
+    DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
+    HONO, AUTRE, TOTAL, "Payé", "Reste"
+] if c in view.columns]
 
-    st.dataframe(
-        view[show_cols].reset_index(drop=True).sort_values(
-            by=[c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in view.columns]
-        ),
-        use_container_width=True,
-    )
+# ✅ d'abord trier sur le DataFrame complet (qui contient les colonnes dérivées),
+# puis ne sélectionner que les colonnes d'affichage
+sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in view.columns]
+view_sorted = view.sort_values(by=sort_keys) if sort_keys else view
+
+st.dataframe(
+    view_sorted[show_cols].reset_index(drop=True),
+    use_container_width=True,
+)
 
     # Petit rappel des filtres actifs
     with st.expander("🧾 Filtres actifs", expanded=False):
@@ -1051,22 +1054,27 @@ with tab_analyses:
 
     st.markdown("---")
 
-    # --- 6) Détails des dossiers correspondants (liste clients) ---
-    st.markdown("### 📋 Détails des dossiers filtrés")
-    detail = ff.copy()
-    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
-        if c in detail.columns:
-            detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
-    if "Date" in detail.columns:
-        detail["Date"] = detail["Date"].astype(str)
 
-    show_cols = [c for c in [
-        DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
-        HONO, AUTRE, TOTAL, "Payé", "Reste",
-        "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
-    ] if c in detail.columns]
+# --- 6) Détails des dossiers correspondants (liste clients) ---
+st.markdown("### 📋 Détails des dossiers filtrés")
+detail = ff.copy()
+for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+    if c in detail.columns:
+        detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
+if "Date" in detail.columns:
+    detail["Date"] = detail["Date"].astype(str)
 
-    st.dataframe(detail[show_cols].reset_index(drop=True), use_container_width=True)
+show_cols = [c for c in [
+    DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
+    HONO, AUTRE, TOTAL, "Payé", "Reste",
+    "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
+] if c in detail.columns]
+
+# ✅ trier avant de sélectionner les colonnes
+sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in detail.columns]
+detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
+
+st.dataframe(detail_sorted[show_cols].reset_index(drop=True), use_container_width=True)
 
     with st.expander("🧾 Filtres actifs", expanded=False):
         st.write({
