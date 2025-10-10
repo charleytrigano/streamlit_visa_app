@@ -434,6 +434,113 @@ st.dataframe(df_disp.reset_index(drop=True), use_container_width=True)
 
 
 # ============================================
+# VISA APP — PARTIE 2/5
+# Tableau de bord principal (KPI + filtres + vue synthèse)
+# ============================================
+
+with tab_dash:
+    st.subheader("📊 Tableau de bord — Synthèse des dossiers")
+
+    # --- 1) Chargement / préparation des données
+    base = df_clients.copy()
+
+    if base.empty:
+        st.warning("⚠️ Aucun client disponible dans cette feuille.")
+        st.stop()
+
+    # Vérification colonnes
+    for col in ["Date", HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+        if col not in base.columns:
+            base[col] = 0
+
+    # Colonnes dérivées (année / mois)
+    if "_Année_" not in base.columns:
+        base["_Année_"] = pd.to_datetime(base["Date"], errors="coerce").dt.year
+    if "_MoisNum_" not in base.columns:
+        base["_MoisNum_"] = pd.to_datetime(base["Date"], errors="coerce").dt.month
+    base["_Mois_"] = base["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) else "")
+
+    # --- 2) Filtres principaux
+    st.markdown("### 🎯 Filtres rapides")
+
+    years = sorted([int(y) for y in base["_Année_"].dropna().unique()])
+    months = sorted([f"{int(m):02d}" for m in base["_MoisNum_"].dropna().unique()])
+    categories = sorted(base["Catégorie"].dropna().unique())
+
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        sel_year = st.multiselect("Année", years, default=years, key="dash_year")
+    with f2:
+        sel_month = st.multiselect("Mois (MM)", months, default=months, key="dash_month")
+    with f3:
+        sel_cats = st.multiselect("Catégorie", categories, default=categories, key="dash_cat")
+    with f4:
+        q = st.text_input("Recherche (Nom / ID / Visa…)", "", key="dash_search")
+
+    # --- 3) Application des filtres
+    ff = base.copy()
+
+    if sel_year:
+        ff = ff[ff["_Année_"].isin(sel_year)]
+    if sel_month:
+        ff = ff[ff["_Mois_"].isin(sel_month)]
+    if sel_cats:
+        ff = ff[ff["Catégorie"].isin(sel_cats)]
+    if q:
+        ql = q.lower().strip()
+        ff = ff[ff.apply(lambda r:
+            ql in str(r.get("Nom","")).lower() or
+            ql in str(r.get("ID_Client","")).lower() or
+            ql in str(r.get("Visa","")).lower(), axis=1)]
+
+    # --- 4) KPI synthétiques
+    st.markdown("### 📈 Indicateurs clés")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total dossiers", len(ff))
+    k2.metric("Honoraires", _fmt_money_us(_safe_num_series(ff, HONO).sum()))
+    k3.metric("Payé", _fmt_money_us(_safe_num_series(ff, "Payé").sum()))
+    k4.metric("Reste dû", _fmt_money_us(_safe_num_series(ff, "Reste").sum()))
+
+    st.markdown("---")
+
+    # --- 5) Tableau synthèse
+    # ✅ Patch pour éviter “ff non défini”
+    if "ff" not in locals():
+        if "base" in locals():
+            ff = base.copy()
+        else:
+            ff = df_clients.copy()
+
+    st.markdown("### 📋 Vue synthèse")
+
+    view = ff.copy()
+    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+        if c in view.columns:
+            view[c] = _safe_num_series(view, c).map(_fmt_money_us)
+    if "Date" in view.columns:
+        view["Date"] = view["Date"].astype(str)
+
+    show_cols = [c for c in [
+        DOSSIER_COL, "Nom", "ID_Client", "Date", "Catégorie", "Visa", "Mois",
+        HONO, AUTRE, TOTAL, "Payé", "Reste",
+        "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
+    ] if c in view.columns]
+
+    # Supprime doublons éventuels
+    view = _uniquify_columns(view)
+
+    sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in view.columns]
+    view_sorted = view.sort_values(by=sort_keys) if sort_keys else view
+
+    st.dataframe(
+        view_sorted[show_cols].reset_index(drop=True),
+        use_container_width=True
+    )
+
+    st.caption(f"📊 {len(view_sorted)} dossiers affichés.")
+
+# ============================================
 # VISA APP — PARTIE 3/5
 # Clients : créer / modifier / supprimer / paiements multiples
 # ============================================
