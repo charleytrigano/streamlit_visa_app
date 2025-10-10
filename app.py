@@ -902,6 +902,9 @@ with tab_clients:
         st.success("🗑️ Client supprimé.")
         st.rerun()
 
+
+
+
 # ============================================================
 # 🧮 PARTIE 4 — ANALYSES ET TABLEAU DE BORD
 # ============================================================
@@ -1000,7 +1003,6 @@ with tab_analyse:
         "Catégories": sel_cats,
         "Visas": sel_visa
     })
-
 
 
 # ============================================
