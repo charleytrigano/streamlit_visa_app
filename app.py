@@ -596,28 +596,28 @@ with tab_dash:
     k4.metric("Solde",     _fmt_money_us(_safe_num_series(ff, "Reste").sum()))
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- 5) Tableau (montants formatés) ---
-    view = ff.copy()
-    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
-        if c in view.columns:
-            view[c] = _safe_num_series(view, c).map(_fmt_money_us)
-    if "Date" in view.columns:
-        view["Date"] = view["Date"].astype(str)
+  # --- 5) Tableau (montants formatés) ---
+view = ff.copy()
+for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+    if c in view.columns:
+        view[c] = _safe_num_series(view, c).map(_fmt_money_us)
+if "Date" in view.columns:
+    view["Date"] = view["Date"].astype(str)
 
-    show_cols = [c for c in [
-        DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
-        HONO, AUTRE, TOTAL, "Payé", "Reste"
-    ] if c in view.columns]
+show_cols = [c for c in [
+    DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
+    HONO, AUTRE, TOTAL, "Payé", "Reste"
+] if c in view.columns]
 
-    # ✅ d'abord trier sur le DataFrame complet (qui contient les colonnes dérivées),
-    # puis ne sélectionner que les colonnes d'affichage → évite KeyError
-    sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in view.columns]
-    view_sorted = view.sort_values(by=sort_keys) if sort_keys else view
+# Tri d'abord sur le DF complet (contient colonnes dérivées)
+sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in view.columns]
+view_sorted = view.sort_values(by=sort_keys) if sort_keys else view
 
-    st.dataframe(
-        view_sorted[show_cols].reset_index(drop=True),
-        use_container_width=True,
-    )
+# ✅ Sélection + dédoublonnage des colonnes AVANT affichage
+df_disp = view_sorted[show_cols].copy()
+df_disp = df_disp.loc[:, ~pd.Index(df_disp.columns).duplicated(keep="first")]
+
+st.dataframe(df_disp.reset_index(drop=True), use_container_width=True)
 
     # Rappel concis des filtres actifs (pas d'expander ici → zéro risque d'indentation)
     st.caption("🧾 Filtres actifs : "
@@ -1059,36 +1059,40 @@ with tab_analyses:
     st.markdown("---")
 
     # --- 6) Détails des dossiers correspondants (liste clients) ---
-    st.markdown("### 📋 Détails des dossiers filtrés")
+st.markdown("### 📋 Détails des dossiers filtrés")
 
-    detail = ff.copy()
-    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
-        if c in detail.columns:
-            detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
-    if "Date" in detail.columns:
-        detail["Date"] = detail["Date"].astype(str)
+detail = ff.copy()
+for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+    if c in detail.columns:
+        detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
+if "Date" in detail.columns:
+    detail["Date"] = detail["Date"].astype(str)
 
-    show_cols = [c for c in [
-        DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
-        HONO, AUTRE, TOTAL, "Payé", "Reste",
-        "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
-    ] if c in detail.columns]
+show_cols = [c for c in [
+    DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
+    HONO, AUTRE, TOTAL, "Payé", "Reste",
+    "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
+] if c in detail.columns]
 
-    # ✅ trier avant de sélectionner les colonnes (évite KeyError)
-    sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in detail.columns]
-    detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
+# Tri avant sélection
+sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in detail.columns]
+detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
 
-    st.dataframe(detail_sorted[show_cols].reset_index(drop=True), use_container_width=True)
+# ✅ Sélection + dédoublonnage des colonnes AVANT affichage
+df_disp = detail_sorted[show_cols].copy()
+df_disp = df_disp.loc[:, ~pd.Index(df_disp.columns).duplicated(keep="first")]
 
-    # --- 7) Récap filtres actifs (aucun expander → zéro indentation error) ---
-    st.caption(
-        "🧾 Filtres actifs — "
-        f"Catégories={sel.get('Catégorie', [])} | "
-        f"Années={sel_years} | Mois={sel_months} | "
-        f"Solde={solde_mode} | Recherche='{q}'"
-    )
+st.dataframe(df_disp.reset_index(drop=True), use_container_width=True)
 
+# Récap filtres actifs
+st.caption(
+    "🧾 Filtres actifs — "
+    f"Catégories={sel.get('Catégorie', [])} | "
+    f"Années={sel_years} | Mois={sel_months} | "
+    f"Solde={solde_mode} | Recherche='{q}'"
+)
 
+    
 # ============================================
 # VISA APP — PARTIE 5/5
 # ESCROW : calculs, transferts, journal & alertes
