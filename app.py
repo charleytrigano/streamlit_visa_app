@@ -1055,31 +1055,31 @@ with tab_analyses:
     st.markdown("---")
 
 
-# --- 6) Détails des dossiers correspondants (liste clients) ---
-st.markdown("### 📋 Détails des dossiers filtrés")
+    # --- 6) Détails des dossiers correspondants (liste clients) ---
+    st.markdown("### 📋 Détails des dossiers filtrés")
 
-detail = ff.copy()
-for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+    detail = ff.copy()
+    for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
     if c in detail.columns:
         detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
-if "Date" in detail.columns:
-    detail["Date"] = detail["Date"].astype(str)
+    if "Date" in detail.columns:
+        detail["Date"] = detail["Date"].astype(str)
 
-show_cols = [c for c in [
-    DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
-    HONO, AUTRE, TOTAL, "Payé", "Reste",
-    "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
-] if c in detail.columns]
+    show_cols = [c for c in [
+        DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
+        HONO, AUTRE, TOTAL, "Payé", "Reste",
+        "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
+    ] if c in detail.columns]
 
-# ✅ trier avant de sélectionner les colonnes
-sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in detail.columns]
-detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
+    # ✅ trier avant de sélectionner les colonnes
+    sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in detail.columns]
+    detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
 
-st.dataframe(detail_sorted[show_cols].reset_index(drop=True), use_container_width=True)
+    st.dataframe(detail_sorted[show_cols].reset_index(drop=True), use_container_width=True)
 
-# --- 7) Filtres actifs (optionnel) ---
-st.markdown("### 🧾 Filtres actifs")
-st.write(sel)
+    # --- 7) Filtres actifs (optionnel) ---
+    st.markdown("### 🧾 Filtres actifs")
+    st.write(sel)
 
 
 
