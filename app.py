@@ -476,6 +476,7 @@ with tab_dash:
         st.info("Aucun dossier ne correspond à la sélection actuelle.")
 
 
+
 # =========================
 # VISA APP — PARTIE 3/5
 # =========================
