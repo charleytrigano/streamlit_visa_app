@@ -1077,9 +1077,10 @@ detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
 
 st.dataframe(detail_sorted[show_cols].reset_index(drop=True), use_container_width=True)
 
-# --- 7) Filtres actifs (optionnel)
-with st.expander("🧾 Filtres actifs", expanded=False):
-    st.write(sel)
+# --- 7) Filtres actifs (optionnel) ---
+st.markdown("### 🧾 Filtres actifs")
+st.write(sel)
+
 
 
 # ============================================
