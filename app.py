@@ -77,6 +77,39 @@ def excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
     return bio.getvalue()
 
 # ------------------ HELPERS -------------------
+
+import zipfile
+from io import BytesIO
+
+def detect_visa_sheet_name(xlsx_path: str | Path) -> str:
+    """Retourne le nom de la feuille Visa à exporter : la première contenant 'Categorie', sinon la 1ère feuille."""
+    try:
+        xls = pd.ExcelFile(xlsx_path)
+    except Exception:
+        return "Visa"
+    for sn in xls.sheet_names:
+        try:
+            tmp = pd.read_excel(xlsx_path, sheet_name=sn, nrows=5)
+            tmp = _uniquify_columns(tmp)
+            tmp.columns = tmp.columns.map(str).str.strip()
+            if "Categorie" in tmp.columns:
+                return sn
+        except Exception:
+            continue
+    # fallback
+    return xls.sheet_names[0] if xls.sheet_names else "Visa"
+
+def make_zip_clients_visa(clients_df: pd.DataFrame, visa_df: pd.DataFrame) -> bytes:
+    """Crée un ZIP en mémoire contenant Clients.xlsx et Visa.xlsx."""
+    clients_bytes = excel_bytes({"Clients": clients_df})
+    visa_bytes    = excel_bytes({"Visa": visa_df})
+    bio = BytesIO()
+    with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Clients.xlsx", clients_bytes)
+        zf.writestr("Visa.xlsx",    visa_bytes)
+    bio.seek(0)
+    return bio.getvalue()
+
 def _safe_str(x) -> str:
     try:
         if pd.isna(x):
