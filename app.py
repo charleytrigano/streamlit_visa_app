@@ -902,166 +902,81 @@ with tab_clients:
         st.success("🗑️ Client supprimé.")
         st.rerun()
 
-# ============================================
-# VISA APP — PARTIE 4/5
-# Analyses : filtres + KPI + comparaisons + détails
-# ============================================
+# ============================================================
+# 🧮 PARTIE 4 — ANALYSES ET TABLEAU DE BORD
+# ============================================================
 
-with tab_analyses:
-    st.subheader("📈 Analyses — Volumes & Financier")
+with tab_analyse:
+    st.header("📊 Analyses & Statistiques")
 
-    # --- 1) Filtres VISA hiérarchiques (réutilise le référentiel) ---
-    df_visa_safe = _ensure_visa_columns(df_visa)
-    if df_visa_safe.empty:
-        st.warning("⚠️ Le référentiel Visa est vide ou mal formé. Les filtres de catégories sont désactivés.")
-        sel = {"__whitelist_visa__": [], "Catégorie": []}
-        base = df_clients.copy()
-    else:
-        sel = build_checkbox_filters_grouped(
-            df_visa_safe,
-            keyprefix=f"flt_ana_{sheet_choice}",
-            as_toggle=False,
-        )
-        base = filter_clients_by_ref(df_clients, sel)
+    # --- 1) Filtres de sélection ---
+    st.markdown("#### 🎯 Sélection de la période et des catégories")
 
-    # Champs dérivés année/mois
-    base = base.copy()
-    base["_Année_"] = base["Date"].apply(lambda x: x.year if pd.notna(x) else pd.NA)
-    base["_MoisNum_"] = base["Date"].apply(lambda x: int(x.month) if pd.notna(x) else pd.NA)
-    base["_Mois_"] = base["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) else pd.NA)
+    cA1, cA2, cA3, cA4 = st.columns(4)
 
-    # --- 2) Filtres additionnels ---
-    cR1, cR2, cR3, cR4 = st.columns([1, 1, 1, 2])
-    yearsA  = sorted([int(y) for y in base["_Année_"].dropna().unique()]) if not base.empty else []
-    monthsA = [f"{m:02d}" for m in sorted([int(m) for m in base["_MoisNum_"].dropna().unique()])] if not base.empty else []
+    years = sorted(df_clients["_Année_"].unique()) if "_Année_" in df_clients else []
+    months = sorted(df_clients["_MoisNum_"].unique()) if "_MoisNum_" in df_clients else []
 
-    with cR1:
-        sel_years  = st.multiselect("Année", yearsA, default=[], key=f"ana_year_{sheet_choice}")
-    with cR2:
-        sel_months = st.multiselect("Mois (MM)", monthsA, default=[], key=f"ana_month_{sheet_choice}")
-    with cR3:
-        solde_mode = st.selectbox("Solde",
-                                  ["Tous", "Soldé (Reste = 0)", "Non soldé (Reste > 0)"],
-                                  index=0, key=f"ana_solde_{sheet_choice}")
-    with cR4:
-        q = st.text_input("Recherche (nom, ID, visa…)", "", key=f"ana_q_{sheet_choice}")
+    sel_years = cA1.multiselect("Année", years, default=years)
+    sel_months = cA2.multiselect("Mois", months, default=months)
+    sel_cats = cA3.multiselect("Catégorie", sorted(df_clients["Catégorie"].dropna().unique()))
+    sel_visa = cA4.multiselect("Visa", sorted(df_clients["Visa"].dropna().unique()))
 
-    ff = base.copy()
+    # --- 2) Application des filtres ---
+    ff = df_clients.copy()
     if sel_years:
         ff = ff[ff["_Année_"].isin(sel_years)]
     if sel_months:
-        ff = ff[ff["_Mois_"].astype(str).isin(sel_months)]
-    if solde_mode == "Soldé (Reste = 0)":
-        ff = ff[_safe_num_series(ff, "Reste") <= 0.0000001]
-    elif solde_mode == "Non soldé (Reste > 0)":
-        ff = ff[_safe_num_series(ff, "Reste") > 0.0000001]
-    if q:
-        qn = q.lower().strip()
-        def _row_match(r):
-            hay = " ".join([
-                _safe_str(r.get("Nom","")),
-                _safe_str(r.get("ID_Client","")),
-                _safe_str(r.get("Catégorie","")),
-                _safe_str(r.get("Visa","")),
-                str(r.get(DOSSIER_COL,"")),
-            ]).lower()
-            return qn in hay
-        ff = ff[ff.apply(_row_match, axis=1)]
+        ff = ff[ff["_MoisNum_"].isin(sel_months)]
+    if sel_cats:
+        ff = ff[ff["Catégorie"].isin(sel_cats)]
+    if sel_visa:
+        ff = ff[ff["Visa"].isin(sel_visa)]
 
-    # --- 3) KPI globaux sur le périmètre filtré ---
-    st.markdown("""
-    <style>
-    .small-kpi [data-testid="stMetricValue"]{font-size:1.15rem}
-    .small-kpi [data-testid="stMetricLabel"]{font-size:.85rem;opacity:.8}
-    </style>
-    """, unsafe_allow_html=True)
-    st.markdown('<div class="small-kpi">', unsafe_allow_html=True)
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Dossiers", f"{len(ff)}")
-    k2.metric("Honoraires", _fmt_money_us(_safe_num_series(ff, HONO).sum()))
-    k3.metric("Encaissements (Payé)", _fmt_money_us(_safe_num_series(ff, "Payé").sum()))
-    k4.metric("Solde à encaisser", _fmt_money_us(_safe_num_series(ff, "Reste").sum()))
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.info(f"**{len(ff)} dossiers** correspondent à la sélection.")
 
-    st.markdown("---")
+    # --- 3) Indicateurs clés ---
+    st.markdown("#### 📌 Indicateurs clés")
 
-    # --- 4) Comparaison Année → Année (volumes + financier) ---
-    st.markdown("### 📆 Comparaison Année → Année")
-    if ff["_Année_"].dropna().empty:
-        st.info("Aucune date exploitable pour la comparaison annuelle.")
-    else:
-        grpY = ff.groupby("_Année_", dropna=True).agg(
-            Dossiers = ("ID_Client", "count"),
-            Honoraires = (HONO, lambda s: _safe_num_series(ff.loc[s.index], HONO).sum()),
-            Paye = ("Payé",   lambda s: _safe_num_series(ff.loc[s.index], "Payé").sum()),
-            Reste = ("Reste", lambda s: _safe_num_series(ff.loc[s.index], "Reste").sum()),
-        ).reset_index().rename(columns={"_Année_":"Année"})
-        grpY = grpY.sort_values("Année")
+    HONO = "Montant honoraires (US $)"
+    AUTRE = "Autres frais (US $)"
+    TOTAL = "Total (US $)"
 
-        st.dataframe(grpY, use_container_width=True)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    if TOTAL in ff.columns:
+        c1.metric("Total encaissé", _fmt_money_us(ff[TOTAL].sum()))
+    if "Payé" in ff.columns:
+        c2.metric("Montant payé", _fmt_money_us(_safe_num_series(ff, "Payé").sum()))
+    if "Reste" in ff.columns:
+        c3.metric("Solde à recevoir", _fmt_money_us(_safe_num_series(ff, "Reste").sum()))
+    if "Dossier approuvé" in ff.columns:
+        c4.metric("Dossiers approuvés", int(ff["Dossier approuvé"].sum()))
+    if "Dossier refusé" in ff.columns:
+        c5.metric("Dossiers refusés", int(ff["Dossier refusé"].sum()))
 
-        # Barres volumes
-        try:
-            import altair as alt
-            ch1 = alt.Chart(grpY).mark_bar().encode(
-                x=alt.X("Année:O", sort=None),
-                y=alt.Y("Dossiers:Q")
-            ).properties(height=240)
-            st.altair_chart(ch1, use_container_width=True)
-        except Exception:
-            pass
+    # --- 4) Répartition par catégorie ---
+    st.markdown("#### 🧭 Répartition par catégorie")
 
-        # Lignes financier
-        try:
-            import altair as alt
-            g_long = grpY.melt(id_vars=["Année"], value_vars=["Honoraires","Paye","Reste"],
-                               var_name="Type", value_name="Montant")
-            ch2 = alt.Chart(g_long).mark_line(point=True).encode(
-                x=alt.X("Année:O", sort=None),
-                y=alt.Y("Montant:Q"),
-                color="Type:N"
-            ).properties(height=260)
-            st.altair_chart(ch2, use_container_width=True)
-        except Exception:
-            pass
+    if "Catégorie" in ff.columns and TOTAL in ff.columns:
+        cat_sum = ff.groupby("Catégorie")[TOTAL].sum().reset_index()
+        st.bar_chart(cat_sum, x="Catégorie", y=TOTAL, use_container_width=True)
 
-    st.markdown("---")
+    # --- 5) Évolution temporelle ---
+    st.markdown("#### 📅 Évolution mensuelle")
 
-    # --- 5) Comparaison par Mois (toutes années confondues) ---
-    st.markdown("### 🗓️ Par mois (toutes années)")
-    if ff["_Mois_"].dropna().empty:
-        st.info("Aucun mois exploitable.")
-    else:
-        grpM = ff.groupby("_Mois_", dropna=True).agg(
-            Dossiers = ("ID_Client", "count"),
-            Honoraires = (HONO, lambda s: _safe_num_series(ff.loc[s.index], HONO).sum()),
-            Paye = ("Payé",   lambda s: _safe_num_series(ff.loc[s.index], "Payé").sum()),
-            Reste = ("Reste", lambda s: _safe_num_series(ff.loc[s.index], "Reste").sum()),
-        ).reset_index().rename(columns={"_Mois_":"Mois"})
-        grpM = grpM.sort_values("Mois")
-
-        st.dataframe(grpM, use_container_width=True)
-
-        try:
-            import altair as alt
-            ch3 = alt.Chart(grpM).mark_bar().encode(
-                x=alt.X("Mois:O", sort=None),
-                y=alt.Y("Dossiers:Q")
-            ).properties(height=220)
-            st.altair_chart(ch3, use_container_width=True)
-        except Exception:
-            pass
-
-    st.markdown("---")
-
+    if "_Année_" in ff.columns and "_MoisNum_" in ff.columns and TOTAL in ff.columns:
+        evo = ff.groupby(["_Année_", "_MoisNum_"])[TOTAL].sum().reset_index()
+        evo["_Mois_"] = evo["_MoisNum_"].astype(str).str.zfill(2)
+        evo["_Periode_"] = evo["_Année_"].astype(str) + "-" + evo["_Mois_"]
+        st.line_chart(evo, x="_Periode_", y=TOTAL, use_container_width=True)
 
     # --- 6) Détails des dossiers correspondants (liste clients) ---
     st.markdown("### 📋 Détails des dossiers filtrés")
 
     detail = ff.copy()
     for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
-    if c in detail.columns:
-        detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
+        if c in detail.columns:
+            detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
     if "Date" in detail.columns:
         detail["Date"] = detail["Date"].astype(str)
 
@@ -1071,7 +986,7 @@ with tab_analyses:
         "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
     ] if c in detail.columns]
 
-    # ✅ trier avant de sélectionner les colonnes
+    # ✅ tri avant de sélectionner les colonnes
     sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in detail.columns]
     detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
 
@@ -1079,7 +994,12 @@ with tab_analyses:
 
     # --- 7) Filtres actifs (optionnel) ---
     st.markdown("### 🧾 Filtres actifs")
-    st.write(sel)
+    st.write({
+        "Années": sel_years,
+        "Mois": sel_months,
+        "Catégories": sel_cats,
+        "Visas": sel_visa
+    })
 
 
 
