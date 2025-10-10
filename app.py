@@ -1055,13 +1055,15 @@ with tab_analyses:
     st.markdown("---")
 
 
-# # --- 6) Détails des dossiers correspondants (liste clients) ---
+# --- 6) Détails des dossiers correspondants (liste clients) ---
 st.markdown("### 📋 Détails des dossiers filtrés")
 
 detail = ff.copy()
 for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
     if c in detail.columns:
-        detail[c] = _safe_num
+        detail[c] = _safe_num_series(detail, c).map(_fmt_money_us)
+if "Date" in detail.columns:
+    detail["Date"] = detail["Date"].astype(str)
 
 show_cols = [c for c in [
     DOSSIER_COL, "ID_Client", "Nom", "Catégorie", "Visa", "Date", "Mois",
@@ -1075,14 +1077,10 @@ detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
 
 st.dataframe(detail_sorted[show_cols].reset_index(drop=True), use_container_width=True)
 
-    with st.expander("🧾 Filtres actifs", expanded=False):
-        st.write({
-            "Catégories": sel.get("Catégorie", []),
-            "Années": sel_years,
-            "Mois": sel_months,
-            "Solde": solde_mode,
-            "Recherche": q,
-        })
+# --- 7) Filtres actifs (optionnel)
+with st.expander("🧾 Filtres actifs", expanded=False):
+    st.write(sel)
+
 
 # ============================================
 # VISA APP — PARTIE 5/5
