@@ -865,7 +865,7 @@ with tab_analyses:
 
     st.markdown("---")
 
-    (liste clients) ---
+    # --- 6) Détails des dossiers correspondants (liste clients) ---
 st.markdown("### 📋 Détails des dossiers filtrés")
 
 detail = ff.copy()
@@ -881,13 +881,12 @@ show_cols = [c for c in [
     "Dossier envoyé", "Dossier approuvé", "RFE", "Dossier refusé", "Dossier annulé"
 ] if c in detail.columns]
 
-# Tri avant sélection
 sort_keys = [c for c in ["_Année_", "_MoisNum_", "Catégorie", "Nom"] if c in detail.columns]
 detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
 
-# ✅ Sélection + dédoublonnage des colonnes AVANT affichage
+# ✅ Sélection puis dédoublonnage (renommage des doublons)
 df_disp = detail_sorted[show_cols].copy()
-df_disp = df_disp.loc[:, ~pd.Index(df_disp.columns).duplicated(keep="first")]
+df_disp = _uniquify_columns(df_disp)
 
 st.dataframe(df_disp.reset_index(drop=True), use_container_width=True)
 
