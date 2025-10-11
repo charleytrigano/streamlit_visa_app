@@ -20,7 +20,22 @@ VISA_FILE    = "donnees_visa_clients1.xlsx"
 SHEET_CLIENTS = "Clients"
 SHEET_VISA    = "Visa"
 
-# ---------- HELPERS GÉNÉRAUX ----------
+# Colonnes attendues côté Clients (ajout de Options)
+CLIENTS_COLS = [
+    "Dossier N","ID_Client","Nom","Date","Mois",
+    "Categorie","Sous-categorie","Visa",
+    "Montant honoraires (US $)","Autres frais (US $)","Total (US $)",
+    "Payé","Reste","Paiements","Options"
+]
+
+# Widget toggles préférés (affichés en touche basculante)
+TOGGLE_COLUMNS = {
+    "AOS","CP","USCIS","I-130","I-140","I-140 & AOS","I-829","I-407",
+    "Work Permit","Re-entry Permit","Consultation","Analysis","Referral",
+    "Derivatives","Travel Permit","USC","LPR","Perm"
+}
+
+# ---------- HELPERS ----------
 def _safe_str(x) -> str:
     try:
         if pd.isna(x): return ""
@@ -60,17 +75,27 @@ def _uniquify_columns(df: pd.DataFrame) -> pd.DataFrame:
     out.columns = new_cols
     return out
 
-# ---------- PARSING VISA (cellules = 1 => afficher la case ; libellé = entête de colonne) ----------
+def ensure_file(path: str, sheet_name: str, cols: list[str]) -> None:
+    p = Path(path)
+    if not p.exists():
+        df = pd.DataFrame(columns=cols)
+        with pd.ExcelWriter(p, engine="openpyxl") as wr:
+            df.to_excel(wr, sheet_name=sheet_name, index=False)
+
+# Créer fichiers si absents
+ensure_file(CLIENTS_FILE, SHEET_CLIENTS, CLIENTS_COLS)
+ensure_file(VISA_FILE, SHEET_VISA, ["Categorie","Sous-categorie 1"])
+
+# ---------- LECTURE VISA (cellule=1 => option active ; libellé = entête colonne) ----------
 @st.cache_data(show_spinner=False)
 def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> dict[str, dict[str, list[str]]]:
     """
-    Retourne:
+    Retourne un mapping:
     {
       "Categorie": {
           "Sous-categorie": ["Sous-categorie COS", "Sous-categorie EOS", ...]
       }
     }
-    Règle: cellule == 1 (ou '1', True, 'oui', etc.) => case disponible, libellé = NOM DE LA COLONNE.
     """
     def _is_checked(v) -> bool:
         if v is None or (isinstance(v, float) and pd.isna(v)): 
@@ -88,7 +113,7 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
     sheets_to_try = [sheet_name] if sheet_name else xls.sheet_names
     for sn in sheets_to_try:
         try:
-            dfv = pd.read_excel(xlsx_path, sheet_name=sn)  # header=0 => ligne 1 = entêtes
+            dfv = pd.read_excel(xlsx_path, sheet_name=sn)
         except Exception:
             continue
         if dfv.empty:
@@ -125,11 +150,10 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
             options = []
             for cc in check_cols:
                 if _is_checked(row.get(cc, None)):
-                    # libellé = NOM DE LA COLONNE
                     options.append(f"{sub} {cc}".strip())
 
             if not options and sub:
-                options = [sub]  # pas de cases -> Visa = sous-catégorie seule
+                options = [sub]
 
             if options:
                 out.setdefault(cat, {})
@@ -137,124 +161,191 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
                 out[cat][sub].extend(options)
 
         if out:
-            # unique + tri
             for cat, subs in out.items():
                 for sub, opts in subs.items():
                     subs[sub] = sorted(set(opts))
             return out
     return {}
 
-# ---------- RENDU DES CASES DYNAMIQUES (un seul choix) ----------
-def render_dynamic_checkboxes(cat: str, sub: str, visa_map: dict, keyprefix: str) -> tuple[str, str]:
+# ---------- RAW VISA DF + utilitaires pour widgets dynamiques ----------
+@st.cache_data(show_spinner=False)
+def load_raw_visa_df(xlsx_path: str | Path, sheet_name: str = SHEET_VISA) -> pd.DataFrame:
+    try:
+        df = pd.read_excel(xlsx_path, sheet_name=sheet_name)
+    except Exception:
+        return pd.DataFrame()
+    df = _uniquify_columns(df)
+    df.columns = df.columns.map(str).str.strip()
+    return df
+
+def _find_cat_sub_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
+    def _norm(s: str) -> str:
+        s2 = unicodedata.normalize("NFKD", s)
+        s2 = "".join(ch for ch in s2 if not unicodedata.combining(ch))
+        s2 = s2.lower().strip().replace("\u00a0"," ")
+        s2 = s2.replace("-", " ").replace("_"," ")
+        return " ".join(s2.split())
+    cmap = {_norm(c): c for c in df.columns}
+    cat_col = next((cmap[k] for k in cmap if "categorie" in k), None)
+    sub_col = None
+    for k in cmap:
+        if k.startswith("sous"):
+            sub_col = cmap[k]
+            break
+    return cat_col, sub_col
+
+def _normalize_options_json(x) -> dict:
+    try:
+        d = json.loads(_safe_str(x) or "{}")
+        if not isinstance(d, dict):
+            return {}
+        # sanitize
+        excl = d.get("exclusive", None)
+        opts = d.get("options", [])
+        if not isinstance(opts, list):
+            opts = []
+        return {"exclusive": excl, "options": [str(o) for o in opts]}
+    except Exception:
+        return {"exclusive": None, "options": []}
+
+def render_dynamic_steps(cat: str, sub: str, keyprefix: str, preselected: dict | None = None) -> tuple[str, str, dict]:
+    """
+    Affiche dynamiquement:
+      - radio pour duo exclusif (COS/EOS ou USCIS/CP)
+      - toggles pour TOGGLE_COLUMNS
+      - checkboxes pour le reste
+    preselected = {"exclusive": "...", "options": ["...", ...]}
+    Retourne (visa_final, message_info, selected_dict)
+    """
     if not (cat and sub):
-        return "", "Choisir Catégorie et Sous-catégorie."
-    raw_opts = sorted(list(visa_map.get(cat, {}).get(sub, [])))
-    if raw_opts:
-        sufs = []
-        for lab in raw_opts:
-            lab = _safe_str(lab)
-            suf = lab[len(sub):].strip() if lab.startswith(sub) else lab
-            if suf:
-                sufs.append(suf)
-        sufs = sorted(set(sufs))
-        checked = []
-        for i, s in enumerate(sufs):
-            if st.checkbox(s, key=f"{keyprefix}_chk_{i}"):
-                checked.append(s)
-        if len(checked) == 0:
-            return "", "Veuillez cocher une case."
-        if len(checked) > 1:
-            return "", "Une seule case possible."
-        return f"{sub} {checked[0]}".strip(), ""
+        return "", "Choisir d'abord Catégorie et Sous-catégorie.", {"exclusive": None, "options": []}
+
+    vdf = load_raw_visa_df(VISA_FILE, SHEET_VISA)
+    if vdf.empty:
+        return "", "Feuille Visa introuvable ou vide.", {"exclusive": None, "options": []}
+
+    cat_col, sub_col = _find_cat_sub_columns(vdf)
+    if not cat_col:
+        return "", "Colonne 'Catégorie' introuvable dans la feuille Visa.", {"exclusive": None, "options": []}
+    if not sub_col:
+        row = vdf[vdf[cat_col].astype(str).str.strip() == cat]
     else:
-        st.caption("Aucune option : Visa = sous-catégorie seule.")
-        return sub, ""
+        row = vdf[
+            (vdf[cat_col].astype(str).str.strip() == cat) &
+            (vdf[sub_col].astype(str).str.strip() == sub)
+        ]
+    if row.empty:
+        return "", "Combinaison Catégorie/Sous-catégorie non trouvée.", {"exclusive": None, "options": []}
 
-# ---------- FICHIERS & I/O ----------
-def ensure_file(path: str, sheet_name: str, cols: list[str]) -> None:
-    p = Path(path)
-    if not p.exists():
-        df = pd.DataFrame(columns=cols)
-        with pd.ExcelWriter(p, engine="openpyxl") as wr:
-            df.to_excel(wr, sheet_name=sheet_name, index=False)
+    row = row.iloc[0]
+    option_cols = [c for c in vdf.columns if c not in {cat_col, sub_col}]
 
-CLIENTS_COLS = [
-    "Dossier N","ID_Client","Nom","Date","Mois",
-    "Categorie","Sous-categorie","Visa",
-    "Montant honoraires (US $)","Autres frais (US $)","Total (US $)",
-    "Payé","Reste","Paiements"
-]
-ensure_file(CLIENTS_FILE, SHEET_CLIENTS, CLIENTS_COLS)
-# pour le fichier Visa, on crée juste un squelette minimal si absent
-ensure_file(VISA_FILE, SHEET_VISA, ["Categorie","Sous-categorie 1"])
+    def _is_checked(v) -> bool:
+        if v is None or (isinstance(v, float) and pd.isna(v)): 
+            return False
+        if isinstance(v, (int, float)): 
+            return float(v) == 1.0
+        s = str(v).strip().lower()
+        return s in {"1","x","true","vrai","oui","yes"}
 
-# Charger la carte Visa
-visa_map = parse_visa_sheet(VISA_FILE)
+    possibles = [c for c in option_cols if _is_checked(row.get(c))]
+    exclusive = None
+    if {"COS","EOS"}.issubset(set(possibles)):
+        exclusive = ("COS","EOS")
+    elif {"USCIS","CP"}.issubset(set(possibles)):
+        exclusive = ("USCIS","CP")
 
-# Aperçu rapide dans la sidebar (debug)
-with st.sidebar.expander("🔍 Aperçu Visa détecté", expanded=False):
-    if visa_map:
-        for cat, submap in visa_map.items():
-            st.write(f"**{cat}**")
-            for sous, opts in submap.items():
-                st.caption(f"- {sous} → {', '.join(opts)}")
-    else:
-        st.caption("Aucune donnée Visa détectée.")
+    pre = _normalize_options_json(preselected or {})
+    visa_final = ""
+    info_msg = ""
+    selected_opts: list[str] = []
+    selected_excl: str | None = None
+
+    # Exclusif
+    if exclusive:
+        st.caption("Choix exclusif")
+        # valeur par défaut
+        default_index = 0
+        if pre["exclusive"] in exclusive:
+            default_index = list(exclusive).index(pre["exclusive"])
+        choice = st.radio(
+            "Sélectionner une option",
+            options=list(exclusive),
+            index=default_index,
+            horizontal=True,
+            key=f"{keyprefix}_exclusive",
+        )
+        selected_excl = choice
+        visa_final = f"{sub} {choice}".strip()
+
+    # Autres
+    others = [c for c in possibles if not (exclusive and c in exclusive)]
+    if others:
+        st.caption("Options complémentaires")
+    for i, col in enumerate(others):
+        label = col
+        default_val = label in pre["options"]
+        if col in TOGGLE_COLUMNS:
+            val = st.toggle(label, value=default_val, key=f"{keyprefix}_tog_{i}")
+            if val:
+                selected_opts.append(label)
+        else:
+            val = st.checkbox(label, value=default_val, key=f"{keyprefix}_chk_{i}")
+            if val:
+                selected_opts.append(label)
+
+    if not visa_final:
+        # pas de duo exclusif -> imposer un seul choix dans others
+        if len(selected_opts) == 0:
+            info_msg = "Coche une option (une seule)."
+        elif len(selected_opts) > 1:
+            info_msg = "Une seule option possible."
+        else:
+            visa_final = f"{sub} {selected_opts[0]}".strip()
+
+    if not visa_final and not possibles:
+        visa_final = sub
+
+    return visa_final, info_msg, {"exclusive": selected_excl, "options": selected_opts}
 
 
-# ---------- TABS ----------
-tab_clients, tab_visa = st.tabs(["👥 Clients", "📄 Visa"])
-
-# ---------- FONCTIONS CLIENTS ----------
+# ---------- DONNÉES CLIENTS ----------
 def _normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-
-    base_cols = [
-        "Dossier N","ID_Client","Nom","Date","Mois",
-        "Categorie","Sous-categorie","Visa",
-        "Montant honoraires (US $)","Autres frais (US $)","Total (US $)",
-        "Payé","Reste","Paiements"
-    ]
-    for c in base_cols:
+    for c in CLIENTS_COLS:
         if c not in df.columns:
             df[c] = None
 
-    # Date / Mois
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
     df["Mois"] = df.apply(
         lambda r: f"{pd.to_datetime(r['Date']).month:02d}" if pd.notna(r["Date"]) else (_safe_str(r.get("Mois",""))[:2] or None),
         axis=1
     )
 
-    # Numériques
     for c in ["Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste"]:
         df[c] = _safe_num_series(df, c)
-    df["Total (US $)"] = df["Montant honoraires (US $)"] + df["Autres frais (US $)"]
 
-    # Paiements JSON
     def _parse_p(x):
         try:
-            j = json.loads(_safe_str(x) or "[]")
-            return j if isinstance(j, list) else []
+            j = json.loads(_safe_str(x) or "[]");  return j if isinstance(j, list) else []
         except Exception:
             return []
     df["Paiements"] = df["Paiements"].apply(_parse_p)
 
-    # Payé = max(colonne Payé, somme JSON)
     def _sum_json(lst):
-        try:
-            return float(sum(float(it.get("amount",0.0) or 0.0) for it in (lst or [])))
-        except Exception:
-            return 0.0
+        try:    return float(sum(float(it.get("amount",0.0) or 0.0) for it in (lst or [])))
+        except: return 0.0
     paid_json = df["Paiements"].apply(_sum_json)
     df["Payé"] = pd.concat([df["Payé"].fillna(0.0).astype(float), paid_json], axis=1).max(axis=1)
 
+    df["Total (US $)"] = df["Montant honoraires (US $)"] + df["Autres frais (US $)"]
     df["Reste"] = (df["Total (US $)"] - df["Payé"]).clip(lower=0.0)
 
-    # Clés de tri
+    # Options JSON
+    df["Options"] = df["Options"].apply(_normalize_options_json)
+
     df["_Année_"]   = df["Date"].apply(lambda d: d.year if pd.notna(d) else pd.NA)
     df["_MoisNum_"] = df["Date"].apply(lambda d: d.month if pd.notna(d) else pd.NA)
-
     return _uniquify_columns(df)
 
 def _read_clients() -> pd.DataFrame:
@@ -263,8 +354,11 @@ def _read_clients() -> pd.DataFrame:
 
 def _write_clients(df: pd.DataFrame) -> None:
     df = df.copy()
+    # re-sérialiser Options + Paiements
+    df["Options"] = df["Options"].apply(lambda d: json.dumps(_normalize_options_json(d), ensure_ascii=False))
+    df["Paiements"] = df["Paiements"].apply(lambda l: json.dumps(l, ensure_ascii=False))
     with pd.ExcelWriter(CLIENTS_FILE, engine="openpyxl", mode="w") as wr:
-        df.to_excel(wr, sheet_name=SHEET_CLIENTS, index=False)
+        _uniquify_columns(df).to_excel(wr, sheet_name=SHEET_CLIENTS, index=False)
 
 def _next_dossier(df: pd.DataFrame, start: int = 13057) -> int:
     if "Dossier N" in df.columns:
@@ -277,12 +371,14 @@ def _make_client_id(nom: str, d: date) -> str:
     base = f"{_safe_str(nom).strip().replace(' ', '_')}-{d:%Y%m%d}"
     return base
 
-# ---------- DONNÉES ----------
-df_clients = _read_clients()
+visa_map = parse_visa_sheet(VISA_FILE)
+
+tab_clients, tab_visa = st.tabs(["👥 Clients", "📄 Visa"])
 
 # ---------- ONGLET CLIENTS ----------
 with tab_clients:
-    st.subheader("Créer, modifier, supprimer un client — et gérer ses paiements")
+    st.subheader("Créer, modifier, supprimer un client — et gérer ses paiements + options")
+    df_clients = _read_clients()
 
     left, right = st.columns([1,1], gap="large")
 
@@ -291,8 +387,7 @@ with tab_clients:
         st.markdown("### 🔎 Sélection d’un client existant")
         if df_clients.empty:
             st.info("Aucun client pour l’instant.")
-            sel_idx = None
-            sel_row = None
+            sel_idx, sel_row = None, None
         else:
             labels = (df_clients.get("Nom","").astype(str) + " — " + df_clients.get("ID_Client","").astype(str)).fillna("")
             indices = list(df_clients.index)
@@ -311,10 +406,14 @@ with tab_clients:
                 view[c] = _safe_num_series(view, c).map(_fmt_money)
         if "Date" in view.columns:
             view["Date"] = view["Date"].astype(str)
+        # Afficher aussi un condensé d'options
+        view["Options (résumé)"] = view["Options"].apply(
+            lambda d: f"[{(d or {}).get('exclusive')}] + {', '.join((d or {}).get('options', []))}" if isinstance(d, dict) else ""
+        )
 
         show_cols = [c for c in [
             "Dossier N","ID_Client","Nom","Date","Mois","Categorie","Sous-categorie","Visa",
-            "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste"
+            "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste","Options (résumé)"
         ] if c in view.columns]
         sort_cols = [c for c in ["_Année_","_MoisNum_","Categorie","Nom"] if c in view.columns]
         view = view.sort_values(by=sort_cols) if sort_cols else view
@@ -332,8 +431,8 @@ with tab_clients:
         subs = sorted(list(visa_map.get(new_cat, {}).keys())) if new_cat else []
         new_sub = st.selectbox("Sous-catégorie", options=[""]+subs, index=0, key="new_sub")
 
-        st.caption("Options disponibles (cocher **une** seule si présentes)")
-        new_visa, err_new = render_dynamic_checkboxes(new_cat, new_sub, visa_map, keyprefix="new_form")
+        st.caption("Étapes disponibles pour cette sous-catégorie")
+        new_visa, err_new, new_opts = render_dynamic_steps(new_cat, new_sub, keyprefix="new_form", preselected=None)
         if err_new:
             st.info(err_new)
 
@@ -348,17 +447,14 @@ with tab_clients:
             if not new_sub:
                 st.warning("Sous-catégorie obligatoire."); st.stop()
             if new_visa == "":
-                # pas d'options ou rien coché -> sous-catégorie seule
                 new_visa = new_sub or ""
 
             base = _read_clients()
             dossier = _next_dossier(base)
             cid_base = _make_client_id(new_nom, new_date)
-            cid = cid_base
-            i = 0
+            cid = cid_base; i = 0
             while (base["ID_Client"].astype(str) == cid).any():
-                i += 1
-                cid = f"{cid_base}-{i}"
+                i += 1; cid = f"{cid_base}-{i}"
 
             total = float(new_hono) + float(new_autr)
             row = {
@@ -376,6 +472,7 @@ with tab_clients:
                 "Payé": 0.0,
                 "Reste": total,
                 "Paiements": json.dumps([], ensure_ascii=False),
+                "Options": json.dumps(_normalize_options_json(new_opts), ensure_ascii=False),
             }
             base = pd.concat([base, pd.DataFrame([row])], ignore_index=True)
             base = _normalize_clients(base)
@@ -389,6 +486,7 @@ with tab_clients:
     if sel_row is not None:
         idx = sel_idx
         ed = sel_row.to_dict()
+        cur_options = _normalize_options_json(ed.get("Options", {}))
 
         c1, c2, c3 = st.columns(3)
 
@@ -420,25 +518,10 @@ with tab_clients:
             )
 
         with c3:
-            st.caption("Options disponibles (cocher **une** seule si présentes)")
-            # Pré-cocher selon visa actuel (une seule fois par client)
-            prefill_key = f"prefill_{_safe_str(ed.get('ID_Client',''))}"
-            if not st.session_state.get(prefill_key, False):
-                curr_v = _safe_str(ed.get("Visa",""))
-                raw_opts = sorted(list(visa_map.get(ed_cat, {}).get(curr_sub, [])))
-                sufs = []
-                for lab in raw_opts:
-                    lab = _safe_str(lab)
-                    suf = lab[len(curr_sub):].strip() if (curr_sub and lab.startswith(curr_sub)) else lab
-                    if suf:
-                        sufs.append(suf)
-                sufs = sorted(set(sufs))
-                curr_suffix = curr_v[len(curr_sub):].strip() if (curr_sub and curr_v.startswith(curr_sub)) else ""
-                for i, s in enumerate(sufs):
-                    st.session_state[f"ed_{idx}_chk_{i}"] = (s == curr_suffix)
-                st.session_state[prefill_key] = True
-
-            ed_visa_final, err_ed = render_dynamic_checkboxes(ed_cat, ed_sub, visa_map, keyprefix=f"ed_{idx}")
+            st.caption("Étapes disponibles pour cette sous-catégorie")
+            ed_visa_final, err_ed, ed_opts = render_dynamic_steps(
+                ed_cat, ed_sub, keyprefix=f"ed_{idx}", preselected=cur_options
+            )
             if err_ed:
                 st.info(err_ed)
 
@@ -533,6 +616,7 @@ with tab_clients:
             row["Montant honoraires (US $)"] = float(ed_hono)
             row["Autres frais (US $)"] = float(ed_autr)
             row["Total (US $)"] = float(ed_hono) + float(ed_autr)
+            row["Options"] = json.dumps(_normalize_options_json(ed_opts), ensure_ascii=False)
 
             base.loc[ridx] = row
             base = _normalize_clients(base)
@@ -554,6 +638,7 @@ with tab_clients:
 # ---------- ONGLET VISA (aperçu) ----------
 with tab_visa:
     st.subheader("Référentiel Visa (cellules = 1 → options)")
+    visa_map = parse_visa_sheet(VISA_FILE)
     if not visa_map:
         st.warning("Aucune donnée Visa trouvée. Vérifie le fichier et l’onglet.")
     else:
@@ -566,10 +651,10 @@ with tab_visa:
 
         if cat_pick and sub_pick:
             opts = sorted(list(visa_map.get(cat_pick, {}).get(sub_pick, [])))
-            st.write("**Options disponibles (depuis l’Excel, cellules = 1)** :")
+            st.write("**Options détectées (depuis l’Excel, cellules = 1)** :")
             if opts:
                 st.write(", ".join(opts))
-                st.caption("En formulaire, ces options apparaissent sous forme de **cases**. Un seul choix autorisé.")
+                st.caption("En formulaire, les exclusifs COS/EOS ou USCIS/CP sont en **radio** ; le reste en **toggle/checkbox**.")
             else:
                 st.caption("Aucune option : le Visa final = Sous-catégorie seule.")
 
@@ -594,9 +679,7 @@ def _excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
 def _zip_bytes(clients_df: pd.DataFrame, visa_file: str) -> bytes:
     bio = BytesIO()
     with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # Clients normalisés actuels
         zf.writestr("Clients.xlsx", _excel_bytes(clients_df.copy(), SHEET_CLIENTS))
-        # Visa: fichier brut pour préserver entêtes et '1'
         try:
             zf.write(visa_file, arcname="Visa.xlsx")
         except Exception:
@@ -678,24 +761,15 @@ else:
 
     st.markdown("#### Volumes par catégorie")
     vol_cat = f.groupby(["Categorie"], dropna=True).size().reset_index(name="Dossiers")
-    if not vol_cat.empty:
-        st.dataframe(vol_cat.sort_values("Dossiers", ascending=False).reset_index(drop=True), use_container_width=True)
-    else:
-        st.caption("Aucune donnée après filtres.")
+    st.dataframe(vol_cat.sort_values("Dossiers", ascending=False).reset_index(drop=True), use_container_width=True)
 
     st.markdown("#### Volumes par sous-catégorie")
     vol_sub = f.groupby(["Sous-categorie"], dropna=True).size().reset_index(name="Dossiers")
-    if not vol_sub.empty:
-        st.dataframe(vol_sub.sort_values("Dossiers", ascending=False).reset_index(drop=True), use_container_width=True)
-    else:
-        st.caption("Aucune donnée après filtres.")
+    st.dataframe(vol_sub.sort_values("Dossiers", ascending=False).reset_index(drop=True), use_container_width=True)
 
     st.markdown("#### Volumes par Visa")
     vol_visa = f.groupby(["Visa"], dropna=True).size().reset_index(name="Dossiers")
-    if not vol_visa.empty:
-        st.dataframe(vol_visa.sort_values("Dossiers", ascending=False).reset_index(drop=True), use_container_width=True)
-    else:
-        st.caption("Aucune donnée après filtres.")
+    st.dataframe(vol_visa.sort_values("Dossiers", ascending=False).reset_index(drop=True), use_container_width=True)
 
     st.markdown("#### Détails (clients filtrés)")
     detail = f.copy()
@@ -704,10 +778,13 @@ else:
             detail[c] = _safe_num_series(detail, c).map(_fmt_money)
     if "Date" in detail.columns:
         detail["Date"] = detail["Date"].astype(str)
+    detail["Options"] = detail["Options"].apply(
+        lambda d: json.dumps(_normalize_options_json(d), ensure_ascii=False) if not isinstance(d, str) else d
+    )
 
     show_cols = [c for c in [
         "Dossier N","ID_Client","Nom","Categorie","Sous-categorie","Visa","Date","Mois",
-        "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste"
+        "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste","Options"
     ] if c in detail.columns]
     sort_cols = [c for c in ["_Année_","_MoisNum_","Categorie","Nom"] if c in detail.columns]
     detail = detail.sort_values(by=sort_cols) if sort_cols else detail
