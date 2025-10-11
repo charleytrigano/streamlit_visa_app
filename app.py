@@ -17,7 +17,7 @@ import openpyxl  # writer Excel
 # --------- Config ----------
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title("🛂 Visa Manager")
-st.caption("Catégorie → Sous-catégorie → cases (Visa), Clients, Paiements, ESCROW, Analyses — Excel source")
+st.caption("Catégorie → Sous-catégorie → COS/EOS, Clients, Paiements, ESCROW, Analyses — Excel source")
 
 # --------- Constantes colonnes ----------
 DEFAULT_CLIENTS = "donnees_visa_clients1_adapte.xlsx"
@@ -98,9 +98,10 @@ def _create_clients_template(path: str|Path, sheet_name: str="Clients") -> None:
 def _create_visa_template(path: str|Path, sheet_name: str="Visa") -> None:
     # Modèle minimal : Categorie, Sous-categorie 1, cases (COS/EOS)
     rows = [
-        {"Categorie":"B-1","Sous-categorie 1":"Affaires","COS":"x","EOS":""},
-        {"Categorie":"B-2","Sous-categorie 1":"Tourisme","COS":"x","EOS":"x"},
-        {"Categorie":"F-1","Sous-categorie 1":"Etudiant","COS":"x","EOS":"x"},
+        {"Categorie":"Affaires/Tourisme","Sous-categorie 1":"B-1","COS":"x","EOS":""},
+        {"Categorie":"Affaires/Tourisme","Sous-categorie 1":"B-2","COS":"x","EOS":"x"},
+        {"Categorie":"Etudiants","Sous-categorie 1":"F-1","COS":"x","EOS":"x"},
+        {"Categorie":"Etudiants","Sous-categorie 1":"F-2","COS":"x","EOS":"x"},
     ]
     df = pd.DataFrame(rows)
     with pd.ExcelWriter(path, engine="openpyxl", mode="w") as wr:
@@ -161,7 +162,6 @@ def detect_visa_sheet_name(xlsx_path: str | Path) -> str:
             tmp = pd.read_excel(xlsx_path, sheet_name=sn, nrows=5)
             tmp = _uniquify_columns(tmp)
             tmp.columns = tmp.columns.map(str).str.strip()
-            # on accepte Catégorie ou Categorie
             norm = { _norm_header(c): c for c in tmp.columns }
             if any(k in norm for k in ("categorie","category")):
                 return sn
@@ -210,7 +210,6 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
             if key in colmap:
                 cat_col = colmap[key]; break
         if not cat_col:
-            # variantes sans espace
             for nk, orig in colmap.items():
                 if nk.replace(" ", "") in {"categorie","category"}:
                     cat_col = orig; break
@@ -274,6 +273,24 @@ def _visa_subcats_for(cat: str, visa_map_nested: dict[str, dict[str, list[str]]]
 
 def _visa_options_for(cat: str, subcat: str, visa_map_nested: dict[str, dict[str, list[str]]]) -> list[str]:
     return sorted(list(visa_map_nested.get(cat, {}).get(subcat, [])))
+
+# Extrait les suffixes (COS/EOS) pour une sous-catégorie
+def _suffix_options_for(cat: str, sub: str) -> list[str]:
+    if not (cat and sub): 
+        return []
+    opts = _visa_options_for(cat, sub, visa_map)
+    if not opts:
+        return []
+    sufs = []
+    for lab in opts:
+        lab = _safe_str(lab)
+        if lab.startswith(sub):
+            suf = lab[len(sub):].strip()
+            sufs.append(suf)
+        else:
+            sufs.append(lab.strip())
+    sufs = sorted({s for s in sufs if s})
+    return sufs
 
 # --------- Clients I/O + normalisation ----------
 def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
@@ -537,7 +554,7 @@ with tab_dash:
 
     st.dataframe(_uniquify_columns(view_sorted[show_cols].reset_index(drop=True)), use_container_width=True)
 
-# ================ CLIENTS (CRUD + Paiements + Cases dépendantes) ================
+# ================ CLIENTS (CRUD + Paiements + Radio COS/EOS) ================
 with tab_clients:
     st.subheader("👥 Clients — Créer / Modifier / Supprimer / Paiements")
 
@@ -573,26 +590,13 @@ with tab_clients:
         sub_opts = _visa_subcats_for(new_cat, visa_map) if new_cat else []
         new_sub  = st.selectbox("Sous-categorie", options=[""]+sub_opts, index=0, key="new_sub_sel")
 
-        # Cases (par sous-catégorie) -> choix unique via cases à cocher contrôlées
-        opt_list = _visa_options_for(new_cat, new_sub, visa_map) if (new_cat and new_sub) else []
-        st.caption("Choix des cases (une seule). Si aucune case disponible, le Visa = Sous-catégorie seule.")
-        checked_keys = []
-        chosen_case = ""
-        for i, lab in enumerate(opt_list):
-            # lab est déjà "Sous-categorie <Case>", on extrait juste la partie 'Case' pour l’affichage
-            suf = lab[len(new_sub):].strip() if new_sub and lab.startswith(new_sub) else lab
-            k = f"new_case_{i}"
-            val = st.checkbox(f"{suf or new_sub}", key=k, value=False, disabled=False)
-            if val:
-                checked_keys.append(k); chosen_case = lab
-        # Enforce un seul choix
-        if len(checked_keys) > 1:
-            st.warning("Une seule case doit être cochée. Décochez les autres.")
-
-        # Valeur Visa finale
-        if opt_list:
-            new_visa = chosen_case if chosen_case else ""
+        # Choix COS/EOS (ou rien si pas d’options) — un seul choix
+        sufs = _suffix_options_for(new_cat, new_sub)
+        if sufs:
+            choice = st.radio("Type (COS/EOS)", options=sufs, horizontal=True, key="new_choice")
+            new_visa = f"{new_sub} {choice}".strip()
         else:
+            st.caption("Aucune option (COS/EOS) pour cette sous-catégorie : le Visa = Sous-catégorie seule.")
             new_visa = new_sub if new_sub else ""
 
         new_hono = st.number_input(HONO, min_value=0.0, step=10.0, format="%.2f", key="new_hono")
@@ -602,9 +606,7 @@ with tab_clients:
             if not new_name: st.warning("Nom obligatoire."); st.stop()
             if not new_cat: st.warning("Categorie obligatoire."); st.stop()
             if not new_sub: st.warning("Sous-categorie obligatoire."); st.stop()
-            # si options existent, on veut une et une seule case cochée
-            if opt_list and not chosen_case:
-                st.warning("Cochez une case pour définir le Visa."); st.stop()
+            # si options existent, radio impose un choix
 
             base_raw = pd.read_excel(clients_path, sheet_name=sheet_choice)
             base_norm = normalize_clients(base_raw.copy())
@@ -661,7 +663,7 @@ with tab_clients:
                                 value=(pd.to_datetime(ed.get("Date")).date() if pd.notna(ed.get("Date")) else date.today()),
                                 key=f"ed_date_{idx}")
 
-    # Bloc Catégorie → Sous-catégorie → cases
+    # Bloc Catégorie → Sous-catégorie → radio COS/EOS
     with e2:
         cats = _visa_all_categories(visa_map)
         curr_cat = _safe_str(ed.get("Categorie",""))
@@ -678,28 +680,26 @@ with tab_clients:
                               key=f"ed_sub_{idx}")
 
     with e3:
-        # options de cases pour la sous-catégorie
-        opt_list = _visa_options_for(ed_cat, ed_sub, visa_map) if (ed_cat and ed_sub) else []
         curr_visa = _safe_str(ed.get("Visa",""))
+        sufs2 = _suffix_options_for(ed_cat, ed_sub)
 
-        st.caption("Choix des cases (une seule). Si aucune case disponible, le Visa = Sous-catégorie seule.")
-        chosen_case = ""
-        checked_count = 0
-        # initialise: coche la case correspondant au Visa actuel si possible
-        for i, lab in enumerate(opt_list):
-            suf = lab[len(ed_sub):].strip() if ed_sub and lab.startswith(ed_sub) else lab
-            default_checked = (curr_visa == lab)
-            val = st.checkbox(f"{suf or ed_sub}", key=f"ed_case_{idx}_{i}", value=default_checked)
-            if val:
-                checked_count += 1
-                chosen_case = lab
+        def _current_suffix(v_sub: str, v_full: str) -> str:
+            v_full = _safe_str(v_full)
+            if v_sub and v_full.startswith(v_sub):
+                suf = v_full[len(v_sub):].strip()
+                return suf
+            return ""
 
-        if opt_list and checked_count == 0:
-            st.info("Cochez la case du Visa souhaité.")
-        if checked_count > 1:
-            st.warning("Une seule case doit être cochée.")
-
-        ed_visa_final = chosen_case if (opt_list and chosen_case) else (ed_sub if ed_sub else "")
+        if sufs2:
+            default_idx = 0
+            curr_suf = _current_suffix(ed_sub, curr_visa)
+            if curr_suf in sufs2:
+                default_idx = sufs2.index(curr_suf)
+            ed_choice = st.radio("Type (COS/EOS)", options=sufs2, index=default_idx, horizontal=True, key=f"ed_choice_{idx}")
+            ed_visa_final = f"{ed_sub} {ed_choice}".strip()
+        else:
+            st.caption("Aucune option (COS/EOS) pour cette sous-catégorie : le Visa = Sous-catégorie seule.")
+            ed_visa_final = ed_sub if ed_sub else ""
 
         ed_hono = st.number_input(HONO, min_value=0.0, value=float(ed.get(HONO,0.0)), step=10.0, format="%.2f", key=f"ed_hono_{idx}")
         ed_autr = st.number_input(AUTRE, min_value=0.0, value=float(ed.get(AUTRE,0.0)), step=10.0, format="%.2f", key=f"ed_autre_{idx}")
@@ -818,7 +818,6 @@ with tab_analyses:
     st.subheader("📈 Analyses")
 
     base = df_clients.copy()
-    # Filtres simples (année / mois / cat / visa / solde)
     yearsA  = sorted([int(y) for y in pd.to_numeric(base["_Année_"], errors="coerce").dropna().unique().tolist()])
     monthsA = [f"{m:02d}" for m in range(1,13)]
     catsA   = sorted(base["Categorie"].dropna().astype(str).unique().tolist())
@@ -854,7 +853,7 @@ with tab_analyses:
     k4.metric("Solde à encaisser", _fmt_money_us(_safe_num_series(f,"Reste").sum()))
 
     st.markdown("---")
-    # Volumes par mois (année/mois)
+    # Volumes par mois
     vol = f.copy()
     if "Date" in vol.columns:
         vol = vol[pd.notna(vol["Date"])]
@@ -929,21 +928,22 @@ with tab_escrow:
     else:
         for _, r in g.sort_values(["_Année_","_MoisNum_","Nom"], na_position="last").iterrows():
             with st.expander(f"{r.get('Nom','')} — {r.get('ID_Client','')}  |  Visa: {r.get('Visa','')}  |  Dispo: {_fmt_money_us(r['ESCROW dispo'])}", expanded=False):
+                rid = _safe_str(r.get('ID_Client',''))
                 amt = st.number_input(
                     "Montant à marquer comme transféré (US $)",
                     min_value=0.0,
                     value=float(r["ESCROW dispo"]),
                     step=10.0,
                     format="%.2f",
-                    key=f"esc_amt_{_safe_str(r.get('ID_Client',''))}"
+                    key=f"esc_amt_{rid}"
                 )
-                dte = st.date_input("Date transfert", value=date.today(), key=f"esc_dt_{_safe_str(r.get('ID_Client',''))}")
-                if st.button("✅ Marquer transféré", key=f"esc_mark_{_safe_str(r.get('ID_Client',''))}"):
+                dte = st.date_input("Date transfert", value=date.today(), key=f"esc_dt_{rid}")
+                if st.button("✅ Marquer transféré", key=f"esc_mark_{rid}"):
                     if amt <= 0:
                         st.warning("Montant > 0 requis."); st.stop()
                     base_raw = pd.read_excel(clients_path, sheet_name=sheet_choice)
                     # Localiser la ligne par ID_Client
-                    idc = _safe_str(r.get("ID_Client",""))
+                    idc = rid
                     if idc and "ID_Client" in base_raw.columns:
                         idxs = base_raw.index[base_raw["ID_Client"].astype(str)==idc].tolist()
                         if not idxs:
