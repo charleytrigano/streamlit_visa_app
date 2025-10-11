@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# =========================
+# Imports
+# =========================
 import streamlit as st
 import pandas as pd
 import json
@@ -9,18 +12,23 @@ from io import BytesIO
 import openpyxl
 import zipfile
 import unicodedata
+from uuid import uuid4
 
-# ============================================================
-# CONFIG
-# ============================================================
+# =========================
+# Page & Namespace
+# =========================
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title("🛂 Visa Manager")
 
-# ============================================================
-# CONSTANTES / PARAMS
-# ============================================================
+# Namespace persistant pour éviter toute collision de widgets
+SID = st.session_state.setdefault("WIDGET_NS", str(uuid4()))
+
+# =========================
+# Constantes / chemins
+# =========================
 CLIENTS_FILE_DEFAULT = "donnees_visa_clients1_adapte.xlsx"
 VISA_FILE_DEFAULT    = "donnees_visa_clients1.xlsx"
+
 SHEET_CLIENTS = "Clients"
 SHEET_VISA    = "Visa"
 
@@ -31,16 +39,16 @@ CLIENTS_COLS = [
     "Payé","Reste","Paiements","Options"
 ]
 
-# Les colonnes affichées sous forme de "toggle" (sinon checkbox)
+# Colonnes rendues en bascule plutôt qu’en checkbox si présentes dans Visa
 TOGGLE_COLUMNS = {
     "AOS","CP","USCIS","I-130","I-140","I-140 & AOS","I-829","I-407",
     "Work Permit","Re-entry Permit","Consultation","Analysis","Referral",
     "Derivatives","Travel Permit","USC","LPR","Perm"
 }
 
-# ============================================================
-# HELPERS GÉNÉRIQUES
-# ============================================================
+# =========================
+# Utilitaires génériques
+# =========================
 def _safe_str(x) -> str:
     try:
         if pd.isna(x):
@@ -89,13 +97,13 @@ def ensure_file(path: str, sheet_name: str, cols: list[str]) -> None:
         with pd.ExcelWriter(p, engine="openpyxl") as wr:
             df.to_excel(wr, sheet_name=sheet_name, index=False)
 
-# créer si absents
+# Crée les fichiers minima si absents
 ensure_file(CLIENTS_FILE_DEFAULT, SHEET_CLIENTS, CLIENTS_COLS)
 ensure_file(VISA_FILE_DEFAULT, SHEET_VISA, ["Categorie","Sous-categorie 1"])
 
-# ============================================================
-# VISA — PARSE (cellule=1 ⇒ option active) + injection Étudiants F-1/F-2 (COS/EOS)
-# ============================================================
+# =========================
+# Lecture Visa (cellule = 1 => option)
+# =========================
 @st.cache_data(show_spinner=False)
 def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> dict[str, dict[str, list[str]]]:
     """
@@ -105,15 +113,15 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
          "Sous-categorie": ["Sous-categorie COS","Sous-categorie EOS", ...]  # si cellule = 1
       }
     }
-    + injecte F-1/F-2 (COS/EOS) si la catégorie 'Etudiants' est présente.
+    Injecte aussi F-1/F-2 COS/EOS si catégorie 'Etudiants' présente.
     """
     def _is_checked(v) -> bool:
-        if v is None or (isinstance(v, float) and pd.isna(v)): 
+        if v is None or (isinstance(v, float) and pd.isna(v)):
             return False
         if isinstance(v, (int, float)):
             return float(v) == 1.0
         s = str(v).strip().lower()
-        return s in {"1", "true", "vrai", "oui", "yes", "x"}
+        return s in {"1","x","true","vrai","oui","yes"}
 
     try:
         xls = pd.ExcelFile(xlsx_path)
@@ -148,7 +156,10 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
 
         cmap = {_norm(c): c for c in dfv.columns}
         cat_col = next((cmap[k] for k in cmap if "categorie" in k), None)
-        sub_col = next((cmap[k] for k in cmap if k.startswith("sous")), None)
+        sub_col = None
+        for k in cmap:
+            if k.startswith("sous"):
+                sub_col = cmap[k]; break
 
         if not cat_col:
             continue
@@ -178,7 +189,7 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
                 out[cat].setdefault(sub, [])
                 out[cat][sub].extend(opts)
 
-        # Injection Étudiants F-1/F-2 COS/EOS si la catégorie est là
+        # Injection Étudiants F-1/F-2 (COS/EOS)
         def _inject_students(d: dict[str, dict[str, list[str]]]) -> None:
             keys = [k for k in d.keys() if k.strip().lower() in {"etudiants","etudiant","students","student"}]
             if not keys: 
@@ -218,11 +229,7 @@ def _find_cat_sub_columns(df: pd.DataFrame) -> tuple[str|None, str|None]:
         return " ".join(s2.split())
     cmap = {_norm(c): c for c in df.columns}
     cat_col = next((cmap[k] for k in cmap if "categorie" in k), None)
-    sub_col = None
-    for k in cmap:
-        if k.startswith("sous"):
-            sub_col = cmap[k]
-            break
+    sub_col = next((cmap[k] for k in cmap if k.startswith("sous")), None)
     return cat_col, sub_col
 
 def _normalize_options_json(x) -> dict:
@@ -286,32 +293,32 @@ def render_dynamic_steps(cat: str, sub: str, keyprefix: str, visa_file: str, pre
     visa_final = ""
     info_msg = ""
 
-    # choix exclusif
+    # Choix exclusif
     if exclusive:
         st.caption("Choix exclusif")
         def_index = 0
         if pre["exclusive"] in exclusive:
             def_index = list(exclusive).index(pre["exclusive"])
         choice = st.radio("Sélectionner", options=list(exclusive), index=def_index,
-                          horizontal=True, key=f"{keyprefix}_exclusive")
+                          horizontal=True, key=f"{keyprefix}_exclusive_{SID}")
         selected_excl = choice
         visa_final = f"{sub} {choice}".strip()
 
-    # autres options
+    # Options complémentaires
     others = [c for c in possibles if not (exclusive and c in exclusive)]
     if others:
         st.caption("Options complémentaires")
     for i, col in enumerate(others):
         default_val = col in pre["options"]
         if col in TOGGLE_COLUMNS:
-            val = st.toggle(col, value=default_val, key=f"{keyprefix}_tog_{i}")
+            val = st.toggle(col, value=default_val, key=f"{keyprefix}_tog_{i}_{SID}")
         else:
-            val = st.checkbox(col, value=default_val, key=f"{keyprefix}_chk_{i}")
+            val = st.checkbox(col, value=default_val, key=f"{keyprefix}_chk_{i}_{SID}")
         if val:
             selected_opts.append(col)
 
     if not visa_final:
-        # pas d’exclusif → n’autorise qu’une seule option pour composer le visa final
+        # Pas d’exclusif → n’autoriser qu’une seule option pour composer le visa final
         if len(selected_opts) == 0:
             info_msg = "Coche une option (une seule) ou utilise le choix exclusif."
         elif len(selected_opts) > 1:
@@ -324,9 +331,9 @@ def render_dynamic_steps(cat: str, sub: str, keyprefix: str, visa_file: str, pre
 
     return visa_final, info_msg, {"exclusive": selected_excl, "options": selected_opts}
 
-# ============================================================
-# CLIENTS — I/O & NORMALISATION
-# ============================================================
+# =========================
+# Clients — I/O & Normalisation
+# =========================
 def _normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for c in CLIENTS_COLS:
@@ -392,32 +399,32 @@ def _next_dossier(df: pd.DataFrame, start: int = 13057) -> int:
 def _make_client_id(nom: str, d: date) -> str:
     return f"{_safe_str(nom).strip().replace(' ','_')}-{d:%Y%m%d}"
 
-# ============================================================
-# BARRE LATÉRALE – chemins & action
-# ============================================================
+# =========================
+# Barre latérale – chemins & action
+# =========================
 with st.sidebar:
     st.markdown("## 🧭 Étapes")
     st.caption("Choisis l’action et le fichier de travail.")
-    clients_path = st.text_input("Fichier Clients", value=CLIENTS_FILE_DEFAULT, key="sb_clients_path")
-    visa_path    = st.text_input("Fichier Visa",    value=VISA_FILE_DEFAULT,    key="sb_visa_path")
-    action       = st.radio("Action clients", options=["Ajouter","Modifier","Supprimer"], horizontal=False, key="sb_action")
+    clients_path = st.text_input("Fichier Clients", value=CLIENTS_FILE_DEFAULT, key=f"sb_clients_path_{SID}")
+    visa_path    = st.text_input("Fichier Visa",    value=VISA_FILE_DEFAULT,    key=f"sb_visa_path_{SID}")
+    action       = st.radio("Action clients", options=["Ajouter","Modifier","Supprimer"], horizontal=False, key=f"sb_action_{SID}")
 
-# Charger après choix chemins
+# Charger les données après choix chemins
 visa_map = parse_visa_sheet(visa_path)
 df_all   = _read_clients(clients_path)
 
-# ============================================================
-# ONGLETs
-# ============================================================
+# =========================
+# Tabs
+# =========================
 tabs = st.tabs(["📊 Dashboard", "📈 Analyses", "🏦 Escrow", "📄 Visa (aperçu)"])
 
-# ============================================================
-# DASHBOARD
-# ============================================================
+# =========================
+# Dashboard
+# =========================
 with tabs[0]:
     st.subheader("📊 Dashboard — tous les clients")
 
-    # Filtres dans la sidebar (créés après lecture des données pour éviter conflits)
+    # Filtres (sidebar) avec clés namespacées
     with st.sidebar:
         st.markdown("---")
         st.markdown("### 🔎 Filtres Dashboard")
@@ -426,10 +433,10 @@ with tabs[0]:
         cats   = sorted(df_all["Categorie"].dropna().astype(str).unique().tolist()) if not df_all.empty else []
         visas  = sorted(df_all["Visa"].dropna().astype(str).unique().tolist())      if not df_all.empty else []
 
-        dash_years  = st.multiselect("Année", years, default=[], key="dash_years")
-        dash_months = st.multiselect("Mois (MM)", months, default=[], key="dash_months")
-        dash_cats   = st.multiselect("Catégories", cats, default=[], key="dash_cats")
-        dash_visas  = st.multiselect("Visa", visas, default=[], key="dash_visas")
+        dash_years  = st.multiselect("Année", years, default=[], key=f"dash_years_{SID}")
+        dash_months = st.multiselect("Mois (MM)", months, default=[], key=f"dash_months_{SID}")
+        dash_cats   = st.multiselect("Catégories", cats, default=[], key=f"dash_cats_{SID}")
+        dash_visas  = st.multiselect("Visa", visas, default=[], key=f"dash_visas_{SID}")
 
     df = df_all.copy()
     if dash_years:  df = df[df["_Année_"].isin(dash_years)]
@@ -453,7 +460,6 @@ with tabs[0]:
     view["Options (résumé)"] = view["Options"].apply(
         lambda d: f"[{(d or {}).get('exclusive')}] + {', '.join((d or {}).get('options', []))}" if isinstance(d, dict) else ""
     )
-
     show_cols = [c for c in [
         "Dossier N","ID_Client","Nom","Categorie","Sous-categorie","Visa","Date","Mois",
         "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste","Options (résumé)"
@@ -470,20 +476,20 @@ with tabs[0]:
         st.markdown("#### ➕ Ajouter un client")
         c1,c2,c3 = st.columns(3)
         with c1:
-            nom = st.text_input("Nom", key="add_nom")
-            dcr = st.date_input("Date de création", value=date.today(), key="add_date")
+            nom = st.text_input("Nom", key=f"add_nom_{SID}")
+            dcr = st.date_input("Date de création", value=date.today(), key=f"add_date_{SID}")
         with c2:
             cats = sorted(list(visa_map.keys()))
-            cat = st.selectbox("Catégorie", options=[""]+cats, index=0, key="add_cat")
+            cat = st.selectbox("Catégorie", options=[""]+cats, index=0, key=f"add_cat_{SID}")
             subs = sorted(list(visa_map.get(cat, {}).keys())) if cat else []
-            sub  = st.selectbox("Sous-catégorie", options=[""]+subs, index=0, key="add_sub")
+            sub  = st.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=f"add_sub_{SID}")
         with c3:
-            visa_final, info_msg, opts = render_dynamic_steps(cat, sub, "add_steps", visa_file=visa_path, preselected=None)
+            visa_final, info_msg, opts = render_dynamic_steps(cat, sub, f"add_steps_{SID}", visa_file=visa_path, preselected=None)
             if info_msg: st.info(info_msg)
-            hono = st.number_input("Montant honoraires (US $)", min_value=0.0, step=10.0, format="%.2f", key="add_hono")
-            autre= st.number_input("Autres frais (US $)",     min_value=0.0, step=10.0, format="%.2f", key="add_autre")
+            hono = st.number_input("Montant honoraires (US $)", min_value=0.0, step=10.0, format="%.2f", key=f"add_hono_{SID}")
+            autre= st.number_input("Autres frais (US $)",     min_value=0.0, step=10.0, format="%.2f", key=f"add_autre_{SID}")
 
-        if st.button("💾 Créer", key="btn_add_create"):
+        if st.button("💾 Créer", key=f"btn_add_create_{SID}"):
             if not nom or not cat or not sub:
                 st.warning("Nom, Catégorie et Sous-catégorie sont requis."); st.stop()
             base = _read_clients(clients_path)
@@ -522,45 +528,45 @@ with tabs[0]:
         else:
             idx = st.selectbox("Sélectionne la ligne à modifier", options=list(df_all.index),
                                format_func=lambda i: f"{df_all.loc[i,'Nom']} — {df_all.loc[i,'ID_Client']}",
-                               key="mod_idx")
+                               key=f"mod_idx_{SID}")
             row = df_all.loc[idx]
 
             c1,c2,c3 = st.columns(3)
             with c1:
-                nom = st.text_input("Nom", value=_safe_str(row["Nom"]), key=f"mod_nom_{idx}")
+                nom = st.text_input("Nom", value=_safe_str(row["Nom"]), key=f"mod_nom_{idx}_{SID}")
                 dcr = st.date_input("Date de création",
                                     value=(pd.to_datetime(row["Date"]).date() if pd.notna(row["Date"]) else date.today()),
-                                    key=f"mod_date_{idx}")
+                                    key=f"mod_date_{idx}_{SID}")
             with c2:
                 cats = sorted(list(visa_map.keys()))
                 cur_cat = _safe_str(row["Categorie"])
                 cat = st.selectbox("Catégorie", options=[""]+cats,
                                    index=(cats.index(cur_cat)+1 if cur_cat in cats else 0),
-                                   key=f"mod_cat_{idx}")
+                                   key=f"mod_cat_{idx}_{SID}")
                 subs = sorted(list(visa_map.get(cat, {}).keys())) if cat else []
                 cur_sub = _safe_str(row["Sous-categorie"])
                 sub = st.selectbox("Sous-catégorie", options=[""]+subs,
                                    index=(subs.index(cur_sub)+1 if cur_sub in subs else 0),
-                                   key=f"mod_sub_{idx}")
+                                   key=f"mod_sub_{idx}_{SID}")
             with c3:
                 cur_opts = _normalize_options_json(row.get("Options", {}))
-                visa_final, info_msg, opts = render_dynamic_steps(cat, sub, f"mod_steps_{idx}",
+                visa_final, info_msg, opts = render_dynamic_steps(cat, sub, f"mod_steps_{idx}_{SID}",
                                                                   visa_file=visa_path, preselected=cur_opts)
                 if info_msg: st.info(info_msg)
                 hono = st.number_input("Montant honoraires (US $)", min_value=0.0,
                                        value=float(row["Montant honoraires (US $)"]), step=10.0, format="%.2f",
-                                       key=f"mod_hono_{idx}")
+                                       key=f"mod_hono_{idx}_{SID}")
                 autre= st.number_input("Autres frais (US $)", min_value=0.0,
                                        value=float(row["Autres frais (US $)"]), step=10.0, format="%.2f",
-                                       key=f"mod_autre_{idx}")
+                                       key=f"mod_autre_{idx}_{SID}")
 
             st.markdown("##### 💳 Paiements")
             p1,p2,p3,p4 = st.columns([1,1,1,2])
-            with p1: pdt = st.date_input("Date paiement", value=date.today(), key=f"mod_paydt_{idx}")
-            with p2: pmd = st.selectbox("Mode", ["CB","Chèque","Cash","Virement","Venmo"], key=f"mod_mode_{idx}")
-            with p3: pmt = st.number_input("Montant (US $)", min_value=0.0, step=10.0, format="%.2f", key=f"mod_amt_{idx}")
+            with p1: pdt = st.date_input("Date paiement", value=date.today(), key=f"mod_paydt_{idx}_{SID}")
+            with p2: pmd = st.selectbox("Mode", ["CB","Chèque","Cash","Virement","Venmo"], key=f"mod_mode_{idx}_{SID}")
+            with p3: pmt = st.number_input("Montant (US $)", min_value=0.0, step=10.0, format="%.2f", key=f"mod_amt_{idx}_{SID}")
             with p4:
-                if st.button("➕ Ajouter paiement", key=f"mod_addpay_{idx}"):
+                if st.button("➕ Ajouter paiement", key=f"mod_addpay_{idx}_{SID}"):
                     base = _read_clients(clients_path)
                     plist = base.loc[idx,"Paiements"]
                     if not isinstance(plist, list):
@@ -586,7 +592,7 @@ with tabs[0]:
             else:
                 st.caption("Aucun paiement.")
 
-            if st.button("💾 Sauvegarder", key=f"mod_save_{idx}"):
+            if st.button("💾 Sauvegarder", key=f"mod_save_{idx}_{SID}"):
                 base = _read_clients(clients_path)
                 base.loc[idx,"Nom"] = nom
                 base.loc[idx,"Date"] = pd.to_datetime(dcr).date()
@@ -609,16 +615,16 @@ with tabs[0]:
         else:
             idx = st.selectbox("Sélectionne la ligne à supprimer", options=list(df_all.index),
                                format_func=lambda i: f"{df_all.loc[i,'Nom']} — {df_all.loc[i,'ID_Client']}",
-                               key="del_idx")
-            if st.button("Confirmer la suppression", type="primary", key="btn_confirm_del"):
+                               key=f"del_idx_{SID}")
+            if st.button("Confirmer la suppression", type="primary", key=f"btn_confirm_del_{SID}"):
                 base = _read_clients(clients_path)
                 base = base.drop(index=idx).reset_index(drop=True)
                 _write_clients(_normalize_clients(base), clients_path)
                 st.success("Client supprimé."); st.rerun()
 
-# ============================================================
-# ANALYSES
-# ============================================================
+# =========================
+# Analyses
+# =========================
 with tabs[1]:
     st.subheader("📈 Analyses")
     df = df_all.copy()
@@ -631,10 +637,10 @@ with tabs[1]:
         cats   = sorted(df["Categorie"].dropna().astype(str).unique().tolist())
         visas  = sorted(df["Visa"].dropna().astype(str).unique().tolist())
 
-        fy = a1.multiselect("Année", years, default=[], key="ana_years")
-        fm = a2.multiselect("Mois (MM)", months, default=[], key="ana_months")
-        fc = a3.multiselect("Catégories", cats, default=[], key="ana_cats")
-        fv = a4.multiselect("Visa", visas, default=[], key="ana_visas")
+        fy = a1.multiselect("Année", years, default=[], key=f"ana_years_{SID}")
+        fm = a2.multiselect("Mois (MM)", months, default=[], key=f"ana_months_{SID}")
+        fc = a3.multiselect("Catégories", cats, default=[], key=f"ana_cats_{SID}")
+        fv = a4.multiselect("Visa", visas, default=[], key=f"ana_visas_{SID}")
 
         f = df.copy()
         if fy: f = f[f["_Année_"].isin(fy)]
@@ -675,9 +681,9 @@ with tabs[1]:
         detail = detail.sort_values(by=sort_cols) if sort_cols else detail
         st.dataframe(_uniquify_columns(detail[show_cols].reset_index(drop=True)), use_container_width=True)
 
-# ============================================================
-# ESCROW
-# ============================================================
+# =========================
+# Escrow (simple)
+# =========================
 with tabs[2]:
     st.subheader("🏦 Escrow — honoraires en attente de transfert")
     df = df_all.copy()
@@ -698,9 +704,9 @@ with tabs[2]:
             st.dataframe(show.reset_index(drop=True), use_container_width=True)
             st.caption("Astuce : passe par **Modifier** (barre latérale) pour ajouter des acomptes jusqu’au solde.")
 
-# ============================================================
-# VISA (APERÇU)
-# ============================================================
+# =========================
+# Visa (aperçu)
+# =========================
 with tabs[3]:
     st.subheader("📄 Référentiel Visa (cellule = 1 → option)")
     vmap = parse_visa_sheet(visa_path)
@@ -709,10 +715,10 @@ with tabs[3]:
     else:
         c1, c2 = st.columns(2)
         with c1:
-            cat = st.selectbox("Catégorie", [""]+sorted(list(vmap.keys())), key="vz_cat")
+            cat = st.selectbox("Catégorie", [""]+sorted(list(vmap.keys())), key=f"vz_cat_{SID}")
         with c2:
             subs = sorted(list(vmap.get(cat, {}).keys())) if cat else []
-            sub  = st.selectbox("Sous-catégorie", [""]+subs, key="vz_sub")
+            sub  = st.selectbox("Sous-catégorie", [""]+subs, key=f"vz_sub_{SID}")
         if cat and sub:
             opts = sorted(list(vmap.get(cat, {}).get(sub, [])))
             st.write("**Options détectées** :", ", ".join(opts) if opts else "(Aucune → le visa = sous-catégorie)")
@@ -722,9 +728,9 @@ with tabs[3]:
                 for s, arr in submap.items():
                     st.caption(f"- {s} → {', '.join(arr)}")
 
-# ============================================================
-# EXPORTS (optionnels)
-# ============================================================
+# =========================
+# Exports
+# =========================
 st.markdown("---")
 st.subheader("📤 Exports rapides")
 
@@ -743,7 +749,7 @@ with colE1:
             data=_excel_bytes(df_all, SHEET_CLIENTS),
             file_name="Clients.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_clients_xlsx",
+            key=f"dl_clients_xlsx_{SID}",
         )
     except Exception as e:
         st.caption(f"Export Clients.xlsx indisponible : {e}")
@@ -755,7 +761,7 @@ with colE2:
             data=Path(visa_path).read_bytes(),
             file_name="Visa.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_visa_xlsx",
+            key=f"dl_visa_xlsx_{SID}",
         )
     except Exception as e:
         st.caption(f"Export Visa.xlsx indisponible : {e}")
@@ -777,7 +783,7 @@ with colE3:
             data=bio.getvalue(),
             file_name="Visa_Manager_Export.zip",
             mime="application/zip",
-            key="dl_zip_all",
+            key=f"dl_zip_all_{SID}",
         )
     except Exception as e:
         st.caption(f"Export ZIP indisponible : {e}")
