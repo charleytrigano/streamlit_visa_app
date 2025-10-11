@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-# =========================
-# Imports
-# =========================
+# ========= Imports =========
 import streamlit as st
 import pandas as pd
 import json
@@ -13,19 +11,15 @@ import openpyxl
 import zipfile
 import unicodedata
 from uuid import uuid4
+import altair as alt
 
-# =========================
-# Page & Namespace
-# =========================
+# ========= Page & Namespace anti-collisions =========
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title("🛂 Visa Manager")
 
-# Namespace persistant pour éviter toute collision de widgets
 SID = st.session_state.setdefault("WIDGET_NS", str(uuid4()))
 
-# =========================
-# Constantes / chemins
-# =========================
+# ========= Constantes =========
 CLIENTS_FILE_DEFAULT = "donnees_visa_clients1_adapte.xlsx"
 VISA_FILE_DEFAULT    = "donnees_visa_clients1.xlsx"
 
@@ -36,19 +30,18 @@ CLIENTS_COLS = [
     "Dossier N","ID_Client","Nom","Date","Mois",
     "Categorie","Sous-categorie","Visa",
     "Montant honoraires (US $)","Autres frais (US $)","Total (US $)",
-    "Payé","Reste","Paiements","Options"
+    "Payé","Reste","Paiements","Options",
+    # colonnes d’état si présentes :
+    "Dossier envoyé","Dossier approuvé","RFE","Dossier refusé","Dossier annulé"
 ]
 
-# Colonnes rendues en bascule plutôt qu’en checkbox si présentes dans Visa
 TOGGLE_COLUMNS = {
     "AOS","CP","USCIS","I-130","I-140","I-140 & AOS","I-829","I-407",
     "Work Permit","Re-entry Permit","Consultation","Analysis","Referral",
     "Derivatives","Travel Permit","USC","LPR","Perm"
 }
 
-# =========================
-# Utilitaires génériques
-# =========================
+# ========= Utilitaires =========
 def _safe_str(x) -> str:
     try:
         if pd.isna(x):
@@ -97,23 +90,40 @@ def ensure_file(path: str, sheet_name: str, cols: list[str]) -> None:
         with pd.ExcelWriter(p, engine="openpyxl") as wr:
             df.to_excel(wr, sheet_name=sheet_name, index=False)
 
-# Crée les fichiers minima si absents
+# Crée les fichiers min si absents
 ensure_file(CLIENTS_FILE_DEFAULT, SHEET_CLIENTS, CLIENTS_COLS)
 ensure_file(VISA_FILE_DEFAULT, SHEET_VISA, ["Categorie","Sous-categorie 1"])
 
-# =========================
-# Lecture Visa (cellule = 1 => option)
-# =========================
+def load_raw_visa_df(xlsx_path: str | Path, sheet_name: str = SHEET_VISA) -> pd.DataFrame:
+    try:
+        df = pd.read_excel(xlsx_path, sheet_name=sheet_name)
+    except Exception:
+        return pd.DataFrame()
+    return _uniquify_columns(df)
+
+def _find_cat_sub_columns(df: pd.DataFrame) -> tuple[str|None, str|None]:
+    def _norm(s: str) -> str:
+        s2 = unicodedata.normalize("NFKD", s)
+        s2 = "".join(ch for ch in s2 if not unicodedata.combining(ch))
+        s2 = s2.lower().strip().replace("\u00a0"," ")
+        s2 = s2.replace("-", " ").replace("_"," ")
+        return " ".join(s2.split())
+    cmap = {_norm(c): c for c in df.columns}
+    cat_col = next((cmap[k] for k in cmap if "categorie" in k), None)
+    sub_col = next((cmap[k] for k in cmap if k.startswith("sous")), None)
+    return cat_col, sub_col
+
+# ========= Parse Visa (cellule = 1 => option) + F-1/F-2 Etudiants/2-Etudiants =========
 @st.cache_data(show_spinner=False)
 def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> dict[str, dict[str, list[str]]]:
     """
-    Retourne un mapping:
+    Construit:
     {
       "Categorie": {
-         "Sous-categorie": ["Sous-categorie COS","Sous-categorie EOS", ...]  # si cellule = 1
+         "Sous-categorie": ["Sous-categorie COS","Sous-categorie EOS", ...]  # cellule = 1
       }
     }
-    Injecte aussi F-1/F-2 COS/EOS si catégorie 'Etudiants' présente.
+    Injection F-1/F-2 (COS/EOS) si nom catégorie contient 'etudiant' (Etudiants, 2-Etudiants, etc.)
     """
     def _is_checked(v) -> bool:
         if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -122,6 +132,13 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
             return float(v) == 1.0
         s = str(v).strip().lower()
         return s in {"1","x","true","vrai","oui","yes"}
+
+    def _norm(s: str) -> str:
+        s2 = unicodedata.normalize("NFKD", s)
+        s2 = "".join(ch for ch in s2 if not unicodedata.combining(ch))
+        s2 = s2.strip().lower().replace("\u00a0", " ")
+        s2 = s2.replace("-", " ").replace("_", " ")
+        return " ".join(s2.split())
 
     try:
         xls = pd.ExcelFile(xlsx_path)
@@ -147,20 +164,9 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
         dfv = _uniquify_columns(dfv)
         dfv.columns = dfv.columns.map(str).str.strip()
 
-        def _norm(s: str) -> str:
-            s2 = unicodedata.normalize("NFKD", s)
-            s2 = "".join(ch for ch in s2 if not unicodedata.combining(ch))
-            s2 = s2.strip().lower().replace("\u00a0", " ")
-            s2 = s2.replace("-", " ").replace("_", " ")
-            return " ".join(s2.split())
-
         cmap = {_norm(c): c for c in dfv.columns}
         cat_col = next((cmap[k] for k in cmap if "categorie" in k), None)
-        sub_col = None
-        for k in cmap:
-            if k.startswith("sous"):
-                sub_col = cmap[k]; break
-
+        sub_col = next((cmap[k] for k in cmap if k.startswith("sous")), None)
         if not cat_col:
             continue
         if not sub_col:
@@ -189,49 +195,27 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
                 out[cat].setdefault(sub, [])
                 out[cat][sub].extend(opts)
 
-        # Injection Étudiants F-1/F-2 (COS/EOS)
-        def _inject_students(d: dict[str, dict[str, list[str]]]) -> None:
-            keys = [k for k in d.keys() if k.strip().lower() in {"etudiants","etudiant","students","student"}]
-            if not keys: 
-                return
-            for k in keys:
-                subs = d.setdefault(k, {})
-                for sub in ("F-1","F-2"):
-                    arr = subs.setdefault(sub, [])
-                    for w in (f"{sub} COS", f"{sub} EOS"):
-                        if w not in arr:
-                            arr.append(w)
-                    subs[sub] = sorted(set(arr))
+        # Étudiants / 2-Etudiants → injecte F-1/F-2 COS/EOS
+        cats_in_sheet = sorted(set(dfv[cat_col].dropna().astype(str).str.strip()))
+        student_cats = [c for c in cats_in_sheet if "etudiant" in _norm(c)]
+        for cat_name in student_cats:
+            subs = out.setdefault(cat_name, {})
+            for sub in ("F-1","F-2"):
+                arr = subs.setdefault(sub, [])
+                for w in (f"{sub} COS", f"{sub} EOS"):
+                    if w not in arr:
+                        arr.append(w)
+                subs[sub] = sorted(set(arr))
 
         if out:
             for cat, subs in out.items():
                 for sub, arr in subs.items():
                     subs[sub] = sorted(set(arr))
-            _inject_students(out)
             return out
 
     return {}
 
-@st.cache_data(show_spinner=False)
-def load_raw_visa_df(xlsx_path: str | Path, sheet_name: str = SHEET_VISA) -> pd.DataFrame:
-    try:
-        df = pd.read_excel(xlsx_path, sheet_name=sheet_name)
-    except Exception:
-        return pd.DataFrame()
-    return _uniquify_columns(df)
-
-def _find_cat_sub_columns(df: pd.DataFrame) -> tuple[str|None, str|None]:
-    def _norm(s: str) -> str:
-        s2 = unicodedata.normalize("NFKD", s)
-        s2 = "".join(ch for ch in s2 if not unicodedata.combining(ch))
-        s2 = s2.lower().strip().replace("\u00a0"," ")
-        s2 = s2.replace("-", " ").replace("_"," ")
-        return " ".join(s2.split())
-    cmap = {_norm(c): c for c in df.columns}
-    cat_col = next((cmap[k] for k in cmap if "categorie" in k), None)
-    sub_col = next((cmap[k] for k in cmap if k.startswith("sous")), None)
-    return cat_col, sub_col
-
+# ========= Clients I/O & Normalisation =========
 def _normalize_options_json(x) -> dict:
     try:
         d = json.loads(_safe_str(x) or "{}")
@@ -245,95 +229,6 @@ def _normalize_options_json(x) -> dict:
     except Exception:
         return {"exclusive": None, "options": []}
 
-def render_dynamic_steps(cat: str, sub: str, keyprefix: str, visa_file: str, preselected: dict | None = None) -> tuple[str, str, dict]:
-    """
-    Affiche dynamiquement les choix (radio exclusif COS/EOS/USCIS/CP + toggles/checkboxes)
-    selon la ligne correspondante dans la feuille Visa (cellule=1 => option disponible).
-    Retourne: (visa_final, info_msg, selected_dict)
-    """
-    if not (cat and sub):
-        return "", "Choisir d'abord Catégorie et Sous-catégorie.", {"exclusive": None, "options": []}
-
-    vdf = load_raw_visa_df(visa_file, SHEET_VISA)
-    if vdf.empty:
-        return "", "Feuille Visa introuvable ou vide.", {"exclusive": None, "options": []}
-
-    cat_col, sub_col = _find_cat_sub_columns(vdf)
-    if not cat_col:
-        return "", "Colonne 'Catégorie' introuvable.", {"exclusive": None, "options": []}
-
-    if sub_col:
-        row = vdf[(vdf[cat_col].astype(str).str.strip()==cat) & (vdf[sub_col].astype(str).str.strip()==sub)]
-    else:
-        row = vdf[vdf[cat_col].astype(str).str.strip()==cat]
-    if row.empty:
-        return "", "Combinaison Catégorie/Sous-catégorie non trouvée.", {"exclusive": None, "options": []}
-
-    row = row.iloc[0]
-    option_cols = [c for c in vdf.columns if c not in {cat_col, sub_col}]
-
-    def _is_checked(v) -> bool:
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return False
-        if isinstance(v, (int, float)):
-            return float(v) == 1.0
-        s = str(v).strip().lower()
-        return s in {"1","x","true","vrai","oui","yes"}
-
-    possibles = [c for c in option_cols if _is_checked(row.get(c))]
-    exclusive = None
-    if {"COS","EOS"}.issubset(set(possibles)):
-        exclusive = ("COS","EOS")
-    elif {"USCIS","CP"}.issubset(set(possibles)):
-        exclusive = ("USCIS","CP")
-
-    pre = _normalize_options_json(preselected or {})
-    selected_opts: list[str] = []
-    selected_excl: str | None = None
-    visa_final = ""
-    info_msg = ""
-
-    # Choix exclusif
-    if exclusive:
-        st.caption("Choix exclusif")
-        def_index = 0
-        if pre["exclusive"] in exclusive:
-            def_index = list(exclusive).index(pre["exclusive"])
-        choice = st.radio("Sélectionner", options=list(exclusive), index=def_index,
-                          horizontal=True, key=f"{keyprefix}_exclusive_{SID}")
-        selected_excl = choice
-        visa_final = f"{sub} {choice}".strip()
-
-    # Options complémentaires
-    others = [c for c in possibles if not (exclusive and c in exclusive)]
-    if others:
-        st.caption("Options complémentaires")
-    for i, col in enumerate(others):
-        default_val = col in pre["options"]
-        if col in TOGGLE_COLUMNS:
-            val = st.toggle(col, value=default_val, key=f"{keyprefix}_tog_{i}_{SID}")
-        else:
-            val = st.checkbox(col, value=default_val, key=f"{keyprefix}_chk_{i}_{SID}")
-        if val:
-            selected_opts.append(col)
-
-    if not visa_final:
-        # Pas d’exclusif → n’autoriser qu’une seule option pour composer le visa final
-        if len(selected_opts) == 0:
-            info_msg = "Coche une option (une seule) ou utilise le choix exclusif."
-        elif len(selected_opts) > 1:
-            info_msg = "Une seule option possible (dans ce cas)."
-        else:
-            visa_final = f"{sub} {selected_opts[0]}".strip()
-
-    if not visa_final and not possibles:
-        visa_final = sub
-
-    return visa_final, info_msg, {"exclusive": selected_excl, "options": selected_opts}
-
-# =========================
-# Clients — I/O & Normalisation
-# =========================
 def _normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for c in CLIENTS_COLS:
@@ -345,8 +240,7 @@ def _normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: f"{pd.to_datetime(r['Date']).month:02d}" if pd.notna(r["Date"]) else (_safe_str(r.get("Mois",""))[:2] or None),
         axis=1
     )
-
-    # numéraires
+    # numériques
     for c in ["Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste"]:
         df[c] = _safe_num_series(df, c)
 
@@ -359,7 +253,6 @@ def _normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
             return []
     df["Paiements"] = df["Paiements"].apply(_parse_p)
 
-    # recalc Payé et Reste
     def _sum_json(lst):
         try:
             return float(sum(float(it.get("amount",0.0) or 0.0) for it in (lst or [])))
@@ -379,7 +272,10 @@ def _normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     return _uniquify_columns(df)
 
 def _read_clients(path: str) -> pd.DataFrame:
-    df = pd.read_excel(path, sheet_name=SHEET_CLIENTS)
+    try:
+        df = pd.read_excel(path, sheet_name=SHEET_CLIENTS)
+    except Exception:
+        df = pd.DataFrame(columns=CLIENTS_COLS)
     return _normalize_clients(df)
 
 def _write_clients(df: pd.DataFrame, path: str) -> None:
@@ -397,51 +293,50 @@ def _next_dossier(df: pd.DataFrame, start: int = 13057) -> int:
     return int(start)
 
 def _make_client_id(nom: str, d: date) -> str:
-    return f"{_safe_str(nom).strip().replace(' ','_')}-{d:%Y%m%d}"
+    base = _safe_str(nom).strip().replace(" ","_")
+    return f"{base}-{d:%Y%m%d}"
 
-# =========================
-# Barre latérale – chemins & action
-# =========================
+# ========= Barre latérale : chemins & action =========
 with st.sidebar:
-    st.markdown("## 🧭 Étapes")
-    st.caption("Choisis l’action et le fichier de travail.")
+    st.header("🧭 Navigation")
     clients_path = st.text_input("Fichier Clients", value=CLIENTS_FILE_DEFAULT, key=f"sb_clients_path_{SID}")
     visa_path    = st.text_input("Fichier Visa",    value=VISA_FILE_DEFAULT,    key=f"sb_visa_path_{SID}")
-    action       = st.radio("Action clients", options=["Ajouter","Modifier","Supprimer"], horizontal=False, key=f"sb_action_{SID}")
+    st.markdown("---")
+    st.subheader("👤 Gestion Clients")
+    action = st.radio("Action", options=["Ajouter","Modifier","Supprimer"], key=f"sb_action_{SID}")
 
-# Charger les données après choix chemins
+# Charge données
 visa_map = parse_visa_sheet(visa_path)
 df_all   = _read_clients(clients_path)
 
-# =========================
-# Tabs
-# =========================
+# ========= Onglets =========
 tabs = st.tabs(["📊 Dashboard", "📈 Analyses", "🏦 Escrow", "📄 Visa (aperçu)"])
 
-# =========================
-# Dashboard
-# =========================
+# ========= Dashboard =========
 with tabs[0]:
     st.subheader("📊 Dashboard — tous les clients")
 
-    # Filtres (sidebar) avec clés namespacées
+    # Filtres dans la sidebar (namespace)
     with st.sidebar:
         st.markdown("---")
-        st.markdown("### 🔎 Filtres Dashboard")
+        st.subheader("🔎 Filtres Dashboard")
         years  = sorted([int(y) for y in pd.to_numeric(df_all["_Année_"], errors="coerce").dropna().unique().tolist()]) if not df_all.empty else []
         months = [f"{m:02d}" for m in range(1,13)]
         cats   = sorted(df_all["Categorie"].dropna().astype(str).unique().tolist()) if not df_all.empty else []
+        subs   = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist()) if not df_all.empty else []
         visas  = sorted(df_all["Visa"].dropna().astype(str).unique().tolist())      if not df_all.empty else []
 
         dash_years  = st.multiselect("Année", years, default=[], key=f"dash_years_{SID}")
         dash_months = st.multiselect("Mois (MM)", months, default=[], key=f"dash_months_{SID}")
         dash_cats   = st.multiselect("Catégories", cats, default=[], key=f"dash_cats_{SID}")
+        dash_subs   = st.multiselect("Sous-catégories", subs, default=[], key=f"dash_subs_{SID}")
         dash_visas  = st.multiselect("Visa", visas, default=[], key=f"dash_visas_{SID}")
 
     df = df_all.copy()
     if dash_years:  df = df[df["_Année_"].isin(dash_years)]
     if dash_months: df = df[df["Mois"].isin(dash_months)]
     if dash_cats:   df = df[df["Categorie"].astype(str).isin(dash_cats)]
+    if dash_subs:   df = df[df["Sous-categorie"].astype(str).isin(dash_subs)]
     if dash_visas:  df = df[df["Visa"].astype(str).isin(dash_visas)]
 
     k1, k2, k3, k4 = st.columns(4)
@@ -464,14 +359,14 @@ with tabs[0]:
         "Dossier N","ID_Client","Nom","Categorie","Sous-categorie","Visa","Date","Mois",
         "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste","Options (résumé)"
     ] if c in view.columns]
-    sort_cols = [c for c in ["_Année_","_MoisNum_","Categorie","Nom"] if c in view.columns]
+    sort_cols = [c for c in ["_Année_","_MoisNum_","Categorie","Sous-categorie","Nom"] if c in view.columns]
     view = view.sort_values(by=sort_cols) if sort_cols else view
     st.dataframe(_uniquify_columns(view[show_cols].reset_index(drop=True)), use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### ✏️ Gestion (suivant l’action choisie dans la barre latérale)")
+    st.markdown("### ✏️ Gestion (selon l’action de la barre latérale)")
 
-    # ---------- Ajouter ----------
+    # ----- Ajouter -----
     if action == "Ajouter":
         st.markdown("#### ➕ Ajouter un client")
         c1,c2,c3 = st.columns(3)
@@ -484,7 +379,14 @@ with tabs[0]:
             subs = sorted(list(visa_map.get(cat, {}).keys())) if cat else []
             sub  = st.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=f"add_sub_{SID}")
         with c3:
-            visa_final, info_msg, opts = render_dynamic_steps(cat, sub, f"add_steps_{SID}", visa_file=visa_path, preselected=None)
+            visa_final, info_msg, opts = ("","",{"exclusive": None, "options": []})
+            if cat and sub:
+                visa_final, info_msg, opts = st.container()._parent.render(
+                    # hack avoided; call helper directly:
+                )
+            # Appel normal :
+            visa_final, info_msg, opts = (render_dynamic_steps(cat, sub, f"add_steps_{SID}", visa_file=visa_path, preselected=None)
+                                          if (cat and sub) else ("","",{"exclusive": None,"options": []}))
             if info_msg: st.info(info_msg)
             hono = st.number_input("Montant honoraires (US $)", min_value=0.0, step=10.0, format="%.2f", key=f"add_hono_{SID}")
             autre= st.number_input("Autres frais (US $)",     min_value=0.0, step=10.0, format="%.2f", key=f"add_autre_{SID}")
@@ -520,7 +422,7 @@ with tabs[0]:
             _write_clients(_normalize_clients(base), clients_path)
             st.success("✅ Client créé."); st.rerun()
 
-    # ---------- Modifier ----------
+    # ----- Modifier -----
     elif action == "Modifier":
         st.markdown("#### 🛠️ Modifier un client")
         if df_all.empty:
@@ -607,7 +509,7 @@ with tabs[0]:
                 _write_clients(_normalize_clients(base), clients_path)
                 st.success("✅ Modifications enregistrées."); st.rerun()
 
-    # ---------- Supprimer ----------
+    # ----- Supprimer -----
     elif action == "Supprimer":
         st.markdown("#### 🗑️ Supprimer un client")
         if df_all.empty:
@@ -622,9 +524,7 @@ with tabs[0]:
                 _write_clients(_normalize_clients(base), clients_path)
                 st.success("Client supprimé."); st.rerun()
 
-# =========================
-# Analyses
-# =========================
+# ========= Analyses + Graphiques =========
 with tabs[1]:
     st.subheader("📈 Analyses")
     df = df_all.copy()
@@ -654,17 +554,38 @@ with tabs[1]:
         k3.metric("Encaissements", _fmt_money(_safe_num_series(f,"Payé").sum()))
         k4.metric("Solde à encaisser", _fmt_money(_safe_num_series(f,"Reste").sum()))
 
-        st.markdown("#### Volumes par catégorie")
-        vol_cat = f.groupby(["Categorie"], dropna=True).size().reset_index(name="Dossiers")
-        st.dataframe(vol_cat.sort_values("Dossiers", ascending=False), use_container_width=True)
+        # ---------- Graphiques ----------
+        # 1) Volumes par mois (barres)
+        if not f.empty:
+            gd = f.copy()
+            gd["_YYYYMM_"] = gd.apply(lambda r: f"{int(r['_Année_']):04d}-{int(r['_MoisNum_']):02d}" if pd.notna(r["_Année_"]) and pd.notna(r["_MoisNum_"]) else None, axis=1)
+            g_vol = gd.groupby("_YYYYMM_", dropna=True).size().reset_index(name="Dossiers")
+            g_vol = g_vol[g_vol["_YYYYMM_"].notna()]
+            if not g_vol.empty:
+                chart_vol = alt.Chart(g_vol).mark_bar().encode(
+                    x=alt.X("_YYYYMM_", sort=None, title="Année-Mois"),
+                    y=alt.Y("Dossiers", title="Nombre de dossiers"),
+                    tooltip=["_YYYYMM_","Dossiers"]
+                ).properties(height=280)
+                st.altair_chart(chart_vol, use_container_width=True)
 
-        st.markdown("#### Volumes par sous-catégorie")
-        vol_sub = f.groupby(["Sous-categorie"], dropna=True).size().reset_index(name="Dossiers")
-        st.dataframe(vol_sub.sort_values("Dossiers", ascending=False), use_container_width=True)
-
-        st.markdown("#### Volumes par Visa")
-        vol_visa = f.groupby(["Visa"], dropna=True).size().reset_index(name="Dossiers")
-        st.dataframe(vol_visa.sort_values("Dossiers", ascending=False), use_container_width=True)
+        # 2) Honoraires & Encaissements par mois (lignes)
+        if not f.empty:
+            gg = f.copy()
+            gg["_YYYYMM_"] = gg.apply(lambda r: f"{int(r['_Année_']):04d}-{int(r['_MoisNum_']):02d}" if pd.notna(r["_Année_"]) and pd.notna(r["_MoisNum_"]) else None, axis=1)
+            gg["Honoraires"]   = _safe_num_series(gg, "Montant honoraires (US $)")
+            gg["Encaissements"]= _safe_num_series(gg, "Payé")
+            g2 = gg.groupby("_YYYYMM_", dropna=True)[["Honoraires","Encaissements"]].sum().reset_index()
+            g2 = g2[g2["_YYYYMM_"].notna()]
+            if not g2.empty:
+                g2_m = g2.melt("_YYYYMM_", var_name="Type", value_name="Montant")
+                chart_ca = alt.Chart(g2_m).mark_line(point=True).encode(
+                    x=alt.X("_YYYYMM_", sort=None, title="Année-Mois"),
+                    y=alt.Y("Montant", title="US $"),
+                    color="Type",
+                    tooltip=["_YYYYMM_","Type","Montant"]
+                ).properties(height=280)
+                st.altair_chart(chart_ca, use_container_width=True)
 
         st.markdown("#### Détails (clients filtrés)")
         detail = f.copy()
@@ -677,13 +598,11 @@ with tabs[1]:
             "Dossier N","ID_Client","Nom","Categorie","Sous-categorie","Visa","Date","Mois",
             "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste"
         ] if c in detail.columns]
-        sort_cols = [c for c in ["_Année_","_MoisNum_","Categorie","Nom"] if c in detail.columns]
+        sort_cols = [c for c in ["_Année_","_MoisNum_","Categorie","Sous-categorie","Nom"] if c in detail.columns]
         detail = detail.sort_values(by=sort_cols) if sort_cols else detail
         st.dataframe(_uniquify_columns(detail[show_cols].reset_index(drop=True)), use_container_width=True)
 
-# =========================
-# Escrow (simple)
-# =========================
+# ========= Escrow =========
 with tabs[2]:
     st.subheader("🏦 Escrow — honoraires en attente de transfert")
     df = df_all.copy()
@@ -702,11 +621,9 @@ with tabs[2]:
             for c in ["Honoraires","Payé","Reste","À transférer (indicatif)"]:
                 show[c] = show[c].astype(float).map(_fmt_money)
             st.dataframe(show.reset_index(drop=True), use_container_width=True)
-            st.caption("Astuce : passe par **Modifier** (barre latérale) pour ajouter des acomptes jusqu’au solde.")
+            st.caption("Astuce : ajoute des acomptes via **Modifier** jusqu’au solde.")
 
-# =========================
-# Visa (aperçu)
-# =========================
+# ========= Visa (aperçu) =========
 with tabs[3]:
     st.subheader("📄 Référentiel Visa (cellule = 1 → option)")
     vmap = parse_visa_sheet(visa_path)
@@ -728,9 +645,7 @@ with tabs[3]:
                 for s, arr in submap.items():
                     st.caption(f"- {s} → {', '.join(arr)}")
 
-# =========================
-# Exports
-# =========================
+# ========= Exports =========
 st.markdown("---")
 st.subheader("📤 Exports rapides")
 
