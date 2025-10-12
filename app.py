@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+import unicodedata
 from io import BytesIO
 from uuid import uuid4
 from datetime import date, datetime
@@ -11,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 # ==============================
-# Constantes
+# Constantes & entêtes attendus
 # ==============================
 SHEET_CLIENTS = "Clients"
 SHEET_VISA    = "Visa"
@@ -35,7 +36,7 @@ REQUIRED_CLIENTS_COLS = [
 ] + [s for (s, _) in STATUS_FIELDS] + [d for (_, d) in STATUS_FIELDS] + [RFE_FIELD]
 
 # ==============================
-# Helpers sûrs
+# Fonctions utilitaires
 # ==============================
 def _safe_str(x) -> str:
     try:
@@ -83,22 +84,6 @@ def _date_for_widget(val) -> date:
     except Exception:
         return date.today()
 
-def _date_or_none(val):
-    """date/datetime → date ; chaîne → date ; sinon None"""
-    try:
-        if val is None:
-            return None
-        if isinstance(val, date) and not isinstance(val, datetime):
-            return val
-        if isinstance(val, datetime):
-            return val.date()
-        ts = pd.to_datetime(val, errors="coerce")
-        if pd.isna(ts):
-            return None
-        return ts.to_pydatetime().date()
-    except Exception:
-        return None
-
 def _json_loads_or(v, fallback):
     try:
         if isinstance(v, (list, dict)):
@@ -111,10 +96,7 @@ def _json_loads_or(v, fallback):
         return fallback
 
 def _month_index(val) -> int:
-    """
-    Convertit une valeur quelconque ('07', 7, '', NaN, '2025-07-01') en index 0..11 pour le selectbox Mois.
-    Repli sûr sur 0 (→ '01').
-    """
+    """Convertit une valeur en index 0..11 pour le selectbox Mois. Repli sûr sur 0 (→ '01')."""
     try:
         s = _safe_str(val).strip()
         m = None
@@ -149,11 +131,28 @@ def make_client_id(nom: str, d: date) -> str:
         base = "CLIENT"
     return f"{base}-{d:%Y%m%d}"
 
+# Normalisation libellés (pour matcher Clients ↔ Visa)
+def _norm(s: str) -> str:
+    ss = _safe_str(s).strip()
+    ss = "".join(ch for ch in unicodedata.normalize("NFKD", ss) if not unicodedata.combining(ch))
+    return " ".join(ss.split()).lower()
+
+def _best_index(options: list[str], target: str) -> int:
+    """Index dans selectbox avec [""]+options. 0 si pas trouvé."""
+    if not options:
+        return 0
+    t = _norm(target)
+    for i, v in enumerate(options, start=1):
+        if _norm(v) == t:
+            return i
+    return 0
+
 # ==============================
-# Mémoire fichiers (restaurer dernier choix)
+# Session / Config
 # ==============================
 SID = st.session_state.get("SID") or str(uuid4())[:8]
 st.session_state["SID"] = SID
+
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title("🛂 Visa Manager")
 
@@ -166,14 +165,14 @@ visa_path    = st.session_state.get("visa_path",    "donnees_visa_clients1.xlsx"
 # ==============================
 with st.sidebar:
     st.header("📂 Fichiers")
-    st.caption("Les fichiers choisis ici sont mémorisés tant que la session est ouverte.")
+    st.caption("Les fichiers choisis sont mémorisés tant que la session reste ouverte.")
     c1, c2 = st.columns(2)
     with c1:
         st.text("Clients")
         upC = st.file_uploader(" ", type=["xlsx"], key=f"upC_{SID}", label_visibility="collapsed")
     with c2:
         st.text("Visa")
-        upV = st.file_uploader("   ", type=["xlsx"], key=f"upV_{SID}", label_visibility="collapsed")
+        upV = st.file_uploader("  ", type=["xlsx"], key=f"upV_{SID}", label_visibility="collapsed")
 
     if upC is not None:
         st.session_state["clients_bin"] = upC.read()
@@ -196,7 +195,7 @@ with st.sidebar:
         st.rerun()
 
 # ==============================
-# Lecture/écriture Excel (depuis binaire si présent)
+# Lecture/écriture Excel
 # ==============================
 @st.cache_data(show_spinner=False)
 def read_excel_maybe_bin(bin_bytes: bytes | None, fallback_path: str, sheet: str) -> pd.DataFrame:
@@ -206,7 +205,7 @@ def read_excel_maybe_bin(bin_bytes: bytes | None, fallback_path: str, sheet: str
         return pd.read_excel(fallback_path, sheet_name=sheet)
 
 def write_clients_maybe_bin(df: pd.DataFrame):
-    """Écrit la feuille Clients dans le binaire si présent, sinon sur le disque (même nom)."""
+    """Écrit la feuille Clients dans le binaire si présent, sinon sur disque (même nom)."""
     if st.session_state.get("clients_bin") is not None:
         try:
             existing = {}
@@ -269,38 +268,33 @@ def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     df["_Année_"]   = pd.to_datetime(df["Date"], errors="coerce").dt.year.astype("Int64")
     df["_MoisNum_"] = pd.to_datetime(df["Date"], errors="coerce").dt.month.astype("Int64")
     df["Mois"] = df["Mois"].apply(lambda m: f"{int(m):02d}" if _safe_str(m).strip().isdigit() else _safe_str(m))
-    # recalcule total / reste si manquants
     df[TOTAL] = _safe_num_series(df, HONO) + _safe_num_series(df, AUTRE)
     df["Reste"] = (_safe_num_series(df, TOTAL) - _safe_num_series(df, "Payé")).clip(lower=0)
     return df
 
 def build_visa_map(df_visa: pd.DataFrame) -> dict:
     """
-    Construit la structure:
-    visa_map[cat][sub] = {
-        "options": [liste des intitulés d'options disponibles (cellule == 1)],
-        "all_options": [toutes les colonnes options existantes]
-    }
-    Les colonnes 'Categorie' et 'Sous-categorie' sont obligatoires.
+    visa_map[cat][sub] = {"options": [intitulés disponibles si ligne==1], "all_options": [toutes options]}
+    Colonnes obligatoires: Categorie, Sous-categorie. Les autres colonnes sont des options (COS, EOS, ...).
     """
     if df_visa.empty:
         return {}
-    if "Categorie" not in df_visa.columns or "Sous-categorie" not in df_visa.columns:
+    cols = df_visa.columns.tolist()
+    if "Categorie" not in cols or "Sous-categorie" not in cols:
         return {}
-    option_cols = [c for c in df_visa.columns if c not in ["Categorie", "Sous-categorie"]]
+    option_cols = [c for c in cols if c not in ["Categorie", "Sous-categorie"]]
     result = {}
     for _, row in df_visa.iterrows():
-        cat  = _safe_str(row["Categorie"])
-        sub  = _safe_str(row["Sous-categorie"])
+        cat = _safe_str(row["Categorie"])
+        sub = _safe_str(row["Sous-categorie"])
         if not cat or not sub:
             continue
-        opts_available = []
+        opts = []
         for oc in option_cols:
-            val = row.get(oc, None)
-            if _to_float(val, 0.0) == 1.0:
-                opts_available.append(oc)
+            if _to_float(row.get(oc, 0)) == 1.0:
+                opts.append(oc)
         result.setdefault(cat, {})
-        result[cat][sub] = {"options": sorted(opts_available), "all_options": option_cols}
+        result[cat][sub] = {"options": sorted(opts), "all_options": option_cols}
     return result
 
 def render_option_checkboxes(options: list[str], keyprefix: str, preselected: list[str] | None = None) -> list[str]:
@@ -330,17 +324,16 @@ df_clients = normalize_clients(df_clients_raw.copy())
 try:
     df_visa = read_visa()
 except Exception as e:
-    st.error(f"Impossible de lire le fichier Visa : {e}")
+    st.error(f"Impossible de lire la feuille Visa : {e}")
     df_visa = pd.DataFrame(columns=["Categorie","Sous-categorie"])
 
 visa_map = build_visa_map(df_visa)
 
 # ==============================
-# Téléchargements rapides (sidebar)
+# Téléchargements (sidebar)
 # ==============================
 with st.sidebar:
     st.header("📥 Téléchargements")
-    # Clients actuel
     exp_clients = df_clients.copy()
     with BytesIO() as outc:
         with pd.ExcelWriter(outc, engine="openpyxl") as wr:
@@ -376,7 +369,6 @@ tabs = st.tabs(["📊 Dashboard", "📈 Analyses", "🏦 Escrow", "👤 Clients"
 # ==============================================
 with tabs[0]:
     st.subheader("📊 Dashboard")
-
     if df_clients.empty:
         st.info("Aucune donnée client.")
     else:
@@ -499,7 +491,7 @@ with tabs[1]:
         st.dataframe(det_sorted[show_cols].reset_index(drop=True), use_container_width=True, key=f"a_detail_{SID}")
 
 # ==============================================
-# 🏦 Escrow (synthèse simple)
+# 🏦 Escrow (synthèse)
 # ==============================================
 with tabs[2]:
     st.subheader("🏦 Escrow — synthèse")
@@ -544,19 +536,10 @@ with tabs[3]:
         st.markdown("#### 🎯 Choix Visa")
         cats = sorted(list(visa_map.keys()))
         sel_cat = st.selectbox("Catégorie", [""] + cats, index=0, key=f"add_cat_{SID}")
-        sel_sub = ""
-        options_available = []
-        if sel_cat:
-            subs = sorted(list(visa_map.get(sel_cat, {}).keys()))
-            sel_sub = st.selectbox("Sous-catégorie", [""] + subs, index=0, key=f"add_sub_{SID}")
-            if sel_sub:
-                options_available = visa_map[sel_cat][sel_sub]["options"]
-
-        opts_sel = []
-        if options_available:
-            st.caption("Options disponibles pour cette sous-catégorie :")
-            opts_sel = render_option_checkboxes(options_available, keyprefix=f"add_opts_{SID}")
-
+        subs = sorted(list(visa_map.get(sel_cat, {}).keys())) if sel_cat else []
+        sel_sub = st.selectbox("Sous-catégorie", [""] + subs, index=0, key=f"add_sub_{SID}")
+        options_available = visa_map[sel_cat][sel_sub]["options"] if sel_cat and sel_sub and sel_cat in visa_map and sel_sub in visa_map[sel_cat] else []
+        opts_sel = render_option_checkboxes(options_available, keyprefix=f"add_opts_{SID}")
         visa_final = compute_visa_string(sel_sub, opts_sel) if sel_sub else ""
 
         f1, f2 = st.columns(2)
@@ -565,17 +548,17 @@ with tabs[3]:
 
         st.markdown("#### 📌 Statuts initiaux")
         s1, s2, s3, s4, s5 = st.columns(5)
-        sent = s1.checkbox("Dossier envoyé", key=f"add_sent_{SID}")
+        sent  = s1.checkbox("Dossier envoyé", key=f"add_sent_{SID}")
         sent_d = s1.date_input("Date d'envoi", value=_date_for_widget(None), key=f"add_sentd_{SID}")
-        acc  = s2.checkbox("Dossier accepté", key=f"add_acc_{SID}")
+        acc   = s2.checkbox("Dossier accepté", key=f"add_acc_{SID}")
         acc_d  = s2.date_input("Date d'acceptation", value=_date_for_widget(None), key=f"add_accd_{SID}")
-        ref  = s3.checkbox("Dossier refusé", key=f"add_ref_{SID}")
+        ref   = s3.checkbox("Dossier refusé", key=f"add_ref_{SID}")
         ref_d  = s3.date_input("Date de refus", value=_date_for_widget(None), key=f"add_refd_{SID}")
-        ann  = s4.checkbox("Dossier annulé", key=f"add_ann_{SID}")
+        ann   = s4.checkbox("Dossier annulé", key=f"add_ann_{SID}")
         ann_d  = s4.date_input("Date d'annulation", value=_date_for_widget(None), key=f"add_annd_{SID}")
-        rfe  = s5.checkbox("RFE", key=f"add_rfe_{SID}")
+        rfe   = s5.checkbox("RFE", key=f"add_rfe_{SID}")
         if rfe and not any([sent, acc, ref, ann]):
-            st.warning("⚠️ RFE ne peut être coché qu’avec un autre statut (envoyé/accepté/refusé/annulé).")
+            st.warning("⚠️ RFE ne peut être coché qu’avec un autre statut.")
 
         note = st.text_area("Notes", key=f"add_note_{SID}")
 
@@ -654,22 +637,24 @@ with tabs[3]:
             mois = d3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1,13)],
                                 index=_month_index(row.get("Mois")), key=f"mod_mois_{SID}")
 
-            st.markdown("#### 🎯 Choix Visa")
+            st.markdown("#### 🎯 Choix Visa (modification)")
             cats = sorted(list(visa_map.keys()))
-            preset_cat = _safe_str(row.get("Categorie",""))
-            sel_cat = st.selectbox("Catégorie", [""] + cats,
-                                   index=(cats.index(preset_cat)+1 if preset_cat in cats else 0),
-                                   key=f"mod_cat_{SID}")
+            preset_cat_raw = _safe_str(row.get("Categorie",""))
+            cat_index = _best_index(cats, preset_cat_raw)
+            sel_cat = st.selectbox("Catégorie", [""] + cats, index=cat_index, key=f"mod_cat_{SID}")
+
             subs = sorted(list(visa_map.get(sel_cat, {}).keys())) if sel_cat else []
-            preset_sub = _safe_str(row.get("Sous-categorie",""))
-            sel_sub = st.selectbox("Sous-catégorie", [""] + subs,
-                                   index=(subs.index(preset_sub)+1 if preset_sub in subs else 0),
-                                   key=f"mod_sub_{SID}")
+            preset_sub_raw = _safe_str(row.get("Sous-categorie",""))
+            sub_index = _best_index(subs, preset_sub_raw)
+            sel_sub = st.selectbox("Sous-catégorie", [""] + subs, index=sub_index, key=f"mod_sub_{SID}")
 
             options_available = visa_map[sel_cat][sel_sub]["options"] if sel_cat and sel_sub and sel_cat in visa_map and sel_sub in visa_map[sel_cat] else []
             preset_opts = _json_loads_or(row.get("Options"), {"options": [], "exclusive": None})
             preset_list = preset_opts.get("options", []) if isinstance(preset_opts, dict) else []
-            opts_sel = render_option_checkboxes(options_available, keyprefix=f"mod_opts_{SID}", preselected=preset_list)
+            norm_available = { _norm(o): o for o in options_available }
+            pre_coch = [ norm_available[_norm(p)] for p in preset_list if _norm(p) in norm_available ]
+            opts_sel = render_option_checkboxes(options_available, keyprefix=f"mod_opts_{SID}", preselected=pre_coch)
+
             visa_final = compute_visa_string(sel_sub, opts_sel) if sel_sub else _safe_str(row.get("Visa",""))
 
             f1, f2 = st.columns(2)
@@ -682,15 +667,15 @@ with tabs[3]:
 
             st.markdown("#### 📌 Statuts & dates")
             s1, s2, s3, s4, s5 = st.columns(5)
-            sent = s1.checkbox("Dossier envoyé", value=bool(row.get("Dossier envoyé")), key=f"mod_sent_{SID}")
+            sent  = s1.checkbox("Dossier envoyé", value=bool(row.get("Dossier envoyé")), key=f"mod_sent_{SID}")
             sent_d = s1.date_input("Date d'envoi", value=_date_for_widget(row.get("Date d'envoi")), key=f"mod_sentd_{SID}")
-            acc  = s2.checkbox("Dossier accepté", value=bool(row.get("Dossier accepté")), key=f"mod_acc_{SID}")
+            acc   = s2.checkbox("Dossier accepté", value=bool(row.get("Dossier accepté")), key=f"mod_acc_{SID}")
             acc_d  = s2.date_input("Date d'acceptation", value=_date_for_widget(row.get("Date d'acceptation")), key=f"mod_accd_{SID}")
-            ref  = s3.checkbox("Dossier refusé", value=bool(row.get("Dossier refusé")), key=f"mod_ref_{SID}")
+            ref   = s3.checkbox("Dossier refusé", value=bool(row.get("Dossier refusé")), key=f"mod_ref_{SID}")
             ref_d  = s3.date_input("Date de refus", value=_date_for_widget(row.get("Date de refus")), key=f"mod_refd_{SID}")
-            ann  = s4.checkbox("Dossier annulé", value=bool(row.get("Dossier annulé")), key=f"mod_ann_{SID}")
+            ann   = s4.checkbox("Dossier annulé", value=bool(row.get("Dossier annulé")), key=f"mod_ann_{SID}")
             ann_d  = s4.date_input("Date d'annulation", value=_date_for_widget(row.get("Date d'annulation")), key=f"mod_annd_{SID}")
-            rfe  = s5.checkbox("RFE", value=bool(row.get("RFE")), key=f"mod_rfe_{SID}")
+            rfe   = s5.checkbox("RFE", value=bool(row.get("RFE")), key=f"mod_rfe_{SID}")
             if rfe and not any([sent, acc, ref, ann]):
                 st.warning("⚠️ RFE ne peut être coché qu’avec un autre statut.")
 
@@ -800,14 +785,14 @@ with tabs[3]:
                         st.error(f"Erreur écriture : {err}")
 
 # ==============================================
-# 📄 Visa (aperçu)
+# 📄 Visa (aperçu & test)
 # ==============================================
 with tabs[4]:
     st.subheader("📄 Visa — aperçu structure & test")
     if df_visa.empty:
         st.info("Feuille Visa vide ou introuvable.")
     else:
-        st.caption("La 1ère ligne contient les intitulés d’options. Chaque ligne: Categorie, Sous-categorie, puis la valeur **1** dans les colonnes d’options disponibles.")
+        st.caption("La 1ère ligne contient les intitulés d’options. Chaque ligne: Categorie, Sous-categorie, puis mettre **1** dans les colonnes d’options disponibles.")
         st.dataframe(df_visa, use_container_width=True, height=320)
 
         st.markdown("#### 🎯 Test interactif")
