@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 # ==============================
-# Constantes & colonnes
+# Constantes
 # ==============================
 SHEET_CLIENTS = "Clients"
 SHEET_VISA    = "Visa"
@@ -31,8 +31,7 @@ RFE_FIELD = "RFE"
 REQUIRED_CLIENTS_COLS = [
     "Dossier N", "ID_Client", "Nom", "Date", "Mois",
     "Categorie", "Sous-categorie", "Visa",
-    HONO, AUTRE, TOTAL, "Payé", "Reste", "Paiements", "Options",
-    "Notes",
+    HONO, AUTRE, TOTAL, "Payé", "Reste", "Paiements", "Options", "Notes",
 ] + [s for (s, _) in STATUS_FIELDS] + [d for (_, d) in STATUS_FIELDS] + [RFE_FIELD]
 
 # ==============================
@@ -133,24 +132,41 @@ def _month_index(val) -> int:
     except Exception:
         return 0
 
+def next_dossier_number(df: pd.DataFrame, start=13057) -> int:
+    try:
+        if "Dossier N" not in df.columns or df.empty:
+            return start
+        v = pd.to_numeric(df["Dossier N"], errors="coerce").dropna()
+        if v.empty:
+            return start
+        return int(v.max()) + 1
+    except Exception:
+        return start
+
+def make_client_id(nom: str, d: date) -> str:
+    base = _safe_str(nom).strip().replace(" ", "").replace("/", "-")
+    if not base:
+        base = "CLIENT"
+    return f"{base}-{d:%Y%m%d}"
+
 # ==============================
 # Mémoire fichiers (restaurer dernier choix)
 # ==============================
 SID = st.session_state.get("SID") or str(uuid4())[:8]
 st.session_state["SID"] = SID
-
 st.set_page_config(page_title="Visa Manager", layout="wide")
-
 st.title("🛂 Visa Manager")
 
-# (1) Restaurer chemins depuis session_state
+# chemins par défaut + restauration
 clients_path = st.session_state.get("clients_path", "donnees_visa_clients1_adapte.xlsx")
 visa_path    = st.session_state.get("visa_path",    "donnees_visa_clients1.xlsx")
 
-# Zone de la barre latérale pour (re)charger les fichiers et mémoriser
+# ==============================
+# Sidebar : chargement fichiers & mémoire
+# ==============================
 with st.sidebar:
     st.header("📂 Fichiers")
-    st.caption("Les fichiers choisis ici sont **mémorisés** jusqu’à fermeture de la session.")
+    st.caption("Les fichiers choisis ici sont mémorisés tant que la session est ouverte.")
     c1, c2 = st.columns(2)
     with c1:
         st.text("Clients")
@@ -159,11 +175,10 @@ with st.sidebar:
         st.text("Visa")
         upV = st.file_uploader("   ", type=["xlsx"], key=f"upV_{SID}", label_visibility="collapsed")
 
-    # Si upload, on stocke dans session_state (en mémoire binaire)
     if upC is not None:
         st.session_state["clients_bin"] = upC.read()
         st.session_state["clients_name"] = upC.name
-        clients_path = upC.name  # affichage
+        clients_path = upC.name
         st.session_state["clients_path"] = clients_path
 
     if upV is not None:
@@ -172,13 +187,12 @@ with st.sidebar:
         visa_path = upV.name
         st.session_state["visa_path"] = visa_path
 
-    # Bouton pour réinitialiser la mémoire
     if st.button("🧹 Oublier les fichiers chargés", key=f"clr_{SID}"):
-        for k in ["clients_bin", "clients_name", "clients_path", "visa_bin", "visa_name", "visa_path"]:
+        for k in ["clients_bin","clients_name","clients_path","visa_bin","visa_name","visa_path"]:
             st.session_state.pop(k, None)
         clients_path = "donnees_visa_clients1_adapte.xlsx"
         visa_path    = "donnees_visa_clients1.xlsx"
-        st.success("Mémoire nettoyée. Utilisation des noms par défaut.")
+        st.success("Mémoire nettoyée (noms par défaut).")
         st.rerun()
 
 # ==============================
@@ -194,7 +208,6 @@ def read_excel_maybe_bin(bin_bytes: bytes | None, fallback_path: str, sheet: str
 def write_clients_maybe_bin(df: pd.DataFrame):
     """Écrit la feuille Clients dans le binaire si présent, sinon sur le disque (même nom)."""
     if st.session_state.get("clients_bin") is not None:
-        # réécrit uniquement la feuille Clients dans le binaire mémoire
         try:
             existing = {}
             try:
@@ -253,13 +266,23 @@ def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
     except Exception:
         pass
-    df["_Année_"]  = pd.to_datetime(df["Date"], errors="coerce").dt.year.astype("Int64")
+    df["_Année_"]   = pd.to_datetime(df["Date"], errors="coerce").dt.year.astype("Int64")
     df["_MoisNum_"] = pd.to_datetime(df["Date"], errors="coerce").dt.month.astype("Int64")
     df["Mois"] = df["Mois"].apply(lambda m: f"{int(m):02d}" if _safe_str(m).strip().isdigit() else _safe_str(m))
+    # recalcule total / reste si manquants
+    df[TOTAL] = _safe_num_series(df, HONO) + _safe_num_series(df, AUTRE)
+    df["Reste"] = (_safe_num_series(df, TOTAL) - _safe_num_series(df, "Payé")).clip(lower=0)
     return df
 
 def build_visa_map(df_visa: pd.DataFrame) -> dict:
-    """visa_map[cat][sub] = {"options": [...], "all_options":[...]}"""
+    """
+    Construit la structure:
+    visa_map[cat][sub] = {
+        "options": [liste des intitulés d'options disponibles (cellule == 1)],
+        "all_options": [toutes les colonnes options existantes]
+    }
+    Les colonnes 'Categorie' et 'Sous-categorie' sont obligatoires.
+    """
     if df_visa.empty:
         return {}
     if "Categorie" not in df_visa.columns or "Sous-categorie" not in df_visa.columns:
@@ -283,9 +306,10 @@ def build_visa_map(df_visa: pd.DataFrame) -> dict:
 def render_option_checkboxes(options: list[str], keyprefix: str, preselected: list[str] | None = None) -> list[str]:
     sel = []
     pre = set(preselected or [])
-    cols = st.columns(min(4, max(1, len(options)))) if options else [st]
+    n = max(1, min(4, len(options))) if options else 1
+    cols = st.columns(n) if options else [st]
     for i, opt in enumerate(options):
-        col = cols[i % len(cols)]
+        col = cols[i % n]
         with col:
             v = st.checkbox(opt, value=(opt in pre), key=f"{keyprefix}_{i}")
         if v:
@@ -296,23 +320,6 @@ def compute_visa_string(sub: str, options_sel: list[str]) -> str:
     if options_sel:
         return f"{sub} " + " ".join(options_sel)
     return sub
-
-def next_dossier_number(df: pd.DataFrame, start=13057) -> int:
-    try:
-        if "Dossier N" not in df.columns or df.empty:
-            return start
-        v = pd.to_numeric(df["Dossier N"], errors="coerce").dropna()
-        if v.empty:
-            return start
-        return int(v.max()) + 1
-    except Exception:
-        return start
-
-def make_client_id(nom: str, d: date) -> str:
-    base = _safe_str(nom).strip().replace(" ", "").replace("/", "-")
-    if not base:
-        base = "CLIENT"
-    return f"{base}-{d:%Y%m%d}"
 
 # ==============================
 # Chargements initiaux
@@ -329,33 +336,35 @@ except Exception as e:
 visa_map = build_visa_map(df_visa)
 
 # ==============================
-# Sidebar : actions rapides
+# Téléchargements rapides (sidebar)
 # ==============================
 with st.sidebar:
-    st.header("⚙️ Actions")
-    st.caption("Téléchargements du dernier état.")
-    # Télécharger Clients actuel
+    st.header("📥 Téléchargements")
+    # Clients actuel
     exp_clients = df_clients.copy()
     with BytesIO() as outc:
         with pd.ExcelWriter(outc, engine="openpyxl") as wr:
             exp_clients.to_excel(wr, sheet_name=SHEET_CLIENTS, index=False)
-        st.download_button("⬇️ Télécharger Clients.xlsx", outc.getvalue(),
-                           file_name="Clients.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        st.download_button("⬇️ Clients.xlsx", outc.getvalue(),
+                           file_name="Clients.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key=f"dlC_{SID}")
-    # Télécharger Visa
+    # Visa actuel
     visa_bytes = st.session_state.get("visa_bin", None)
     if visa_bytes:
-        st.download_button("⬇️ Télécharger Visa.xlsx", visa_bytes,
-                           file_name="Visa.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        st.download_button("⬇️ Visa.xlsx", visa_bytes,
+                           file_name="Visa.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key=f"dlV_{SID}")
     else:
         try:
             with open(visa_path, "rb") as f:
-                st.download_button("⬇️ Télécharger Visa.xlsx", f.read(),
-                                   file_name="Visa.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                st.download_button("⬇️ Visa.xlsx", f.read(),
+                                   file_name="Visa.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    key=f"dlVd_{SID}")
         except Exception:
-            st.caption("Visa.xlsx indisponible sur disque.")
+            st.caption("Visa.xlsx introuvable sur disque.")
 
 # ==============================
 # TABS
@@ -371,7 +380,6 @@ with tabs[0]:
     if df_clients.empty:
         st.info("Aucune donnée client.")
     else:
-        # Filtres
         years  = sorted([int(y) for y in pd.to_numeric(df_clients["_Année_"], errors="coerce").dropna().unique().tolist()])
         months = [f"{m:02d}" for m in range(1, 13)]
         cats   = sorted(df_clients["Categorie"].dropna().astype(str).unique().tolist()) if "Categorie" in df_clients.columns else []
@@ -566,7 +574,6 @@ with tabs[3]:
         ann  = s4.checkbox("Dossier annulé", key=f"add_ann_{SID}")
         ann_d  = s4.date_input("Date d'annulation", value=_date_for_widget(None), key=f"add_annd_{SID}")
         rfe  = s5.checkbox("RFE", key=f"add_rfe_{SID}")
-
         if rfe and not any([sent, acc, ref, ann]):
             st.warning("⚠️ RFE ne peut être coché qu’avec un autre statut (envoyé/accepté/refusé/annulé).")
 
@@ -728,22 +735,22 @@ with tabs[3]:
                 else:
                     st.error(f"Erreur d’écriture : {err}")
 
-            # --- Paiements (ajout si reste > 0) ---
+            # --- Paiements ---
             st.markdown("#### 💵 Paiements")
-            paycol1, paycol2, paycol3 = st.columns(3)
             reste_actu = float(_to_float(live.loc[idx, "Reste"]))
             st.info(f"Reste actuel : {_fmt_money(reste_actu)}")
+            paycol1, paycol2, paycol3 = st.columns(3)
             if reste_actu > 0:
-                pay_amt = paycol1.number_input("Montant à encaisser", min_value=0.0, step=10.0, format="%.2f", key=f"p_add_{SID}")
+                pay_amt  = paycol1.number_input("Montant à encaisser", min_value=0.0, step=10.0, format="%.2f", key=f"p_add_{SID}")
                 pay_date = paycol2.date_input("Date paiement", value=date.today(), key=f"p_date_{SID}")
-                mode = paycol3.selectbox("Mode", ["CB","Chèque","Cash","Virement","Venmo"], key=f"p_mode_{SID}")
+                mode     = paycol3.selectbox("Mode", ["CB","Chèque","Cash","Virement","Venmo"], key=f"p_mode_{SID}")
                 if st.button("Ajouter le paiement", key=f"p_btn_{SID}"):
                     if pay_amt <= 0:
                         st.warning("Montant > 0 requis.")
                         st.stop()
                     pays = _json_loads_or(live.loc[idx, "Paiements"], [])
                     pays.append({"date": str(pay_date), "montant": float(pay_amt), "mode": mode})
-                    paye_new = float(_to_float(live.loc[idx, "Payé"])) + float(pay_amt)
+                    paye_new  = float(_to_float(live.loc[idx, "Payé"])) + float(pay_amt)
                     reste_new = max(0.0, float(_to_float(live.loc[idx, TOTAL])) - paye_new)
                     live.at[idx, "Paiements"] = pays
                     live.at[idx, "Payé"] = paye_new
@@ -756,7 +763,6 @@ with tabs[3]:
                     else:
                         st.error(f"Erreur écriture : {err}")
 
-            # Historique paiements
             hist = _json_loads_or(live.loc[idx, "Paiements"], [])
             if hist:
                 st.write("Historique des paiements :")
@@ -801,7 +807,7 @@ with tabs[4]:
     if df_visa.empty:
         st.info("Feuille Visa vide ou introuvable.")
     else:
-        st.caption("La 1ère ligne (en-têtes) contient les **intitulés des cases à cocher**. Chaque ligne : `Categorie`, `Sous-categorie`, puis **1** sous les colonnes d’options disponibles.")
+        st.caption("La 1ère ligne contient les intitulés d’options. Chaque ligne: Categorie, Sous-categorie, puis la valeur **1** dans les colonnes d’options disponibles.")
         st.dataframe(df_visa, use_container_width=True, height=320)
 
         st.markdown("#### 🎯 Test interactif")
