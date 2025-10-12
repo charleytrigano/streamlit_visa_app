@@ -1,4 +1,4 @@
-# ==============================================
+# =# ==============================================
 # 🛂 VISA MANAGER — Application Streamlit (Partie 1/3)
 # ==============================================
 
@@ -22,11 +22,30 @@ st.title("🛂 Visa Manager")
 SID = st.session_state.setdefault("WIDGET_NS", str(uuid4()))
 
 # ==============================================
+# Mémoire des derniers chemins de fichiers
+# ==============================================
+LAST_PATHS_FILE = ".visa_manager_last.json"
+
+def _load_last_paths() -> dict:
+    try:
+        p = Path(LAST_PATHS_FILE)
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def _save_last_paths(clients_path: str, visa_path: str) -> None:
+    try:
+        payload = {"clients": clients_path, "visa": visa_path}
+        Path(LAST_PATHS_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        # on ignore les erreurs d’écriture (environnement read-only)
+        pass
+
+# ==============================================
 # Constantes & colonnes attendues
 # ==============================================
-CLIENTS_FILE_DEFAULT = "donnees_visa_clients1_adapte.xlsx"
-VISA_FILE_DEFAULT    = "donnees_visa_clients1.xlsx"
-
 SHEET_CLIENTS = "Clients"
 SHEET_VISA    = "Visa"
 
@@ -41,6 +60,14 @@ CLIENTS_COLS = [
     "Dossier annulé","Date d'annulation",
     "RFE"
 ]
+
+# Valeurs par défaut + surcharge depuis le fichier de mémoire
+CLIENTS_FILE_FALLBACK = "donnees_visa_clients1_adapte.xlsx"
+VISA_FILE_FALLBACK    = "donnees_visa_clients1.xlsx"
+
+_last = _load_last_paths()
+CLIENTS_FILE_DEFAULT = _last.get("clients", CLIENTS_FILE_FALLBACK)
+VISA_FILE_DEFAULT    = _last.get("visa",    VISA_FILE_FALLBACK)
 
 # ==============================================
 # Utilitaires généraux
@@ -93,16 +120,16 @@ def ensure_file(path: str, sheet_name: str, cols: list[str]) -> None:
         with pd.ExcelWriter(p, engine="openpyxl") as wr:
             df.to_excel(wr, sheet_name=sheet_name, index=False)
 
-# Crée des fichiers vides si absents
-ensure_file(CLIENTS_FILE_DEFAULT, SHEET_CLIENTS, CLIENTS_COLS)
-ensure_file(VISA_FILE_DEFAULT, SHEET_VISA, ["Categorie","Sous-categorie 1","COS","EOS"])
-
 def _norm(s: str) -> str:
     s2 = unicodedata.normalize("NFKD", s)
     s2 = "".join(ch for ch in s2 if not unicodedata.combining(ch))
     s2 = s2.strip().lower().replace("\u00a0", " ")
     s2 = s2.replace("-", " ").replace("_", " ")
     return " ".join(s2.split())
+
+# Crée des fichiers vides si absents (après lecture des chemins mémorisés)
+ensure_file(CLIENTS_FILE_DEFAULT, SHEET_CLIENTS, CLIENTS_COLS)
+ensure_file(VISA_FILE_DEFAULT, SHEET_VISA, ["Categorie","Sous-categorie 1","COS","EOS"])
 
 # ==============================================
 # Parsing de la feuille Visa → visa_map {cat:{sub:[options]}}
@@ -376,12 +403,45 @@ def build_visa_option_selector(visa_map: dict, cat: str, sub: str, keyprefix: st
     return visa_final, {"exclusive": (chosen_excl or None), "options": chosen_multi}, info_msg
 
 # ==============================================
-# Barre latérale (fichiers, actions, UNDO)
+# Barre latérale (fichiers, uploads, mémorisation, UNDO)
 # ==============================================
 with st.sidebar:
     st.header("🧭 Navigation")
+
+    # Chemins mémorisés (modifiables)
     clients_path = st.text_input("Fichier Clients", value=CLIENTS_FILE_DEFAULT, key=f"sb_clients_path_{SID}")
     visa_path    = st.text_input("Fichier Visa",    value=VISA_FILE_DEFAULT,    key=f"sb_visa_path_{SID}")
+
+    # Uploads optionnels (écrasent le fichier indiqué et mémorisent)
+    up_c = st.file_uploader("Charger Excel Clients (remplace le fichier indiqué)", type=["xlsx"], key=f"up_c_{SID}")
+    if up_c is not None:
+        try:
+            Path(clients_path).write_bytes(up_c.getvalue())
+            _save_last_paths(clients_path, visa_path)
+            st.success("Fichier Clients importé et mémorisé.")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Import Clients impossible : {e}")
+
+    up_v = st.file_uploader("Charger Excel Visa (remplace le fichier indiqué)", type=["xlsx"], key=f"up_v_{SID}")
+    if up_v is not None:
+        try:
+            Path(visa_path).write_bytes(up_v.getvalue())
+            _save_last_paths(clients_path, visa_path)
+            st.success("Fichier Visa importé et mémorisé.")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Import Visa impossible : {e}")
+
+    # Bouton pour mémoriser explicitement les chemins saisis
+    if st.button("💾 Mémoriser ces chemins par défaut", key=f"save_paths_{SID}"):
+        _save_last_paths(clients_path, visa_path)
+        st.success("Chemins mémorisés.")
+        st.cache_data.clear()
+        st.rerun()
+
     st.markdown("---")
     st.subheader("🧾 Gestion")
     st.caption("Les actions CRUD sont dans l’onglet « Clients ». Ici, vous pouvez annuler la dernière écriture.")
@@ -389,6 +449,10 @@ with st.sidebar:
         undo_last_write(clients_path)
         st.cache_data.clear()
         st.rerun()
+
+# Sauvegarde auto si l’utilisateur modifie les champs (qualité de vie)
+if clients_path != CLIENTS_FILE_DEFAULT or visa_path != VISA_FILE_DEFAULT:
+    _save_last_paths(clients_path, visa_path)
 
 # ==============================================
 # Chargement des données
