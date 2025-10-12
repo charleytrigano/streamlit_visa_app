@@ -113,7 +113,7 @@ def parse_visa_sheet(xlsx_path: str | Path, sheet_name: str | None = None) -> di
     Construit un mapping: {Categorie: {Sous-categorie: [options...]}}
     - Chaque option correspond à une colonne cochée (=1, x, oui, true...) sur la ligne de la sous-catégorie.
     - Si aucune option cochée, on conserve la sous-catégorie seule comme option.
-    - Injection auto '2-Etudiants' => F-1/F-2 COS/EOS si absente.
+    - Injection automatique de la catégorie '2-Etudiants' si absente, avec F-1/F-2 COS/EOS.
     """
     def _is_checked(v) -> bool:
         if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -384,8 +384,7 @@ with st.sidebar:
     visa_path    = st.text_input("Fichier Visa",    value=VISA_FILE_DEFAULT,    key=f"sb_visa_path_{SID}")
     st.markdown("---")
     st.subheader("🧾 Gestion")
-    action = st.radio("Action", options=["Ajouter","Modifier","Supprimer"], key=f"sb_action_{SID}")
-    st.markdown("---")
+    st.caption("Les actions CRUD sont dans l’onglet « Clients ». Ici, vous pouvez annuler la dernière écriture.")
     if st.button("↩️ Annuler dernière action (UNDO)", key=f"undo_{SID}"):
         undo_last_write(clients_path)
         st.cache_data.clear()
