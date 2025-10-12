@@ -111,6 +111,28 @@ def _json_loads_or(v, fallback):
     except Exception:
         return fallback
 
+def _month_index(val) -> int:
+    """
+    Convertit une valeur quelconque ('07', 7, '', NaN, '2025-07-01') en index 0..11 pour le selectbox Mois.
+    Repli sûr sur 0 (→ '01').
+    """
+    try:
+        s = _safe_str(val).strip()
+        m = None
+        if s.isdigit():
+            m = int(s)
+        else:
+            ts = pd.to_datetime(s, errors="coerce")
+            if isinstance(ts, pd.Timestamp) and not pd.isna(ts):
+                m = int(ts.month)
+        if m is None:
+            m = int(pd.to_numeric(s, errors="coerce"))
+        if not (1 <= m <= 12):
+            m = 1
+        return m - 1
+    except Exception:
+        return 0
+
 # ==============================
 # Mémoire fichiers (restaurer dernier choix)
 # ==============================
@@ -174,7 +196,6 @@ def write_clients_maybe_bin(df: pd.DataFrame):
     if st.session_state.get("clients_bin") is not None:
         # réécrit uniquement la feuille Clients dans le binaire mémoire
         try:
-            # Si on avait un fichier multi-feuilles dans le binaire, on tente de le relire, puis on remplace la feuille Clients
             existing = {}
             try:
                 with BytesIO(st.session_state["clients_bin"]) as bio:
@@ -193,9 +214,7 @@ def write_clients_maybe_bin(df: pd.DataFrame):
         except Exception as e:
             return False, str(e)
     else:
-        # écriture sur disque
         try:
-            # conserver d'éventuelles autres feuilles si le fichier existe
             existing = {}
             try:
                 xls = pd.ExcelFile(clients_path)
@@ -216,47 +235,36 @@ def read_clients() -> pd.DataFrame:
     try:
         return read_excel_maybe_bin(st.session_state.get("clients_bin"), clients_path, SHEET_CLIENTS)
     except Exception:
-        # si la feuille n'existe pas, on renvoie un modèle vide
-        df = pd.DataFrame(columns=REQUIRED_CLIENTS_COLS)
-        return df
+        return pd.DataFrame(columns=REQUIRED_CLIENTS_COLS)
 
 @st.cache_data(show_spinner=False)
 def read_visa() -> pd.DataFrame:
-    # Doit avoir "Categorie", "Sous-categorie" + options en 1ère ligne
     return read_excel_maybe_bin(st.session_state.get("visa_bin"), visa_path, SHEET_VISA)
 
 def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     for col in REQUIRED_CLIENTS_COLS:
         if col not in df.columns:
             df[col] = None
-    # numériques
     for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
         df[c] = _safe_num_series(df, c)
-    # champs JSON
     df["Paiements"] = df["Paiements"].apply(lambda x: _json_loads_or(x, []))
     df["Options"]   = df["Options"].apply(lambda x: _json_loads_or(x, {"options": [], "exclusive": None}))
-    # date + dérivés
     try:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
     except Exception:
         pass
     df["_Année_"]  = pd.to_datetime(df["Date"], errors="coerce").dt.year.astype("Int64")
     df["_MoisNum_"] = pd.to_datetime(df["Date"], errors="coerce").dt.month.astype("Int64")
-    # Mois (string MM)
     df["Mois"] = df["Mois"].apply(lambda m: f"{int(m):02d}" if _safe_str(m).strip().isdigit() else _safe_str(m))
     return df
 
 def build_visa_map(df_visa: pd.DataFrame) -> dict:
-    """
-    Construit un dict :
-      visa_map[cat][sub] = {"options": [liste des intitulés d'options activées (=1)], "all_options": [toutes les colonnes options dispo]}
-    Les colonnes options = toutes les colonnes de df_visa sauf Categorie / Sous-categorie,
-    l'intitulé exact vient de l'entête de colonne (ligne 1).
-    """
+    """visa_map[cat][sub] = {"options": [...], "all_options":[...]}"""
+    if df_visa.empty:
+        return {}
     if "Categorie" not in df_visa.columns or "Sous-categorie" not in df_visa.columns:
         return {}
     option_cols = [c for c in df_visa.columns if c not in ["Categorie", "Sous-categorie"]]
-
     result = {}
     for _, row in df_visa.iterrows():
         cat  = _safe_str(row["Categorie"])
@@ -266,19 +274,13 @@ def build_visa_map(df_visa: pd.DataFrame) -> dict:
         opts_available = []
         for oc in option_cols:
             val = row.get(oc, None)
-            # On considère "1" → option disponible pour cette sous-catégorie
             if _to_float(val, 0.0) == 1.0:
-                opts_available.append(oc)  # nom exact de l'entête de colonne
-
+                opts_available.append(oc)
         result.setdefault(cat, {})
-        result[cat][sub] = {
-            "options": sorted(opts_available),
-            "all_options": option_cols,  # utile si on veut afficher toutes les colonnes (mais on ne coche que celles dispo)
-        }
+        result[cat][sub] = {"options": sorted(opts_available), "all_options": option_cols}
     return result
 
 def render_option_checkboxes(options: list[str], keyprefix: str, preselected: list[str] | None = None) -> list[str]:
-    """Affiche des checkboxes pour les options disponibles et renvoie celles cochées."""
     sel = []
     pre = set(preselected or [])
     cols = st.columns(min(4, max(1, len(options)))) if options else [st]
@@ -332,7 +334,7 @@ visa_map = build_visa_map(df_visa)
 with st.sidebar:
     st.header("⚙️ Actions")
     st.caption("Téléchargements du dernier état.")
-    # Télécharger Clients actuel (depuis mémoire si uploadé, sinon disque réécrit à la volée)
+    # Télécharger Clients actuel
     exp_clients = df_clients.copy()
     with BytesIO() as outc:
         with pd.ExcelWriter(outc, engine="openpyxl") as wr:
@@ -340,14 +342,13 @@ with st.sidebar:
         st.download_button("⬇️ Télécharger Clients.xlsx", outc.getvalue(),
                            file_name="Clients.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key=f"dlC_{SID}")
-    # Télécharger Visa (binaire si présent sinon disque brut)
+    # Télécharger Visa
     visa_bytes = st.session_state.get("visa_bin", None)
     if visa_bytes:
         st.download_button("⬇️ Télécharger Visa.xlsx", visa_bytes,
                            file_name="Visa.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            key=f"dlV_{SID}")
     else:
-        # lire sur disque et renvoyer
         try:
             with open(visa_path, "rb") as f:
                 st.download_button("⬇️ Télécharger Visa.xlsx", f.read(),
@@ -404,7 +405,6 @@ with tabs[0]:
             if c in view.columns:
                 view[c] = _safe_num_series(view, c).apply(_fmt_money)
 
-        # tri sûr
         sort_keys = [c for c in ["_Année_", "_MoisNum_", "Categorie", "Nom"] if c in view.columns]
         view_sorted = view.sort_values(by=sort_keys) if sort_keys else view
 
@@ -413,9 +413,8 @@ with tabs[0]:
             HONO, AUTRE, TOTAL, "Payé", "Reste",
             "Dossier envoyé","Dossier accepté","Dossier refusé","Dossier annulé","RFE"
         ] if c in view_sorted.columns]
+        show_cols = list(dict.fromkeys(show_cols))  # éviter doublons
 
-        # Éviter doublons de colonnes (pyarrow)
-        show_cols = list(dict.fromkeys(show_cols))
         st.dataframe(
             view_sorted[show_cols].reset_index(drop=True),
             use_container_width=True,
@@ -457,7 +456,6 @@ with tabs[1]:
         k3.metric("Payé", _fmt_money(float(_safe_num_series(dfA, "Payé").sum())))
         k4.metric("Reste", _fmt_money(float(_safe_num_series(dfA, "Reste").sum())))
 
-        # Graphiques
         if not dfA.empty and "Categorie" in dfA.columns:
             st.markdown("### 📊 Dossiers par catégorie")
             vc = dfA["Categorie"].value_counts().reset_index()
@@ -532,7 +530,8 @@ with tabs[3]:
         c1, c2, c3 = st.columns(3)
         nom  = c1.text_input("Nom", key=f"add_nom_{SID}")
         dt   = c2.date_input("Date de création", value=date.today(), key=f"add_date_{SID}")
-        mois = c3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1,13)], index=date.today().month-1, key=f"add_mois_{SID}")
+        mois = c3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1,13)],
+                            index=date.today().month-1, key=f"add_mois_{SID}")
 
         st.markdown("#### 🎯 Choix Visa")
         cats = sorted(list(visa_map.keys()))
@@ -644,11 +643,9 @@ with tabs[3]:
 
             d1, d2, d3 = st.columns(3)
             nom  = d1.text_input("Nom", _safe_str(row.get("Nom","")), key=f"mod_nom_{SID}")
-
-            dval = row.get("Date")
-            dt   = d2.date_input("Date de création", value=_date_for_widget(dval), key=f"mod_date_{SID}")
+            dt   = d2.date_input("Date de création", value=_date_for_widget(row.get("Date")), key=f"mod_date_{SID}")
             mois = d3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1,13)],
-                                index=(int(_safe_str(row.get("Mois","01"))) - 1), key=f"mod_mois_{SID}")
+                                index=_month_index(row.get("Mois")), key=f"mod_mois_{SID}")
 
             st.markdown("#### 🎯 Choix Visa")
             cats = sorted(list(visa_map.keys()))
