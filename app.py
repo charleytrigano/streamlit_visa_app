@@ -314,9 +314,18 @@ def _next_dossier(df: pd.DataFrame, start: int = 13057) -> int:
             return int(s.max()) + 1
     return int(start)
 
-def _make_client_id(nom: str, d: date) -> str:
-    base = _safe_str(nom).strip().replace(" ","_")
-    return f"{base}-{d:%Y%m%d}"
+def _make_client_id(nom: str, d) -> str:
+    """Construit un ID client robuste, même si la date est une chaîne ou None."""
+    base = _safe_str(nom).strip().replace(" ", "_")
+    try:
+        if not isinstance(d, (date, datetime)):
+            d = pd.to_datetime(d, errors="coerce")
+        if pd.isna(d):
+            d = datetime.today()
+        return f"{base}-{d.strftime('%Y%m%d')}"
+    except Exception:
+        # en dernier recours : fallback sans date
+        return f"{base}-{datetime.today().strftime('%Y%m%d')}"
 
 # ==============================================
 # Helper UI — sélecteur d'options VISA (radio + cases)
