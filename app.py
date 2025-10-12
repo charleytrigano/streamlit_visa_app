@@ -94,7 +94,7 @@ def ensure_file(path: str, sheet_name: str, cols: list[str]) -> None:
         with pd.ExcelWriter(p, engine="openpyxl") as wr:
             df.to_excel(wr, sheet_name=sheet_name, index=False)
 
-# Crée les fichiers vides au besoin
+# Crée les fichiers vides au besoin (pour éviter les erreurs au premier démarrage)
 ensure_file(CLIENTS_FILE_DEFAULT, SHEET_CLIENTS, CLIENTS_COLS)
 ensure_file(VISA_FILE_DEFAULT, SHEET_VISA, ["Categorie","Sous-categorie 1","COS","EOS"])
 
@@ -317,6 +317,49 @@ def _make_client_id(nom: str, d: date) -> str:
     return f"{base}-{d:%Y%m%d}"
 
 # =========================
+# Helper UI : sélecteur d'options VISA (propre, sans lambdas)
+# =========================
+def build_visa_option_selector(visa_map: dict, cat: str, sub: str, keyprefix: str, preselected: dict | None = None):
+    """
+    Construit l'UI des options Visa pour (cat, sub) à partir de visa_map :
+      - Radio 'exclusive' si des options de la forme 'sub XXX' existent (ex: 'F-1 COS', 'F-1 EOS')
+      - Cases à cocher pour les autres options (non 'sub XXX')
+    Retourne (visa_final, opts_dict, info_msg).
+    """
+    arr = visa_map.get(cat, {}).get(sub, [])
+    prefix = f"{sub} "
+    suffixes = sorted({o[len(prefix):] for o in arr if o.startswith(prefix) and len(o) > len(prefix)})
+    others = sorted([o for o in arr if not (o.startswith(prefix) and len(o) > len(prefix))])
+
+    preselected = preselected or {}
+    pre_excl = preselected.get("exclusive")
+    pre_opts = preselected.get("options", []) if isinstance(preselected.get("options", []), list) else []
+
+    chosen_excl = None
+    if suffixes:
+        radio_opts = [""] + suffixes
+        default_idx = radio_opts.index(pre_excl) if pre_excl in radio_opts else 0
+        chosen_excl = st.radio(
+            f"Option exclusive — {sub}",
+            options=radio_opts,
+            index=default_idx,
+            key=f"{keyprefix}_excl"
+        )
+
+    chosen_multi = []
+    for i, lab in enumerate(others):
+        default = lab in pre_opts
+        if st.checkbox(lab, value=default, key=f"{keyprefix}_chk_{i}"):
+            chosen_multi.append(lab)
+
+    visa_final = sub
+    if chosen_excl:
+        visa_final = f"{sub} {chosen_excl}".strip()
+
+    info_msg = "" if arr else "Aucune option cochée pour cette sous-catégorie dans la feuille Visa."
+    return visa_final, {"exclusive": (chosen_excl or None), "options": chosen_multi}, info_msg
+
+# =========================
 # UI — barre latérale
 # =========================
 with st.sidebar:
@@ -414,31 +457,13 @@ with tabs[0]:
             subs = sorted(list(visa_map.get(cat, {}).keys())) if cat else []
             sub  = st.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=f"add_sub_{SID}")
         with c3:
-            # Visa dynamique
+            # Options VISA dynamiques
             if cat and sub:
-                visa_final, info_msg, opts = (lambda c=cat, s=sub: (
-                    # rendu options: exclusif si "sub XXX", cases à cocher sinon
-                    (lambda vmap=parse_visa_sheet(visa_path), kp=f"add_steps_{SID}":
-                        (lambda arr=vmap.get(c, {}).get(s, []):
-                            (lambda prefix=f"{s} ":
-                                (lambda suffixes=[o[len(prefix):] for o in arr if o.startswith(prefix) and len(o)>len(prefix)],
-                                         others=[o for o in arr if not (o.startswith(prefix) and len(o)>len(prefix))]):
-                                    (lambda chosen_excl=st.radio(
-                                        f"Option exclusive — {s}",
-                                        options=[""]+sorted(set(suffixes)) if suffixes else [""],
-                                        index=0, key=f"{kp}_excl_{SID}"
-                                    ) if suffixes else None,
-                                    chosen_multi=[lab for i,lab in enumerate(sorted(set(others)))
-                                                  if st.checkbox(lab, value=False, key=f"{kp}_chk_{i}_{SID}")]):
-                                        (f"{s} {chosen_excl}".strip() if chosen_excl else s,
-                                         "" if arr else "Aucune option cochée pour cette sous-catégorie dans la feuille Visa.",
-                                         {"exclusive": (chosen_excl or None),
-                                          "options": chosen_multi})
-                            )()
-                        )()
-                    )()
-                ))()
-                if info_msg: st.info(info_msg)
+                visa_final, opts, info_msg = build_visa_option_selector(
+                    visa_map, cat, sub, keyprefix=f"add_steps_{SID}", preselected=None
+                )
+                if info_msg:
+                    st.info(info_msg)
             else:
                 visa_final, opts = "", {"exclusive": None, "options": []}
 
@@ -536,33 +561,16 @@ with tabs[0]:
                                    index=(subs.index(cur_sub)+1 if cur_sub in subs else 0),
                                    key=f"mod_sub_{idx}_{SID}")
             with c3:
-                # options pré-sélectionnées
-                cur_opts = row.get("Options", {})
-                visa_final, info_msg, opts = (lambda c=cat, s=sub, pre=cur_opts: (
-                    (lambda vmap=parse_visa_sheet(visa_path), kp=f"mod_steps_{idx}_{SID}":
-                        (lambda arr=vmap.get(c, {}).get(s, []):
-                            (lambda prefix=f"{s} ":
-                                (lambda suffixes=[o[len(prefix):] for o in arr if o.startswith(prefix) and len(o)>len(prefix)],
-                                         others=[o for o in arr if not (o.startswith(prefix) and len(o)>len(prefix))]):
-                                    (lambda sup_opts=[""]+sorted(set(suffixes)) if suffixes else [""],
-                                            chosen_excl=st.radio(
-                                                f"Option exclusive — {s}",
-                                                options=sup_opts,
-                                                index=(sup_opts.index(pre.get("exclusive")) if isinstance(pre,dict) and pre.get("exclusive") in sup_opts else 0),
-                                                key=f"{kp}_excl_{SID}"
-                                            ) if suffixes else None,
-                                            chosen_multi=[lab for i,lab in enumerate(sorted(set(others)))
-                                                          if st.checkbox(lab, value=(lab in (pre.get("options",[]) if isinstance(pre,dict) else [])),
-                                                                         key=f"{kp}_chk_{i}_{SID}")]):
-                                        (f"{s} {chosen_excl}".strip() if chosen_excl else s,
-                                         "" if arr else "Aucune option cochée pour cette sous-catégorie dans la feuille Visa.",
-                                         {"exclusive": (chosen_excl or None),
-                                          "options": chosen_multi})
-                            )()
-                        )()
-                    )()
-                ))()
-                if info_msg: st.info(info_msg)
+                cur_opts = row.get("Options", {}) if isinstance(row.get("Options", {}), dict) else {}
+                if cat and sub:
+                    visa_final, opts, info_msg = build_visa_option_selector(
+                        visa_map, cat, sub, keyprefix=f"mod_steps_{idx}_{SID}", preselected=cur_opts
+                    )
+                    if info_msg:
+                        st.info(info_msg)
+                else:
+                    visa_final = _safe_str(row.get("Visa",""))
+                    opts = cur_opts
 
                 hono = st.number_input("Montant honoraires (US $)", min_value=0.0,
                                        value=float(row["Montant honoraires (US $)"]), step=10.0, format="%.2f",
