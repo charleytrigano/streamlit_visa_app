@@ -801,45 +801,54 @@ with tabs[5]:
                 st.write("**Options exclusives (au plus une)** :", ", ".join(excl) if excl else "—")
                 st.write("**Autres options** :", ", ".join(others) if others else "—")
 
-
 # ==============================================
 # 📈 ONGLET : Analyses (filtres + KPI + graphs + comparaison + détail)
 # ==============================================
+
+# Générateur de clés robustes (évite StreamlitDuplicateElementKey/Id)
+def _ns() -> str:
+    cp = _safe_str(clients_path or "nocl")
+    vp = _safe_str(visa_path or "novi")
+    return f"{abs(hash((cp, vp)))%10**8}"  # namespace stable pour une paire de fichiers
+
+def skey(*parts) -> str:
+    return "k_" + "_".join([_ns(), *[str(p) for p in parts]])
+
 with tabs[1]:
     st.subheader("📈 Analyses")
 
     if df_all.empty:
         st.info("Aucune donnée client.")
     else:
-        # Uniques sécurisés
-        yearsA  = sorted([int(y) for y in pd.to_numeric(df_all.get("_Année_", pd.Series(dtype=float)), errors="coerce").dropna().unique().tolist()])
+        # Colonnes numériques au format float
+        for coln in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+            if coln in df_all.columns:
+                df_all[coln] = _safe_num_series(df_all, coln)
+
+        yearsA  = sorted([int(y) for y in pd.to_numeric(df_all.get("_Année_", pd.Series(dtype=float)), errors="coerce")
+                          .dropna().unique().tolist()])
         monthsA = [f"{m:02d}" for m in range(1, 13)]
         catsA   = sorted(df_all.get("Categorie", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
         subsA   = sorted(df_all.get("Sous-categorie", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
         visasA  = sorted(df_all.get("Visa", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
 
-        # --- Filtres (clés préfixées "an_")
+        # --- Filtres (clés préfixées skey)
         a1, a2, a3, a4, a5 = st.columns(5)
-        fy = a1.multiselect("Année", yearsA, default=[], key=f"an_years_{SID}")
-        fm = a2.multiselect("Mois (MM)", monthsA, default=[], key=f"an_months_{SID}")
-        fc = a3.multiselect("Catégorie", catsA, default=[], key=f"an_cats_{SID}")
-        fs = a4.multiselect("Sous-catégorie", subsA, default=[], key=f"an_subs_{SID}")
-        fv = a5.multiselect("Visa", visasA, default=[], key=f"an_visas_{SID}")
-
-        # Copie & coercition num
-        dfA = df_all.copy()
-        for coln in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
-            if coln in dfA.columns:
-                dfA[coln] = _safe_num_series(dfA, coln)
+        fy = a1.multiselect("Année", yearsA, default=[], key=skey("an","years"))
+        fm = a2.multiselect("Mois (MM)", monthsA, default=[], key=skey("an","months"))
+        fc = a3.multiselect("Catégorie", catsA, default=[], key=skey("an","cats"))
+        fs = a4.multiselect("Sous-catégorie", subsA, default=[], key=skey("an","subs"))
+        fv = a5.multiselect("Visa", visasA, default=[], key=skey("an","visas"))
 
         # Application filtres
+        dfA = df_all.copy()
         if fy: dfA = dfA[dfA.get("_Année_", "").isin(fy)]
         if fm: dfA = dfA[dfA.get("Mois", "").astype(str).isin(fm)]
         if fc: dfA = dfA[dfA.get("Categorie", "").astype(str).isin(fc)]
         if fs: dfA = dfA[dfA.get("Sous-categorie", "").astype(str).isin(fs)]
         if fv: dfA = dfA[dfA.get("Visa", "").astype(str).isin(fv)]
 
-        # --- KPI compacts (la classe CSS .small-metrics doit être définie en partie 1)
+        # --- KPI compacts (classe CSS .small-metrics à définir en partie 1)
         st.markdown('<div class="small-metrics">', unsafe_allow_html=True)
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Dossiers", f"{len(dfA)}")
@@ -855,22 +864,22 @@ with tabs[1]:
         if not dfA.empty and "Categorie" in dfA.columns:
             vc = (dfA.groupby("Categorie", as_index=False)
                     .agg(N=("Categorie","size"),
-                         Honoraires=(HONO,"sum") if HONO in dfA else ("Categorie","size")))
+                         Honoraires=(HONO,"sum") if HONO in dfA.columns else ("Categorie","size")))
             totN = int(vc["N"].sum() or 1)
             vc["% Dossiers"] = (vc["N"]/totN*100).round(1)
             with cL:
                 st.dataframe(vc.sort_values("N", ascending=False),
-                             use_container_width=True, height=260, key=f"an_vc_{SID}")
+                             use_container_width=True, height=260, key=skey("an","tab","vc"))
 
         if not dfA.empty and "Sous-categorie" in dfA.columns:
             vs = (dfA.groupby("Sous-categorie", as_index=False)
                     .agg(N=("Sous-categorie","size"),
-                         Honoraires=(HONO,"sum") if HONO in dfA else ("Sous-categorie","size")))
+                         Honoraires=(HONO,"sum") if HONO in dfA.columns else ("Sous-categorie","size")))
             totNs = int(vs["N"].sum() or 1)
             vs["% Dossiers"] = (vs["N"]/totNs*100).round(1)
             with cR:
                 st.dataframe(vs.sort_values("N", ascending=False).head(25),
-                             use_container_width=True, height=260, key=f"an_vs_{SID}")
+                             use_container_width=True, height=260, key=skey("an","tab","vs"))
 
         # --- Graph : Dossiers par catégorie
         if not dfA.empty and "Categorie" in dfA.columns:
@@ -888,13 +897,13 @@ with tabs[1]:
                     .sort_values("Mois"))
             st.line_chart(gm.set_index("Mois"))
 
-        # --- Comparaison période A vs B (clés préfixées "cmp_")
+        # --- Comparaison période A vs B (clés uniques via skey)
         st.markdown("#### 🔁 Comparaison de périodes (A vs B)")
         ca1, ca2, cb1, cb2 = st.columns(4)
-        pa_years = ca1.multiselect("Année (A)", yearsA, default=[], key=f"cmp_ya_{SID}")
-        pa_month = ca2.multiselect("Mois (A)", monthsA, default=[], key=f"cmp_ma_{SID}")
-        pb_years = cb1.multiselect("Année (B)", yearsA, default=[], key=f"cmp_yb_{SID}")
-        pb_month = cb2.multiselect("Mois (B)", monthsA, default=[], key=f"cmp_mb_{SID}")
+        pa_years = ca1.multiselect("Année (A)", yearsA, default=[], key=skey("cmp","ya"))
+        pa_month = ca2.multiselect("Mois (A)", monthsA, default=[], key=skey("cmp","ma"))
+        pb_years = cb1.multiselect("Année (B)", yearsA, default=[], key=skey("cmp","yb"))
+        pb_month = cb2.multiselect("Mois (B)", monthsA, default=[], key=skey("cmp","mb"))
 
         def _filter_period(base, ys, ms):
             d = base.copy()
@@ -918,7 +927,7 @@ with tabs[1]:
 
         # --- Comparaison par mois (barres groupées)
         st.markdown("##### Comparaison par mois")
-        def _mk_month_series(d):
+        def _mk_month_series(d: pd.DataFrame) -> pd.DataFrame:
             if d.empty or "Mois" not in d.columns or HONO not in d.columns:
                 return pd.DataFrame({"Mois": [], "Honoraires": []})
             t = d.copy()
@@ -957,7 +966,7 @@ with tabs[1]:
         det_sorted = det_sorted.loc[:, ~det_sorted.columns.duplicated()].copy()
 
         st.dataframe(det_sorted[show_cols].reset_index(drop=True),
-                     use_container_width=True, key=f"an_tbl_{SID}")
+                     use_container_width=True, key=skey("an","detail"))
 
 
 # ==============================================
@@ -987,4 +996,4 @@ with tabs[2]:
             agg["% Payé"] = ((agg["Payé"] / agg[TOTAL]).replace([pd.NA, pd.NaT], 0).fillna(0.0)*100).round(1)
 
         st.dataframe(agg.sort_values(by=TOTAL if TOTAL in agg else agg_cols[0], ascending=False),
-                     use_container_width=True, key=f"esc_agg_{SID}")
+                     use_container_width=True, key=skey("esc","agg"))
