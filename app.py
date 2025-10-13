@@ -11,6 +11,41 @@ from typing import Dict, List, Tuple
 import pandas as pd
 import streamlit as st
 
+# ---------- Config & clé de session ----------
+SID = st.session_state.get("_sid") or uuid.uuid4().hex[:8]
+st.session_state["_sid"] = SID
+
+st.set_page_config(page_title="Visa Manager", page_icon="🛂", layout="wide")
+st.title("🛂 Visa Manager")
+
+# ---------- Styles compacts KPI & menus auto-larges ----------
+st.markdown("""
+<style>
+/* KPI (st.metric) compacts */
+.small-metrics [data-testid="stMetricValue"] { font-size: 1.05rem; line-height: 1.05rem; }
+.small-metrics [data-testid="stMetricLabel"] { font-size: 0.80rem; opacity: 0.85; }
+.small-metrics [data-testid="stMetricDelta"] { font-size: 0.75rem; }
+.small-metrics [data-testid="stVerticalBlock"] { gap: 0.35rem; }
+
+/* Menus déroulants : largeur selon contenu (sans dépasser le conteneur) */
+.stSelectbox [data-baseweb="select"],
+.stMultiSelect [data-baseweb="select"] {
+  width: max-content !important;
+  min-width: 12ch;
+  max-width: 100% !important;
+}
+.stSelectbox div[role="combobox"],
+.stMultiSelect div[role="combobox"] {
+  min-width: 0 !important;
+}
+/* Un peu plus compacts */
+.stSelectbox [data-baseweb="select"] div,
+.stMultiSelect [data-baseweb="select"] div {
+  padding-top: 2px; padding-bottom: 2px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ---------- Constantes colonnes ----------
 SHEET_CLIENTS = "Clients"
 SHEET_VISA    = "Visa"
@@ -27,21 +62,14 @@ STATUS_COLS = [
     "RFE",
 ]
 
-# ---------- Sécurité des clés Streamlit ----------
-SID = st.session_state.get("_sid") or uuid.uuid4().hex[:8]
-st.session_state["_sid"] = SID
-
-st.set_page_config(page_title="Visa Manager", page_icon="🛂", layout="wide")
-st.title("🛂 Visa Manager")
-
 # ===============================
-# Utils format/parse
+# Helpers format / parse
 # ===============================
 def _norm(s: str) -> str:
     s = str(s or "")
     s = s.strip().lower()
     s = re.sub(r"[’'`´]", "", s)
-    s = re.sub(r"[^a-z0-9+/_\- ]+", " ", s)
+    s = re.sub(r"[^a-z0-9+/_\\- ]+", " ", s)
     s = re.sub(r"\s+", " ", s)
     return s
 
@@ -81,7 +109,7 @@ def _fmt_money(x: float) -> str:
         return "$0.00"
 
 def widget_date(val, fallback=None):
-    """Toujours renvoyer un objet date ou fallback (gère NaT, str, Timestamp...)."""
+    """Retourne un date (ou fallback) compatible st.date_input (évite NaT/NaN)."""
     if val is None:
         return fallback
     if isinstance(val, date) and not isinstance(val, datetime):
@@ -101,7 +129,7 @@ def _month_index(mois_val) -> int:
     if s.isdigit():
         i = int(s)
         if 1 <= i <= 12:
-            return i-1
+            return i - 1
     return 0
 
 def _best_index(options: List[str], current: str) -> int:
@@ -112,7 +140,7 @@ def _best_index(options: List[str], current: str) -> int:
     return 0
 
 # ===============================
-# E/S fichiers & mémoire dernier chemin
+# I/O — chemins, dernier fichier, lecture/écriture
 # ===============================
 WORK_DIR = os.getcwd()
 CLIENTS_DEFAULT = os.path.join(WORK_DIR, "donnees_visa_clients1_adapte.xlsx")
@@ -138,9 +166,7 @@ def read_visa_file(path: str) -> pd.DataFrame:
 
 def write_workbook(clients_df: pd.DataFrame, clients_path: str,
                    visa_df: pd.DataFrame|None, visa_path: str) -> Tuple[bool, str]:
-    """
-    Écrit la feuille Clients et, si clients_path==visa_path, préserve/écrit aussi Visa.
-    """
+    """Écrit la feuille Clients et, si fichier unique, la feuille Visa aussi."""
     try:
         if clients_path == visa_path and visa_df is not None:
             with pd.ExcelWriter(clients_path, engine="openpyxl") as wr:
@@ -153,7 +179,7 @@ def write_workbook(clients_df: pd.DataFrame, clients_path: str,
     except Exception as e:
         return False, str(e)
 
-LAST_KEY = "last_paths_v3"
+LAST_KEY = "last_paths_v4"
 def save_last_paths(clients_path: str, visa_path: str):
     st.session_state[LAST_KEY] = {"clients": clients_path, "visa": visa_path}
 
@@ -178,7 +204,7 @@ def next_dossier_number(df: pd.DataFrame, start=13057) -> int:
     if "Dossier N" in df.columns:
         mx = pd.to_numeric(df["Dossier N"], errors="coerce").fillna(0).max()
         try:
-            return int(max(start, mx+1))
+            return int(max(start, mx + 1))
         except Exception:
             return int(start)
     return int(start)
@@ -202,7 +228,7 @@ def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     if TOTAL in df.columns:
         df[TOTAL] = df[HONO] + df[AUTRE]
 
-    # Paiements -> liste
+    # Paiements -> liste structurée
     if "Paiements" not in df.columns:
         df["Paiements"] = [[] for _ in range(len(df))]
     else:
@@ -217,6 +243,7 @@ def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
                 return []
         df["Paiements"] = df["Paiements"].apply(_to_list)
 
+    # Payé / Reste
     pay_calc = []
     for pays in df["Paiements"]:
         s = 0.0
@@ -228,7 +255,7 @@ def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     df["Reste"] = (df[HONO] + df[AUTRE]) - df["Payé"]
     df["Reste"] = df["Reste"].apply(lambda x: max(0.0, float(x)))
 
-    # Dates
+    # Dates principales
     dd = pd.to_datetime(df.get("Date", pd.NaT), errors="coerce")
     df["Date"] = dd
     df["_Année_"] = dd.dt.year.fillna(0).astype(int)
@@ -238,6 +265,7 @@ def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["Mois"] = df["Mois"].astype(str).str.zfill(2)
 
+    # Statuts par défaut
     for c in STATUS_COLS:
         if c not in df.columns:
             df[c] = 0 if not c.startswith("Date") else None
@@ -250,16 +278,16 @@ def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ===============================
-# Visa.xlsx -> carte des options par (Categorie, Sous-categorie)
-# Toutes colonnes ≠ {Categorie, Sous-categorie} sont des options.
-# Chaque ligne : 1 = option dispo, 0/vide = non.
+# Visa → carte des options
+# - colonnes "Categorie", "Sous-categorie"
+# - toutes les autres colonnes = options ; valeur 1 => active
 # ===============================
 @st.cache_data(show_spinner=False)
 def build_visa_map(visa_df: pd.DataFrame) -> Dict[str, Dict[str, Dict[str, List[str]]]]:
     if visa_df is None or visa_df.empty:
         return {}
-    # détecte noms colonnes de base
     cols = list(visa_df.columns)
+    # noms robustes
     cat_col = None
     sub_col = None
     for c in cols:
@@ -309,11 +337,12 @@ def compute_visa_string(sub: str, options: List[str]) -> str:
     return f"{sub} {'+'.join(options)}"
 
 # ===============================
-# Zone de chargement & mémoire dernier fichier
+# Sidebar — chargement fichiers + mémoire dernier chemin
 # ===============================
+WORK_DIR = os.getcwd()
 last_clients, last_visa = load_last_paths()
-clients_path = last_clients if last_clients and os.path.exists(last_clients) else (CLIENTS_DEFAULT if os.path.exists(CLIENTS_DEFAULT) else "")
-visa_path    = last_visa    if last_visa and os.path.exists(last_visa)       else (VISA_DEFAULT    if os.path.exists(VISA_DEFAULT)    else "")
+clients_path = last_clients if last_clients and os.path.exists(last_clients) else (os.path.join(WORK_DIR, "donnees_visa_clients1_adapte.xlsx") if os.path.exists(os.path.join(WORK_DIR, "donnees_visa_clients1_adapte.xlsx")) else "")
+visa_path    = last_visa    if last_visa and os.path.exists(last_visa)       else (os.path.join(WORK_DIR, "donnees_visa_clients1.xlsx")          if os.path.exists(os.path.join(WORK_DIR, "donnees_visa_clients1.xlsx"))          else "")
 
 st.sidebar.header("📂 Fichiers")
 mode = st.sidebar.radio("Mode de chargement", ["Deux fichiers (Clients & Visa)", "Un seul fichier (2 onglets)"], key=f"mode_{SID}")
@@ -338,7 +367,6 @@ else:
 if clients_path and visa_path and os.path.exists(clients_path) and os.path.exists(visa_path):
     save_last_paths(clients_path, visa_path)
 
-# Téléchargements rapides
 st.sidebar.markdown("---")
 if clients_path and os.path.exists(clients_path):
     with open(clients_path, "rb") as f:
@@ -347,7 +375,9 @@ if visa_path and os.path.exists(visa_path):
     with open(visa_path, "rb") as f:
         st.sidebar.download_button("⬇️ Télécharger Visa", f.read(), file_name=os.path.basename(visa_path), key=f"dlV_{SID}")
 
-# Charge data
+# ===============================
+# Lecture effective
+# ===============================
 df_clients_raw = pd.DataFrame()
 df_visa_raw    = pd.DataFrame()
 if clients_path and os.path.exists(clients_path):
@@ -364,7 +394,9 @@ if visa_path and os.path.exists(visa_path):
 df_all  = normalize_clients(df_clients_raw.copy()) if not df_clients_raw.empty else normalize_clients(pd.DataFrame())
 visa_map = build_visa_map(df_visa_raw.copy()) if not df_visa_raw.empty else {}
 
+# ===============================
 # Tabs
+# ===============================
 tabs = st.tabs(["📊 Dashboard", "📈 Analyses", "🏦 Escrow", "👤 Clients", "📄 Visa (aperçu)"])
 
 
@@ -396,11 +428,14 @@ with tabs[0]:
         if fs: view = view[view["Sous-categorie"].astype(str).isin(fs)]
         if fv: view = view[view["Visa"].astype(str).isin(fv)]
 
+        # KPIs compacts
+        st.markdown('<div class="small-metrics">', unsafe_allow_html=True)
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Dossiers", f"{len(view)}")
         k2.metric("Honoraires", _fmt_money(_safe_num_series(view, HONO).sum()))
         k3.metric("Payé", _fmt_money(_safe_num_series(view, "Payé").sum()))
         k4.metric("Reste", _fmt_money(_safe_num_series(view, "Reste").sum()))
+        st.markdown('</div>', unsafe_allow_html=True)
 
         show_cols = [c for c in [
             "Dossier N","ID_Client","Nom","Categorie","Sous-categorie","Visa","Date","Mois",
@@ -441,11 +476,14 @@ with tabs[1]:
         if fs: dfA = dfA[dfA["Sous-categorie"].astype(str).isin(fs)]
         if fv: dfA = dfA[dfA["Visa"].astype(str).isin(fv)]
 
+        # KPIs compacts
+        st.markdown('<div class="small-metrics">', unsafe_allow_html=True)
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Dossiers", f"{len(dfA)}")
         k2.metric("Honoraires", _fmt_money(_safe_num_series(dfA, HONO).sum()))
         k3.metric("Payé", _fmt_money(_safe_num_series(dfA, "Payé").sum()))
         k4.metric("Reste", _fmt_money(_safe_num_series(dfA, "Reste").sum()))
+        st.markdown('</div>', unsafe_allow_html=True)
 
         if not dfA.empty and "Categorie" in dfA.columns:
             st.markdown("### 📊 Dossiers par catégorie")
@@ -460,6 +498,7 @@ with tabs[1]:
             gm = tmp.groupby("Mois", as_index=False)[HONO].sum().sort_values("Mois")
             st.line_chart(gm.set_index("Mois"))
 
+        # Détails
         st.markdown("### 🧾 Détails des dossiers filtrés")
         det = dfA.copy()
         for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
@@ -498,12 +537,15 @@ with tabs[2]:
         agg["% Payé"] = (agg["Payé"] / agg[TOTAL]).replace([pd.NA, pd.NaT], 0).fillna(0.0) * 100
         st.dataframe(agg, use_container_width=True, key=f"esc_agg_{SID}")
 
+        # KPIs compacts
+        st.markdown('<div class="small-metrics">', unsafe_allow_html=True)
         t1, t2, t3 = st.columns(3)
         t1.metric("Total (US $)", _fmt_money(float(dfE[TOTAL].sum())))
         t2.metric("Payé", _fmt_money(float(dfE["Payé"].sum())))
         t3.metric("Reste", _fmt_money(float(dfE["Reste"].sum())))
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        st.caption("Conseil : isoler les honoraires perçus avant « Dossier envoyé », et lister les transferts à faire une fois le statut coché.")
+        st.caption("NB : pour un escrow « strict », isolez les honoraires perçus avant l’envoi, puis transférez à l’envoi.")
 
 # ===============================
 # 👤 Clients — CRUD & paiements
@@ -616,12 +658,14 @@ with tabs[3]:
             idx = live[mask].index[0]
             row = live.loc[idx].copy()
 
+            # KPIs compacts info client
+            st.markdown('<div class="small-metrics">', unsafe_allow_html=True)
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Honoraires", _fmt_money(float(_to_float(row.get(HONO, 0.0)))))
             k2.metric("Autres frais", _fmt_money(float(_to_float(row.get(AUTRE, 0.0)))))
             k3.metric("Payé", _fmt_money(float(_to_float(row.get("Payé", 0.0)))))
-            reste_calc = max(0.0, float(_to_float(row.get(TOTAL, 0.0))) - float(_to_float(row.get("Payé", 0.0))))
-            k4.metric("Reste", _fmt_money(reste_calc))
+            k4.metric("Reste", _fmt_money(max(0.0, float(_to_float(row.get(TOTAL, 0.0))) - float(_to_float(row.get("Payé", 0.0))))))
+            st.markdown('</div>', unsafe_allow_html=True)
 
             d1, d2, d3 = st.columns(3)
             nom  = d1.text_input("Nom", _safe_str(row.get("Nom","")), key=f"mod_nom_{SID}")
