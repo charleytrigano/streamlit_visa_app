@@ -802,219 +802,189 @@ with tabs[5]:
                 st.write("**Autres options** :", ", ".join(others) if others else "—")
 
 
+# ==============================================
+# 📈 ONGLET : Analyses (filtres + KPI + graphs + comparaison + détail)
+# ==============================================
+with tabs[1]:
+    st.subheader("📈 Analyses")
 
-# ==============================================================
-# 🔍  Sécurisation : détection dynamique des colonnes dans Visa
-# ==============================================================
-import unicodedata
-
-def _normcol(s: str) -> str:
-    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode("ascii")
-    s = s.strip().lower().replace("-", " ").replace("_", " ")
-    s = " ".join(s.split())
-    return s
-
-def pick_col(df, candidates):
-    cols = list(df.columns)
-    norm_map = {_normcol(c): c for c in cols}
-    for cand in candidates:
-        if cand in cols:
-            return cand
-        nc = _normcol(cand)
-        if nc in norm_map:
-            return norm_map[nc]
-    return None
-
-# Applique la détection au dataframe Visa chargé
-cat_col  = pick_col(df_visa_raw, ["Categorie", "Category"])
-sub_col  = pick_col(df_visa_raw, ["Sous-categorie", "Sous categorie", "Sous-categories 1", "Sous categories 1"])
-visa_col = pick_col(df_visa_raw, ["Visa", "Type visa"])
-if sub_col is None:
-    poss = [c for c in df_visa_raw.columns if _normcol(c).startswith("sous categories")]
-    sub_col = poss[0] if poss else None
-
-cats  = sorted(df_visa_raw[cat_col].dropna().astype(str).unique().tolist()) if cat_col  else []
-subs  = sorted(df_visa_raw[sub_col].dropna().astype(str).unique().tolist()) if sub_col  else []
-visas = sorted(df_visa_raw[visa_col].dropna().astype(str).unique().tolist()) if visa_col else []
-
-
-# ==============================================================
-# 💾  Gestion CRUD Clients + Export global (Clients + Visa)
-# ==============================================================
-st.markdown("---")
-st.subheader("🧾 Gestion des clients")
-
-op = st.radio("Action", ["Ajouter", "Modifier", "Supprimer"], horizontal=True, key=f"crud_op_{SID}")
-
-df_live = _read_clients(clients_path)
-
-# ---------------- AJOUT ----------------
-if op == "Ajouter":
-    st.markdown("### ➕ Ajouter un client")
-    c1, c2, c3 = st.columns(3)
-    nom  = c1.text_input("Nom", key=f"add_nom_{SID}")
-    dt   = c2.date_input("Date de création", value=date.today(), key=f"add_date_{SID}")
-    mois = c3.selectbox("Mois", [f"{m:02d}" for m in range(1,13)],
-                        index=int(date.today().month)-1, key=f"add_mois_{SID}")
-
-    # Choix Visa
-    st.markdown("#### 🎯 Choix Visa")
-    sel_cat = st.selectbox("Catégorie", [""] + cats, key=f"add_cat_{SID}")
-    sel_sub = st.selectbox("Sous-catégorie", [""] + subs, key=f"add_sub_{SID}")
-    visa_final = st.selectbox("Visa", [""] + visas, key=f"add_visa_{SID}")
-
-    f1, f2 = st.columns(2)
-    honor = f1.number_input("Montant honoraires (US $)", 0.0, step=50.0, key=f"add_h_{SID}")
-    other = f2.number_input("Autres frais (US $)", 0.0, step=20.0, key=f"add_o_{SID}")
-    comment = st.text_area("Commentaires / détails autres frais", key=f"add_comm_{SID}")
-
-    st.markdown("#### 📌 Statuts initiaux")
-    s1, s2, s3, s4, s5 = st.columns(5)
-    sent = s1.checkbox("Envoyé", key=f"add_sent_{SID}")
-    acc  = s2.checkbox("Accepté", key=f"add_acc_{SID}")
-    ref  = s3.checkbox("Refusé", key=f"add_ref_{SID}")
-    ann  = s4.checkbox("Annulé", key=f"add_ann_{SID}")
-    rfe  = s5.checkbox("RFE", key=f"add_rfe_{SID}")
-
-    if rfe and not any([sent, acc, ref, ann]):
-        st.warning("⚠️ RFE doit être associé à un statut envoyé / accepté / refusé / annulé.")
-
-    if st.button("💾 Enregistrer le client", key=f"add_btn_{SID}"):
-        if not nom:
-            st.warning("Nom requis.")
-            st.stop()
-        total = honor + other
-        reste = total
-        did = _make_client_id(nom, dt)
-        dossier_n = _next_dossier(df_live, start=13057)
-        new_row = {
-            "Dossier N": dossier_n,
-            "ID_Client": did,
-            "Nom": nom,
-            "Date": dt,
-            "Mois": mois,
-            "Categorie": sel_cat,
-            "Sous-categorie": sel_sub,
-            "Visa": visa_final,
-            "Montant honoraires (US $)": honor,
-            "Autres frais (US $)": other,
-            "Commentaires": comment,
-            "Total (US $)": total,
-            "Payé": 0.0,
-            "Reste": reste,
-            "Dossier envoyé": 1 if sent else 0,
-            "Dossier accepté": 1 if acc else 0,
-            "Dossier refusé": 1 if ref else 0,
-            "Dossier annulé": 1 if ann else 0,
-            "RFE": 1 if rfe else 0,
-        }
-        df_new = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
-        _write_clients(df_new, clients_path)
-        st.success("Client ajouté ✅")
-        st.cache_data.clear()
-        st.rerun()
-
-# ---------------- MODIFICATION ----------------
-elif op == "Modifier":
-    st.markdown("### ✏️ Modifier un client")
-    if df_live.empty:
-        st.info("Aucun client enregistré.")
+    if df_all.empty:
+        st.info("Aucune donnée client.")
     else:
-        noms = sorted(df_live["Nom"].dropna().astype(str).unique().tolist())
-        sel = st.selectbox("Choisir le client", [""] + noms, key=f"mod_sel_{SID}")
-        if sel:
-            idx = df_live[df_live["Nom"] == sel].index[0]
-            row = df_live.loc[idx]
-            c1, c2, c3 = st.columns(3)
-            nom  = c1.text_input("Nom", row["Nom"], key=f"mod_nom_{SID}")
-            dt   = c2.date_input("Date", _date_for_widget(row["Date"]), key=f"mod_date_{SID}")
-            mois = c3.selectbox("Mois", [f"{m:02d}" for m in range(1,13)],
-                                index=int(str(row["Mois"]))-1, key=f"mod_mois_{SID}")
+        # Uniques sécurisés
+        yearsA  = sorted([int(y) for y in pd.to_numeric(df_all.get("_Année_", pd.Series(dtype=float)), errors="coerce").dropna().unique().tolist()])
+        monthsA = [f"{m:02d}" for m in range(1, 13)]
+        catsA   = sorted(df_all.get("Categorie", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+        subsA   = sorted(df_all.get("Sous-categorie", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+        visasA  = sorted(df_all.get("Visa", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
 
-            st.markdown("#### 🎯 Choix Visa")
-            sel_cat = st.selectbox("Catégorie", [""] + cats,
-                                   index=(cats.index(row["Categorie"])+1 if row["Categorie"] in cats else 0),
-                                   key=f"mod_cat_{SID}")
-            sel_sub = st.selectbox("Sous-catégorie", [""] + subs,
-                                   index=(subs.index(row["Sous-categorie"])+1 if row["Sous-categorie"] in subs else 0),
-                                   key=f"mod_sub_{SID}")
-            visa_final = st.selectbox("Visa", [""] + visas,
-                                   index=(visas.index(row["Visa"])+1 if row["Visa"] in visas else 0),
-                                   key=f"mod_visa_{SID}")
+        # --- Filtres (clés préfixées "an_")
+        a1, a2, a3, a4, a5 = st.columns(5)
+        fy = a1.multiselect("Année", yearsA, default=[], key=f"an_years_{SID}")
+        fm = a2.multiselect("Mois (MM)", monthsA, default=[], key=f"an_months_{SID}")
+        fc = a3.multiselect("Catégorie", catsA, default=[], key=f"an_cats_{SID}")
+        fs = a4.multiselect("Sous-catégorie", subsA, default=[], key=f"an_subs_{SID}")
+        fv = a5.multiselect("Visa", visasA, default=[], key=f"an_visas_{SID}")
 
-            f1, f2 = st.columns(2)
-            honor = f1.number_input("Montant honoraires (US $)", 0.0,
-                                    value=float(row["Montant honoraires (US $)"]), step=50.0, key=f"mod_h_{SID}")
-            other = f2.number_input("Autres frais (US $)", 0.0,
-                                    value=float(row["Autres frais (US $)"]), step=20.0, key=f"mod_o_{SID}")
-            comment = st.text_area("Commentaires / détails autres frais", value=_safe_str(row.get("Commentaires","")),
-                                   key=f"mod_comm_{SID}")
+        # Copie & coercition num
+        dfA = df_all.copy()
+        for coln in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+            if coln in dfA.columns:
+                dfA[coln] = _safe_num_series(dfA, coln)
 
-            s1, s2, s3, s4, s5 = st.columns(5)
-            sent = s1.checkbox("Envoyé", value=bool(row["Dossier envoyé"]), key=f"mod_sent_{SID}")
-            acc  = s2.checkbox("Accepté", value=bool(row["Dossier accepté"]), key=f"mod_acc_{SID}")
-            ref  = s3.checkbox("Refusé", value=bool(row["Dossier refusé"]), key=f"mod_ref_{SID}")
-            ann  = s4.checkbox("Annulé", value=bool(row["Dossier annulé"]), key=f"mod_ann_{SID}")
-            rfe  = s5.checkbox("RFE", value=bool(row["RFE"]), key=f"mod_rfe_{SID}")
+        # Application filtres
+        if fy: dfA = dfA[dfA.get("_Année_", "").isin(fy)]
+        if fm: dfA = dfA[dfA.get("Mois", "").astype(str).isin(fm)]
+        if fc: dfA = dfA[dfA.get("Categorie", "").astype(str).isin(fc)]
+        if fs: dfA = dfA[dfA.get("Sous-categorie", "").astype(str).isin(fs)]
+        if fv: dfA = dfA[dfA.get("Visa", "").astype(str).isin(fv)]
 
-            if st.button("💾 Sauvegarder", key=f"mod_save_{SID}"):
-                total = honor + other
-                reste = total - float(row.get("Payé", 0))
-                for k,v in {
-                    "Nom": nom, "Date": dt, "Mois": mois,
-                    "Categorie": sel_cat, "Sous-categorie": sel_sub, "Visa": visa_final,
-                    "Montant honoraires (US $)": honor, "Autres frais (US $)": other,
-                    "Commentaires": comment, "Total (US $)": total, "Reste": reste,
-                    "Dossier envoyé": 1 if sent else 0, "Dossier accepté": 1 if acc else 0,
-                    "Dossier refusé": 1 if ref else 0, "Dossier annulé": 1 if ann else 0, "RFE": 1 if rfe else 0
-                }.items():
-                    df_live.at[idx, k] = v
-                _write_clients(df_live, clients_path)
-                st.success("Client modifié ✅")
-                st.cache_data.clear()
-                st.rerun()
+        # --- KPI compacts (la classe CSS .small-metrics doit être définie en partie 1)
+        st.markdown('<div class="small-metrics">', unsafe_allow_html=True)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Dossiers", f"{len(dfA)}")
+        k2.metric("Honoraires", _fmt_money_us(float(dfA.get(HONO, pd.Series(dtype=float)).sum())))
+        k3.metric("Payé",      _fmt_money_us(float(dfA.get("Payé", pd.Series(dtype=float)).sum())))
+        k4.metric("Reste",     _fmt_money_us(float(dfA.get("Reste", pd.Series(dtype=float)).sum())))
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------------- SUPPRESSION ----------------
-elif op == "Supprimer":
-    st.markdown("### 🗑️ Supprimer un client")
-    if df_live.empty:
+        # --- % par catégorie / sous-catégorie
+        st.markdown("#### Répartition & %")
+        cL, cR = st.columns(2)
+
+        if not dfA.empty and "Categorie" in dfA.columns:
+            vc = (dfA.groupby("Categorie", as_index=False)
+                    .agg(N=("Categorie","size"),
+                         Honoraires=(HONO,"sum") if HONO in dfA else ("Categorie","size")))
+            totN = int(vc["N"].sum() or 1)
+            vc["% Dossiers"] = (vc["N"]/totN*100).round(1)
+            with cL:
+                st.dataframe(vc.sort_values("N", ascending=False),
+                             use_container_width=True, height=260, key=f"an_vc_{SID}")
+
+        if not dfA.empty and "Sous-categorie" in dfA.columns:
+            vs = (dfA.groupby("Sous-categorie", as_index=False)
+                    .agg(N=("Sous-categorie","size"),
+                         Honoraires=(HONO,"sum") if HONO in dfA else ("Sous-categorie","size")))
+            totNs = int(vs["N"].sum() or 1)
+            vs["% Dossiers"] = (vs["N"]/totNs*100).round(1)
+            with cR:
+                st.dataframe(vs.sort_values("N", ascending=False).head(25),
+                             use_container_width=True, height=260, key=f"an_vs_{SID}")
+
+        # --- Graph : Dossiers par catégorie
+        if not dfA.empty and "Categorie" in dfA.columns:
+            st.markdown("#### 📊 Dossiers par catégorie")
+            g1 = (dfA.groupby("Categorie", as_index=False).size().rename(columns={"size":"Nombre"}))
+            st.bar_chart(g1.set_index("Categorie"))
+
+        # --- Graph : Honoraires par mois
+        if not dfA.empty and "Mois" in dfA.columns and HONO in dfA.columns:
+            st.markdown("#### 📈 Honoraires par mois")
+            tmp = dfA.copy()
+            tmp["Mois"] = tmp["Mois"].astype(str)
+            gm = (tmp.groupby("Mois", as_index=False)[HONO].sum()
+                    .reindex([f"{m:02d}" for m in range(1,13)], fill_value=0)
+                    .sort_values("Mois"))
+            st.line_chart(gm.set_index("Mois"))
+
+        # --- Comparaison période A vs B (clés préfixées "cmp_")
+        st.markdown("#### 🔁 Comparaison de périodes (A vs B)")
+        ca1, ca2, cb1, cb2 = st.columns(4)
+        pa_years = ca1.multiselect("Année (A)", yearsA, default=[], key=f"cmp_ya_{SID}")
+        pa_month = ca2.multiselect("Mois (A)", monthsA, default=[], key=f"cmp_ma_{SID}")
+        pb_years = cb1.multiselect("Année (B)", yearsA, default=[], key=f"cmp_yb_{SID}")
+        pb_month = cb2.multiselect("Mois (B)", monthsA, default=[], key=f"cmp_mb_{SID}")
+
+        def _filter_period(base, ys, ms):
+            d = base.copy()
+            for coln in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+                if coln in d.columns:
+                    d[coln] = _safe_num_series(d, coln)
+            if ys: d = d[d.get("_Année_", "").isin(ys)]
+            if ms: d = d[d.get("Mois", "").astype(str).isin(ms)]
+            return d
+
+        dfA_A = _filter_period(df_all, pa_years, pa_month)
+        dfA_B = _filter_period(df_all, pb_years, pb_month)
+
+        cpa, cpb = st.columns(2)
+        with cpa:
+            st.metric("A — Dossiers", f"{len(dfA_A)}")
+            st.metric("A — Honoraires", _fmt_money_us(float(dfA_A.get(HONO, pd.Series(dtype=float)).sum())))
+        with cpb:
+            st.metric("B — Dossiers", f"{len(dfA_B)}")
+            st.metric("B — Honoraires", _fmt_money_us(float(dfA_B.get(HONO, pd.Series(dtype=float)).sum())))
+
+        # --- Comparaison par mois (barres groupées)
+        st.markdown("##### Comparaison par mois")
+        def _mk_month_series(d):
+            if d.empty or "Mois" not in d.columns or HONO not in d.columns:
+                return pd.DataFrame({"Mois": [], "Honoraires": []})
+            t = d.copy()
+            t["Mois"] = t["Mois"].astype(str)
+            return (t.groupby("Mois", as_index=False)[HONO].sum()
+                     .reindex([f"{m:02d}" for m in range(1,13)], fill_value=0)
+                     .rename(columns={HONO:"Honoraires"}))
+
+        A = _mk_month_series(dfA_A); A["Période"] = "A"
+        B = _mk_month_series(dfA_B); B["Période"] = "B"
+        comp = pd.concat([A, B], ignore_index=True)
+        if not comp.empty:
+            wide = comp.pivot_table(index="Mois", columns="Période", values="Honoraires", fill_value=0)
+            st.bar_chart(wide)
+
+        # --- Détails filtrés
+        st.markdown("#### 🧾 Détails des dossiers filtrés")
+        det = dfA.copy()
+        for c in [HONO, AUTRE, TOTAL, "Payé", "Reste"]:
+            if c in det.columns:
+                det[c] = _safe_num_series(det, c).map(_fmt_money_us)
+        if "Date" in det.columns:
+            try:
+                det["Date"] = pd.to_datetime(det["Date"], errors="coerce").dt.date.astype(str)
+            except Exception:
+                det["Date"] = det["Date"].astype(str)
+
+        show_cols = [c for c in [
+            DOSSIER_COL,"ID_Client","Nom","Categorie","Sous-categorie","Visa","Date","Mois",
+            HONO, AUTRE, TOTAL, "Payé", "Reste",
+            "Dossier envoyé","Dossier accepté","Dossier refusé","Dossier annulé","RFE"
+        ] if c in det.columns]
+
+        sort_cols = [c for c in ["_Année_","_MoisNum_","Categorie","Nom"] if c in det.columns]
+        det_sorted = det.sort_values(by=sort_cols) if sort_cols else det
+        det_sorted = det_sorted.loc[:, ~det_sorted.columns.duplicated()].copy()
+
+        st.dataframe(det_sorted[show_cols].reset_index(drop=True),
+                     use_container_width=True, key=f"an_tbl_{SID}")
+
+
+# ==============================================
+# 🏦 ONGLET : Escrow — synthèse compacte
+# ==============================================
+with tabs[2]:
+    st.subheader("🏦 Escrow — synthèse")
+    if df_all.empty:
         st.info("Aucun client.")
     else:
-        noms = sorted(df_live["Nom"].dropna().astype(str).unique().tolist())
-        sel = st.selectbox("Choisir le client", [""] + noms, key=f"del_sel_{SID}")
-        if sel:
-            if st.button("❗ Confirmer la suppression", key=f"btn_del_{SID}"):
-                df_new = df_live[df_live["Nom"] != sel]
-                _write_clients(df_new, clients_path)
-                st.success("Client supprimé.")
-                st.cache_data.clear()
-                st.rerun()
+        dfE = df_all.copy()
+        for coln in [TOTAL, "Payé", "Reste"]:
+            if coln in dfE.columns:
+                dfE[coln] = _safe_num_series(dfE, coln)
 
+        # KPI compacts
+        st.markdown('<div class="small-metrics">', unsafe_allow_html=True)
+        t1, t2, t3 = st.columns(3)
+        t1.metric("Total (US $)", _fmt_money_us(float(dfE.get(TOTAL, pd.Series(dtype=float)).sum())))
+        t2.metric("Payé",         _fmt_money_us(float(dfE.get("Payé", pd.Series(dtype=float)).sum())))
+        t3.metric("Reste",        _fmt_money_us(float(dfE.get("Reste", pd.Series(dtype=float)).sum())))
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# ==============================================================
-# 💾  Export global ZIP (Clients + Visa)
-# ==============================================================
-st.markdown("---")
-st.subheader("💾 Export global")
-if st.button("Préparer archive ZIP", key=f"zip_{SID}"):
-    try:
-        buf = BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            with BytesIO() as xbuf:
-                with pd.ExcelWriter(xbuf, engine="openpyxl") as wr:
-                    df_live.to_excel(wr, sheet_name=SHEET_CLIENTS, index=False)
-                zf.writestr("Clients.xlsx", xbuf.getvalue())
-            zf.write(visa_path, "Visa.xlsx")
-        st.session_state[f"zip_export_{SID}"] = buf.getvalue()
-        st.success("Archive prête ✅")
-    except Exception as e:
-        st.error(f"Erreur export : {e}")
+        agg_cols = [c for c in [TOTAL, "Payé", "Reste"] if c in dfE.columns]
+        agg = dfE.groupby("Categorie", as_index=False)[agg_cols].sum()
+        if TOTAL in agg and "Payé" in agg:
+            agg["% Payé"] = ((agg["Payé"] / agg[TOTAL]).replace([pd.NA, pd.NaT], 0).fillna(0.0)*100).round(1)
 
-if st.session_state.get(f"zip_export_{SID}"):
-    st.download_button(
-        "⬇️ Télécharger Export (ZIP)",
-        data=st.session_state[f"zip_export_{SID}"],
-        file_name="Export_Visa_Manager.zip",
-        mime="application/zip",
-        key=f"zip_dl_{SID}"
-    )
+        st.dataframe(agg.sort_values(by=TOTAL if TOTAL in agg else agg_cols[0], ascending=False),
+                     use_container_width=True, key=f"esc_agg_{SID}")
