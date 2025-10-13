@@ -711,19 +711,13 @@ with tabs[2]:
 
 
 
-
 # ==============================================
 # 👤 PARTIE 4 / 4 — Clients & Gestion & Export
-#  - Clients : fiche compte client + historique paiements + ajout paiement
-#  - Gestion : Ajouter / Modifier / Supprimer un client
-#  - Export : ZIP (Clients + Visa)
 # ==============================================
 
-# -------------- utilitaires paiements --------------
+# ------------------ utilitaires paiements ------------------
 def _parse_payments(obj: Any) -> List[dict]:
-    """Toujours retourner une liste de paiements [{date, mode, montant}]"""
     if isinstance(obj, list):
-        # lisible déjà
         out = []
         for x in obj:
             if isinstance(x, dict):
@@ -748,14 +742,13 @@ def _payments_to_str(lst: List[dict]) -> str:
 def _sum_payments(lst: List[dict]) -> float:
     return float(sum(float(x.get("montant", 0.0)) for x in lst))
 
-# -------------- Onglet Clients (fiche + paiements) --------------
+# ------------------ ONGLET CLIENTS ------------------
 with tabs[3]:
     st.subheader("👤 Clients — Fiche & compte")
 
     if df_all.empty:
         st.info("Aucun client chargé.")
     else:
-        # Sélecteurs d’identification
         left, right = st.columns([2,2])
         names = sorted(df_all["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_all.columns else []
         ids   = sorted(df_all["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_all.columns else []
@@ -785,18 +778,29 @@ with tabs[3]:
             c3.write(f"**Sous-catégorie** : {_safe_str(row.get('Sous-categorie',''))}")
             st.write(f"**Visa** : {_safe_str(row.get('Visa',''))}")
 
-            # Statuts + dates (lecture seule)
+            # ✅ Bloc statuts corrigé
             st.markdown("#### 🗂️ Statuts")
+            envoye = int(row.get("Dossier envoyé", 0) or 0) == 1
+            accepte = int(row.get("Dossier accepté", 0) or 0) == 1
+            refuse  = int(row.get("Dossier refusé", 0) or 0) == 1
+            annule  = int(row.get("Dossier annulé", 0) or 0) == 1
+            rfe     = int(row.get("RFE", 0) or 0) == 1
+
+            date_env = _safe_str(row.get("Date d'envoi", ""))
+            date_acc = _safe_str(row.get("Date d'acceptation", ""))
+            date_ref = _safe_str(row.get("Date de refus", ""))
+            date_ann = _safe_str(row.get("Date d'annulation", ""))
+
             s1, s2, s3, s4, s5 = st.columns(5)
-            s1.write(f"Envoyé : {'✅' if int(row.get('Dossier envoyé',0) or 0)==1 else '—'}")
-            s1.write(f"Date : {_safe_str(row.get(\"Date d'envoi\",\"\"))}")
-            s2.write(f"Accepté : {'✅' if int(row.get('Dossier accepté',0) or 0)==1 else '—'}")
-            s2.write(f"Date : {_safe_str(row.get('Date d'\"acceptation",""))}")  # affichage simple
-            s3.write(f"Refusé : {'✅' if int(row.get('Dossier refusé',0) or 0)==1 else '—'}")
-            s3.write(f"Date : {_safe_str(row.get('Date de refus',''))}")
-            s4.write(f"Annulé : {'✅' if int(row.get('Dossier annulé',0) or 0)==1 else '—'}")
-            s4.write(f"Date : {_safe_str(row.get('Date d'annulation',''))}")
-            s5.write(f"RFE : {'✅' if int(row.get('RFE',0) or 0)==1 else '—'}")
+            s1.write(f"Envoyé : {'✅' if envoye else '—'}")
+            s1.write(f"Date : {date_env}")
+            s2.write(f"Accepté : {'✅' if accepte else '—'}")
+            s2.write(f"Date : {date_acc}")
+            s3.write(f"Refusé : {'✅' if refuse else '—'}")
+            s3.write(f"Date : {date_ref}")
+            s4.write(f"Annulé : {'✅' if annule else '—'}")
+            s4.write(f"Date : {date_ann}")
+            s5.write(f"RFE : {'✅' if rfe else '—'}")
 
             # Paiements
             st.markdown("#### 💳 Paiements")
@@ -809,6 +813,7 @@ with tabs[3]:
             else:
                 st.info("Aucun paiement saisi.")
 
+            # ➕ ajout paiement
             st.markdown("##### ➕ Ajouter un paiement")
             pc1, pc2, pc3, pc4 = st.columns([1,1,1,1])
             pdate = pc1.date_input("Date paiement", value=date.today(), key=skey("cli","addpay_date"))
@@ -822,7 +827,6 @@ with tabs[3]:
                 if pamt <= 0:
                     st.warning("Le montant doit être > 0.")
                 else:
-                    # recharger DF depuis disque pour éviter décalage
                     live = _read_clients(clients_path)
                     lmask = None
                     if sel_id:
@@ -840,7 +844,6 @@ with tabs[3]:
                             "montant": float(pamt),
                         })
                         live.at[idx, "Paiements"] = plist
-                        # recalcul Payé/Reste
                         honor = float(_safe_num_series(live, HONO).iloc[idx])
                         other = float(_safe_num_series(live, AUTRE).iloc[idx])
                         live.at[idx, TOTAL] = honor + other
@@ -852,6 +855,9 @@ with tabs[3]:
                         st.rerun()
         else:
             st.info("Sélectionnez un client.")
+
+# -------------- GESTION & EXPORT (inchangés) --------------
+# [tu peux conserver le reste de la partie 4 que je t’ai envoyée précédemment sans aucune modification]
 
 # -------------- Onglet Gestion (CRUD complet) --------------
 with tabs[4]:
