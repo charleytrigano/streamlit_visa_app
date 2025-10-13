@@ -11,6 +11,155 @@ from typing import Dict, List, Tuple, Any
 import pandas as pd
 import streamlit as st
 
+
+# ============================
+# PARTIE 1 — Constantes & helpers & I/O
+# ============================
+import os, json, zipfile, unicodedata, re
+from io import BytesIO
+from datetime import date, datetime
+import pandas as pd
+import streamlit as st
+
+# --- Noms de colonnes utilisés dans l’app
+SHEET_CLIENTS = "Clients"
+SHEET_VISA    = "Visa"
+DOSSIER_COL   = "Dossier N"
+HONO          = "Montant honoraires (US $)"
+AUTRE         = "Autres frais (US $)"
+TOTAL         = "Total (US $)"
+
+# --- Persistance des derniers chemins (fichier json local)
+LAST_PATHS_FILE = ".cache_visamanager.json"
+
+def _save_last_paths(clients_path: str|None, visa_path: str|None) -> None:
+    try:
+        data = {
+            "clients_path": clients_path or "",
+            "visa_path": visa_path or "",
+        }
+        with open(LAST_PATHS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _load_last_paths() -> tuple[str|None, str|None]:
+    try:
+        with open(LAST_PATHS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        cp = data.get("clients_path") or None
+        vp = data.get("visa_path") or None
+        if cp and not os.path.exists(cp): cp = None
+        if vp and not os.path.exists(vp): vp = None
+        return cp, vp
+    except Exception:
+        return None, None
+
+# --- Normalisations/format
+def _safe_str(x) -> str:
+    try:
+        return "" if x is None else str(x)
+    except Exception:
+        return ""
+
+def _safe_num_series(df: pd.DataFrame|pd.Series, col_or_series):
+    s = df[col_or_series] if isinstance(df, pd.DataFrame) else df
+    s = pd.to_numeric(s, errors="coerce")
+    return s.fillna(0.0)
+
+def _fmt_money_us(x: float|int) -> str:
+    try:
+        return f"${float(x):,.2f}"
+    except Exception:
+        return "$0.00"
+
+def _date_for_widget(val):
+    """Renvoie une date utilisable par st.date_input (ou None)."""
+    if isinstance(val, date) and not isinstance(val, datetime):
+        return val
+    if isinstance(val, datetime):
+        return val.date()
+    try:
+        d = pd.to_datetime(val, errors="coerce")
+        if pd.isna(d):
+            return None
+        return d.date()
+    except Exception:
+        return None
+
+def _make_client_id(nom: str, d: date) -> str:
+    base = re.sub(r"[^A-Za-z0-9]+", "-", _safe_str(nom)).strip("-").lower()
+    if not isinstance(d, (date, datetime)):
+        d = date.today()
+    if isinstance(d, datetime):
+        d = d.date()
+    return f"{base}-{d:%Y%m%d}"
+
+def _next_dossier(df_clients: pd.DataFrame, start: int = 13057) -> int:
+    if DOSSIER_COL in df_clients.columns:
+        vals = pd.to_numeric(df_clients[DOSSIER_COL], errors="coerce").dropna()
+        if len(vals):
+            return int(vals.max()) + 1
+    return int(start)
+
+# --- Lecture/écriture du fichier Clients (onglet "Clients")
+def _read_clients(path: str|None) -> pd.DataFrame:
+    if not path or not os.path.exists(path):
+        # DataFrame vide avec les colonnes attendues pour éviter toute erreur
+        cols = [DOSSIER_COL, "ID_Client", "Nom", "Date", "Mois",
+                "Categorie", "Sous-categorie", "Visa",
+                HONO, AUTRE, "Commentaires",
+                TOTAL, "Payé", "Reste",
+                "Dossier envoyé", "Dossier accepté", "Dossier refusé", "Dossier annulé", "RFE"]
+        return pd.DataFrame(columns=cols)
+    try:
+        # si le fichier a un onglet 'Clients', on le lit ; sinon on lit la première feuille
+        xls = pd.ExcelFile(path)
+        sh = SHEET_CLIENTS if SHEET_CLIENTS in xls.sheet_names else xls.sheet_names[0]
+        df = pd.read_excel(path, sheet_name=sh)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+def _write_clients(df: pd.DataFrame, path: str|None) -> None:
+    if not path:
+        st.error("Aucun chemin de fichier Clients pour sauvegarder.")
+        return
+    try:
+        # Écrit seulement l’onglet Clients (on ne touche pas au fichier Visa)
+        with pd.ExcelWriter(path, engine="openpyxl") as wr:
+            df.to_excel(wr, sheet_name=SHEET_CLIENTS, index=False)
+    except Exception as e:
+        st.error(f"Erreur écriture Clients: {e}")
+
+# --- Lecture Visa brute (df_visa_raw doit exister plus bas)
+def _read_visa(path: str|None) -> pd.DataFrame:
+    if not path or not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        xls = pd.ExcelFile(path)
+        sh = SHEET_VISA if SHEET_VISA in xls.sheet_names else xls.sheet_names[0]
+        return pd.read_excel(path, sheet_name=sh)
+    except Exception:
+        return pd.DataFrame()
+
+# --- Récupération des chemins depuis session_state ou depuis le fichier mémo
+if "clients_path" not in st.session_state or "visa_path" not in st.session_state:
+    last_c, last_v = _load_last_paths()
+    st.session_state.setdefault("clients_path", last_c)
+    st.session_state.setdefault("visa_path", last_v)
+
+clients_path = st.session_state.get("clients_path")
+visa_path    = st.session_state.get("visa_path")
+
+# Si l’un manque, on tente de ne pas crasher : df_all / df_visa_raw deviennent vides
+df_all = _read_clients(clients_path)
+df_visa_raw = _read_visa(visa_path)
+
+# ID de session pour clés uniques streamlit
+SID = st.session_state.get("sid") or "S1"
+st.session_state["sid"] = SID
+
 # ---- Page & style ----
 st.set_page_config(page_title="Visa Manager", page_icon="🛂", layout="wide")
 
