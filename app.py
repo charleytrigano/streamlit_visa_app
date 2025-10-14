@@ -1,6 +1,7 @@
- # ================================
-# PARTIE 1/6 — Imports & Utils
-# ================================
+ # =======================================================
+# 🛂 VISA MANAGER — Application principale Streamlit
+# =======================================================
+
 from __future__ import annotations
 
 import streamlit as st
@@ -8,7 +9,8 @@ import pandas as pd
 import numpy as np
 from datetime import date, datetime
 import plotly.express as px
-import io, os, jso
+import os, io, json, re
+
 
 # -----------------------------
 # Constantes
