@@ -474,13 +474,204 @@ with tabs[2]:
         st.dataframe(agg.sort_values("Total (US $)", ascending=False), use_container_width=True, height=380)
         st.caption("NB : on peut spécialiser l’Escrow pour suivre les honoraires encaissés avant envoi et signaler les transferts à faire quand « Dossier envoyé » est coché.")
 
-PARTIE 5/6 — 👤 Compte client & 🧾 Gestion (CRUD)
+# ===============================================
+# PARTIE 5/6 - Compte client & Gestion (CRUD)
 # ===============================================
 
 # ---------- Compte client ----------
 with tabs[3]:
     st.subheader("👤 Compte client — suivi dossier")
+    if df_all.empty:
+        st.info("Aucun client.")
+    else:
+        ids = df_all["ID_Client"].dropna().astype(str).unique().tolist() if "ID_Client" in df_all.columns else []
+        sel = st.selectbox("Choisir un client", [""] + sorted(ids), index=0, key=f"acct_sel_{SID}")
+        if sel:
+            row = df_all[df_all["ID_Client"].astype(str) == sel].iloc[0].copy()
+            st.markdown(f"**Nom :** {_safe_str(row.get('Nom',''))}  |  **Visa :** {_safe_str(row.get('Visa',''))}")
 
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Honoraires+Frais", _fmt_money(float(_to_num(row.get("Total (US $)", 0.0)))))
+            c2.metric("Payé", _fmt_money(float(_to_num(row.get("Payé", 0.0)))))
+            c3.metric("Solde", _fmt_money(float(_to_num(row.get("Solde", 0.0)))))
+            sent = int(_to_num(row.get("Dossier envoyé", 0)) or 0)
+            c4.metric("Envoyé", "Oui" if sent == 1 else "Non")
+
+            st.markdown("#### Chronologie")
+            s1, s2 = st.columns(2)
+            s1.write(f"- Date création : {_safe_str(row.get('Date',''))}")
+            s1.write(f"- Dossier envoyé : {int(_to_num(row.get('Dossier envoyé',0)) or 0)}  | Date : {_safe_str(row.get('Date d'envoi',''))}")
+            s1.write(f"- Dossier approuvé : {int(_to_num(row.get('Dossier approuvé',0)) or 0)}  | Date : {_safe_str(row.get('Date d' 'acceptation',''))}")
+            s2.write(f"- Dossier refusé : {int(_to_num(row.get('Dossier refusé',0)) or 0)}  | Date : {_safe_str(row.get('Date de refus',''))}")
+            s2.write(f"- Dossier annulé : {int(_to_num(row.get('Dossier annulé',0)) or 0)}  | Date : {_safe_str(row.get('Date d' 'annulation',''))}")
+            st.write(f"- RFE : {int(_to_num(row.get('RFE',0)) or 0)}")
+            st.write(f"- Commentaires : {_safe_str(row.get('Commentaires',''))}")
+
+# ---------- Gestion (CRUD) ----------
+with tabs[4]:
+    st.subheader("🧾 Gestion des clients (Ajouter / Modifier / Supprimer)")
+    if df_all.empty:
+        st.info("Aucun client chargé.")
+    else:
+        op = st.radio("Action", ["Ajouter", "Modifier", "Supprimer"], horizontal=True, key=f"crud_op_{SID}")
+
+        df_live = df_all.copy()
+
+        # ------- Ajouter -------
+        if op == "Ajouter":
+            st.markdown("### ➕ Ajouter un client")
+            d1, d2, d3 = st.columns(3)
+            nom  = d1.text_input("Nom", "", key=f"add_nom_{SID}")
+            dte  = d2.date_input("Date de création", value=date.today(), key=f"add_date_{SID}")
+            mois = d3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1,13)], index=date.today().month-1, key=f"add_mois_{SID}")
+
+            f1, f2 = st.columns(2)
+            cat = f1.text_input("Catégories", "", key=f"add_cat_{SID}")
+            sub = f2.text_input("Sous-catégorie", "", key=f"add_sub_{SID}")
+            vis = st.text_input("Visa", "", key=f"add_visa_{SID}")
+
+            g1, g2 = st.columns(2)
+            honor = g1.number_input("Montant honoraires (US $)", min_value=0.0, value=0.0, step=50.0, format="%.2f", key=f"add_h_{SID}")
+            other = g2.number_input("Autres frais (US $)", min_value=0.0, value=0.0, step=20.0, format="%.2f", key=f"add_o_{SID}")
+            comm  = st.text_area("Commentaires (pour Autres frais, précisions…)", "", key=f"add_comm_{SID}")
+
+            st.markdown("#### Statuts")
+            s1, s2, s3, s4, s5 = st.columns(5)
+            sent   = s1.checkbox("Dossier envoyé", key=f"add_sent_{SID}")
+            sent_d = s1.date_input("Date d'envoi", value=None, key=f"add_sentd_{SID}")
+            acc    = s2.checkbox("Dossier approuvé", key=f"add_acc_{SID}")
+            acc_d  = s2.date_input("Date d'acceptation", value=None, key=f"add_accd_{SID}")
+            ref    = s3.checkbox("Dossier refusé", key=f"add_ref_{SID}")
+            ref_d  = s3.date_input("Date de refus", value=None, key=f"add_refd_{SID}")
+            ann    = s4.checkbox("Dossier annulé", key=f"add_ann_{SID}")
+            ann_d  = s4.date_input("Date d'annulation", value=None, key=f"add_annd_{SID}")
+            rfe    = s5.checkbox("RFE", key=f"add_rfe_{SID}")
+
+            if rfe and not any([sent, acc, ref, ann]):
+                st.warning("RFE ne peut être coché qu’avec un autre statut (envoyé / approuvé / refusé / annulé).")
+
+            if st.button("💾 Enregistrer le client", key=f"btn_add_{SID}"):
+                if not nom:
+                    st.warning("Nom requis.")
+                    st.stop()
+                total = float(honor) + float(other)
+                paye  = 0.0
+                solde = max(0.0, total - paye)
+                base = _safe_str(nom).strip().replace(" ", "_")
+                did = f"{base}-{dte.strftime('%Y%m%d')}"
+                next_dossier = 13057
+                if "Dossier N" in df_live.columns and pd.to_numeric(df_live["Dossier N"], errors="coerce").notna().any():
+                    next_dossier = int(pd.to_numeric(df_live["Dossier N"], errors="coerce").max() or 13056) + 1
+
+                new_row = {
+                    "ID_Client": did,
+                    "Dossier N": next_dossier,
+                    "Nom": nom,
+                    "Date": dte,
+                    "Mois": f"{int(mois):02d}",
+                    "Categories": cat, "Sous-categorie": sub, "Visa": vis,
+                    "Montant honoraires (US $)": float(honor),
+                    "Autres frais (US $)": float(other),
+                    "Total (US $)": total,
+                    "Payé": paye,
+                    "Solde": solde,
+                    "Acompte 1": 0.0, "Acompte 2": 0.0,
+                    "Dossier envoyé": 1 if sent else 0,
+                    "Date d'envoi": sent_d if sent_d else (dte if sent else None),
+                    "Dossier approuvé": 1 if acc else 0, "Date d'acceptation": acc_d if acc_d else None,
+                    "Dossier refusé": 1 if ref else 0, "Date de refus": ref_d if ref_d else None,
+                    "Dossier annulé": 1 if ann else 0, "Date d'annulation": ann_d if ann_d else None,
+                    "RFE": 1 if rfe else 0,
+                    "Commentaires": comm,
+                }
+                df_new = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
+                df_all = _normalize_client_df(df_new)
+                st.success("Client ajouté (mémoire runtime). Utilise l’export pour sauvegarder sur disque.")
+
+        # ------- Modifier -------
+        elif op == "Modifier":
+            st.markdown("### ✏️ Modifier un client")
+            names = sorted(df_live["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_live.columns else []
+            target = st.selectbox("ID_Client", [""] + names, index=0, key=f"mod_id_{SID}")
+            if target:
+                idx = df_live[df_live["ID_Client"].astype(str) == target].index[0]
+                row = df_live.loc[idx].copy()
+
+                d1, d2, d3 = st.columns(3)
+                nom  = d1.text_input("Nom", _safe_str(row.get("Nom","")), key=f"mod_nomv_{SID}")
+                dval = _date_for_widget(row.get("Date"))
+                dte  = d2.date_input("Date de création", value=dval, key=f"mod_date_{SID}")
+                mois = d3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1,13)],
+                                    index=(int(_safe_str(row.get("Mois","01"))) - 1 if str(row.get("Mois","01")).isdigit() else 0),
+                                    key=f"mod_mois_{SID}")
+
+                f1, f2, f3 = st.columns(3)
+                cat = f1.text_input("Catégories", _safe_str(row.get("Categories","")), key=f"mod_cat_{SID}")
+                sub = f2.text_input("Sous-catégorie", _safe_str(row.get("Sous-categorie","")), key=f"mod_sub_{SID}")
+                vis = f3.text_input("Visa", _safe_str(row.get("Visa","")), key=f"mod_visa_{SID}")
+
+                g1, g2, g3 = st.columns(3)
+                honor = g1.number_input("Montant honoraires (US $)", min_value=0.0,
+                                        value=float(_to_num(row.get("Montant honoraires (US $)",0.0))),
+                                        step=50.0, format="%.2f", key=f"mod_h_{SID}")
+                other = g2.number_input("Autres frais (US $)", min_value=0.0,
+                                        value=float(_to_num(row.get("Autres frais (US $)",0.0))),
+                                        step=20.0, format="%.2f", key=f"mod_o_{SID}")
+                comm  = g3.text_input("Commentaires", _safe_str(row.get("Commentaires","")), key=f"mod_comm_{SID}")
+
+                st.markdown("#### Statuts")
+                s1, s2, s3, s4, s5 = st.columns(5)
+                sent   = s1.checkbox("Dossier envoyé", value=bool(int(_to_num(row.get("Dossier envoyé",0)) or 0)), key=f"mod_sent_{SID}")
+                sent_d = s1.date_input("Date d'envoi", value=_date_for_widget(row.get("Date d'envoi")), key=f"mod_sentd_{SID}")
+                acc    = s2.checkbox("Dossier approuvé", value=bool(int(_to_num(row.get("Dossier approuvé",0)) or 0)), key=f"mod_acc_{SID}")
+                acc_d  = s2.date_input("Date d'acceptation", value=_date_for_widget(row.get("Date d'acceptation")), key=f"mod_accd_{SID}")
+                ref    = s3.checkbox("Dossier refusé", value=bool(int(_to_num(row.get("Dossier refusé",0)) or 0)), key=f"mod_ref_{SID}")
+                ref_d  = s3.date_input("Date de refus", value=_date_for_widget(row.get("Date de refus")), key=f"mod_refd_{SID}")
+                ann    = s4.checkbox("Dossier annulé", value=bool(int(_to_num(row.get("Dossier annulé",0)) or 0)), key=f"mod_ann_{SID}")
+                ann_d  = s4.date_input("Date d'annulation", value=_date_for_widget(row.get("Date d'annulation")), key=f"mod_annd_{SID}")
+                rfe    = s5.checkbox("RFE", value=bool(int(_to_num(row.get("RFE",0)) or 0)), key=f"mod_rfe_{SID}")
+
+                if st.button("💾 Enregistrer les modifications", key=f"btn_mod_{SID}"):
+                    total = float(honor) + float(other)
+                    paye  = float(_to_num(row.get("Payé",0.0)))
+                    solde = max(0.0, total - paye)
+
+                    df_live.at[idx, "Nom"]  = nom
+                    df_live.at[idx, "Date"] = dte
+                    df_live.at[idx, "Mois"] = f"{int(mois):02d}"
+                    df_live.at[idx, "Categories"] = cat
+                    df_live.at[idx, "Sous-categorie"] = sub
+                    df_live.at[idx, "Visa"] = vis
+                    df_live.at[idx, "Montant honoraires (US $)"] = float(honor)
+                    df_live.at[idx, "Autres frais (US $)"]        = float(other)
+                    df_live.at[idx, "Total (US $)"]               = total
+                    df_live.at[idx, "Solde"]                      = solde
+                    df_live.at[idx, "Commentaires"]               = comm
+                    df_live.at[idx, "Dossier envoyé"]             = 1 if sent else 0
+                    df_live.at[idx, "Date d'envoi"]               = sent_d
+                    df_live.at[idx, "Dossier approuvé"]           = 1 if acc else 0
+                    df_live.at[idx, "Date d'acceptation"]         = acc_d
+                    df_live.at[idx, "Dossier refusé"]             = 1 if ref else 0
+                    df_live.at[idx, "Date de refus"]              = ref_d
+                    df_live.at[idx, "Dossier annulé"]             = 1 if ann else 0
+                    df_live.at[idx, "Date d'annulation"]          = ann_d
+                    df_live.at[idx, "RFE"]                         = 1 if rfe else 0
+
+                    df_all = _normalize_client_df(df_live)
+                    st.success("Modifications appliquées (mémoire runtime). Exporte pour sauvegarder.")
+
+        # ------- Supprimer -------
+        elif op == "Supprimer":
+            st.markdown("### 🗑️ Supprimer un client")
+            names = sorted(df_live["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_live.columns else []
+            target = st.selectbox("ID_Client", [""] + names, index=0, key=f"del_id_{SID}")
+            if target:
+                mask = df_live["ID_Client"].astype(str) == target
+                row = df_live[mask].iloc[0]
+                st.write({"Dossier N": row.get("Dossier N",""), "Nom": row.get("Nom",""), "Visa": row.get("Visa","")})
+                if st.button("❗ Confirmer la suppression", key=f"btn_del_{SID}"):
+                    df_all = _normalize_client_df(df_live[~mask].copy())
+                    st.success("Client supprimé (mémoire runtime). Exporte pour sauvegarder.")
 
  # ===============================================
 # PARTIE 6/6 — 📄 Visa (aperçu) & 💾 Export
