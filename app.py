@@ -425,9 +425,10 @@ with tabs[3]:
             else:
                 st.warning("Aucun chemin Clients pour sauvegarder.")
 
-# ================================
-# PARTIE 5/6 - Visa (aperçu)
-# ================================
+# ================================================
+# PARTIE 5/6 — 📄 Visa (aperçu)
+# ================================================
+
 SID5 = st.session_state.get("_sid", "p5")
 
 with tabs[5]:
@@ -436,38 +437,41 @@ with tabs[5]:
     if df_visa_raw is None or df_visa_raw.empty:
         st.info("Aucun fichier Visa chargé.")
     else:
-        # Colonnes de base attendues côté Visa
+        # Détection des colonnes Catégorie / Sous-catégorie
         base_cat_col = None
         for cand in ["Categorie", "Catégorie", "Category"]:
             if cand in df_visa_raw.columns:
                 base_cat_col = cand
                 break
+
         base_sub_col = None
-        for cand in ["Sous-categorie", "Sous-catégorie", "Sous-categories", "Sous-categories 1"]:
+        for cand in ["Sous-categorie", "Sous-catégorie", "Sous-categories"]:
             if cand in df_visa_raw.columns:
                 base_sub_col = cand
                 break
 
         if base_cat_col is None or base_sub_col is None:
             st.warning("Le fichier Visa ne contient pas les colonnes attendues (Catégorie / Sous-catégorie).")
-            st.dataframe(df_visa_raw, use_container_width=True, height=380, key=f"visa_preview_full_{SID5}")
+            st.dataframe(df_visa_raw, use_container_width=True, height=400, key=f"visa_preview_full_{SID5}")
             st.stop()
 
-        # Listes uniques
+        # Sélecteurs de catégorie / sous-catégorie
         cats = sorted(df_visa_raw[base_cat_col].dropna().astype(str).unique().tolist())
         c1, c2 = st.columns(2)
         sel_cat = c1.selectbox("Catégorie", [""] + cats, index=0, key=f"v_cat_{SID5}")
 
         subs = []
         if sel_cat:
-            subs = sorted(df_visa_raw.loc[df_visa_raw[base_cat_col].astype(str) == sel_cat, base_sub_col]
-                          .dropna().astype(str).unique().tolist())
+            subs = sorted(df_visa_raw.loc[
+                df_visa_raw[base_cat_col].astype(str) == sel_cat, base_sub_col
+            ].dropna().astype(str).unique().tolist())
+
         sel_sub = c2.selectbox("Sous-catégorie", [""] + subs, index=0, key=f"v_sub_{SID5}")
 
-        # Colonnes "options" = toutes les colonnes sauf base
+        # Colonnes à cocher (autres que base)
         option_cols = [c for c in df_visa_raw.columns if c not in {base_cat_col, base_sub_col, "Visa"}]
 
-        # Filtrage et affichage
+        # Filtrage du tableau
         filtered = df_visa_raw.copy()
         if sel_cat:
             filtered = filtered[filtered[base_cat_col].astype(str) == sel_cat]
@@ -475,9 +479,9 @@ with tabs[5]:
             filtered = filtered[filtered[base_sub_col].astype(str) == sel_sub]
 
         st.markdown("#### Tableau Visa filtré")
-        st.dataframe(filtered.reset_index(drop=True), use_container_width=True, height=320, key=f"visa_filtered_{SID5}")
+        st.dataframe(filtered.reset_index(drop=True), use_container_width=True, height=300, key=f"visa_filtered_{SID5}")
 
-        # Déduire les options disponibles (colonne = case cochée si valeur '1'/True)
+        # Détection des options cochées
         def _truthy(v):
             s = str(v).strip().lower()
             return s in {"1", "true", "yes", "y", "x", "oui"}
@@ -496,26 +500,49 @@ with tabs[5]:
             st.caption("Choisis une catégorie et une sous-catégorie pour voir les options.")
         else:
             if not available_options:
-                st.info("Aucune case cochée détectée pour cette sous-catégorie.")
+                st.info("Aucune option cochée détectée pour cette sous-catégorie.")
             else:
                 cols = st.columns(min(len(available_options), 4) or 1)
                 chosen = []
                 for i, opt in enumerate(sorted(available_options)):
                     with cols[i % len(cols)]:
-                        # Aperçu : on laisse cocher librement (ceci n’écrit rien, c’est purement illustratif)
                         ck = st.checkbox(opt, key=f"visa_opt_{SID5}_{i}")
                         if ck:
                             chosen.append(opt)
 
-                # Construction d'un label "Visa" à partir des choix (si besoin de tester)
-                visa_label = ""
-                if sel_sub and chosen:
-                    # Exemple : "B-1 COS" si "COS" est choisi
-                    visa_label = f"{sel_sub} {' '.join(chosen)}"
-                elif sel_sub:
-                    visa_label = sel_sub
+                # Construction du label final de Visa
+                visa_label = sel_sub
+                if chosen:
+                    visa_label += " - " + ", ".join(chosen)
 
                 st.markdown(f"**Visa proposé :** `{visa_label}`")
+
+        # Bloc d'affichage du statut du dossier
+        st.markdown("#### Statut du dossier (exemple de lecture)")
+        s1, s2 = st.columns(2)
+        with s1:
+            try:
+                envoye = int(_to_num(filtered.get("Dossier envoyé", [0])[0]) or 0)
+                approuve = int(_to_num(filtered.get("Dossier approuvé", [0])[0]) or 0)
+                refuse = int(_to_num(filtered.get("Dossier refusé", [0])[0]) or 0)
+                annule = int(_to_num(filtered.get("Dossier annulé", [0])[0]) or 0)
+                rfe = int(_to_num(filtered.get("RFE", [0])[0]) or 0)
+
+                parts = [
+                    f"Dossier envoyé : {envoye}",
+                    f"Approuvé : {approuve}",
+                    f"Refusé : {refuse}",
+                    f"Annulé : {annule}",
+                    f"RFE : {rfe}",
+                ]
+
+                date_envoi = _safe_str(filtered.get("Date d'envoi", [""])[0])
+                if date_envoi:
+                    parts.append(f"Date d'envoi : {date_envoi}")
+
+                s1.write(" | ".join(parts))
+            except Exception as e:
+                s1.error(f"Erreur lecture statut : {_safe_str(e)}")
 
 # =======================================================
 # PARTIE 6/6 - Analyses (sans Plotly) & Export
