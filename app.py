@@ -451,7 +451,7 @@ with tabs[5]:
     if df_visa_raw is None or df_visa_raw.empty:
         st.info("Aucun fichier Visa chargé.")
     else:
-        # Détection des colonnes Catégorie / Sous-catégorie
+        # Détection des colonnes
         cat_col = next((c for c in ["Categorie", "Catégorie", "Category"] if c in df_visa_raw.columns), None)
         sub_col = next((c for c in ["Sous-categorie", "Sous-catégorie", "Sous catégorie"] if c in df_visa_raw.columns), None)
 
@@ -476,7 +476,7 @@ with tabs[5]:
         # Colonnes d'options
         option_cols = [c for c in df_visa_raw.columns if c not in {cat_col, sub_col, "Visa"}]
 
-        # Filtrage
+        # Filtrage du tableau
         flt = df_visa_raw.copy()
         if sel_cat:
             flt = flt[flt[cat_col].astype(str) == sel_cat]
@@ -486,7 +486,7 @@ with tabs[5]:
         st.markdown("#### Tableau Visa filtré")
         st.dataframe(flt.reset_index(drop=True), use_container_width=True, height=300, key=f"visa_filtered_{SID5}")
 
-        # Détection des options cochées
+        # Options disponibles
         st.markdown("#### Options disponibles pour cette sous-catégorie")
         if not sel_cat or not sel_sub:
             st.caption("Choisis une catégorie et une sous-catégorie pour voir les options.")
@@ -513,9 +513,10 @@ with tabs[5]:
                     visa_label += " - " + ", ".join(chosen)
                 st.success(f"Visa proposé : {visa_label}")
 
-        # Statut du dossier
+        # --- Statut du dossier (correctif définitif) ---
         st.markdown("#### Statut du dossier")
         s1, s2 = st.columns(2)
+
         with s1:
             try:
                 row0 = flt.iloc[0] if not flt.empty else {}
@@ -526,19 +527,21 @@ with tabs[5]:
                 rfe = int(row0.get("RFE", 0) or 0)
                 date_envoi = _p5_safe_str(row0.get("Date d'envoi", ""))
 
-                txt = (
-                    f"Dossier envoyé : {envoye} | "
-                    f"Approuvé : {approuve} | "
-                    f"Refusé : {refuse} | "
-                    f"Annulé : {annule} | "
+                parts = [
+                    f"Dossier envoyé : {envoye}",
+                    f"Approuvé : {approuve}",
+                    f"Refusé : {refuse}",
+                    f"Annulé : {annule}",
                     f"RFE : {rfe}"
-                )
+                ]
                 if date_envoi:
-                    txt += f" | Date d'envoi : {date_envoi}"
+                    parts.append(f"Date d'envoi : {date_envoi}")
 
-                s1.write(txt)
+                s1.write(" | ".join(parts))
             except Exception as e:
                 s1.error(f"Erreur lecture statut : {_p5_safe_str(e)}")
+
+
 
 # =======================================================
 # PARTIE 6/6 - Analyses (sans Plotly) & Export
