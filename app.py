@@ -431,118 +431,114 @@ with tabs[3]:
 
 SID5 = st.session_state.get("_sid", "p5")
 
+def _p5_truthy(v) -> bool:
+    """Interprète les valeurs cochées dans le fichier Visa (1, x, true, yes, y, oui...)."""
+    s = str(v).strip().lower()
+    return s in {"1", "true", "yes", "y", "x", "oui"}
+
+def _p5_safe_str(x: object) -> str:
+    try:
+        if x is None:
+            return ""
+        if isinstance(x, float) and pd.isna(x):
+            return ""
+        return str(x)
+    except Exception:
+        return ""
+
 with tabs[5]:
     st.subheader("📄 Visa (aperçu)")
 
     if df_visa_raw is None or df_visa_raw.empty:
         st.info("Aucun fichier Visa chargé.")
     else:
-        # Détection des colonnes Catégorie / Sous-catégorie
-        base_cat_col = None
+        # 1) Détection des colonnes Catégorie / Sous-catégorie
+        cat_col = None
         for cand in ["Categorie", "Catégorie", "Category"]:
             if cand in df_visa_raw.columns:
-                base_cat_col = cand
+                cat_col = cand
                 break
 
-        base_sub_col = None
-        for cand in ["Sous-categorie", "Sous-catégorie", "Sous-categories"]:
+        sub_col = None
+        for cand in ["Sous-categorie", "Sous-catégorie", "Sous-categories", "Sous catégorie"]:
             if cand in df_visa_raw.columns:
-                base_sub_col = cand
+                sub_col = cand
                 break
 
-        if base_cat_col is None or base_sub_col is None:
-            st.warning("Le fichier Visa ne contient pas les colonnes attendues (Catégorie / Sous-catégorie).")
-            st.dataframe(df_visa_raw, use_container_width=True, height=400, key=f"visa_preview_full_{SID5}")
+        if cat_col is None or sub_col is None:
+            st.warning("Le fichier Visa doit contenir les colonnes « Catégorie » et « Sous-catégorie ». "
+                       "Colonnes trouvées : " + ", ".join(map(str, df_visa_raw.columns)))
+            st.dataframe(df_visa_raw, use_container_width=True, height=360, key=f"visa_preview_full_{SID5}")
             st.stop()
 
-        # Sélecteurs de catégorie / sous-catégorie
-        cats = sorted(df_visa_raw[base_cat_col].dropna().astype(str).unique().tolist())
+        # 2) Sélecteurs Catégorie / Sous-catégorie
+        cats = sorted(df_visa_raw[cat_col].dropna().astype(str).unique().tolist())
         c1, c2 = st.columns(2)
         sel_cat = c1.selectbox("Catégorie", [""] + cats, index=0, key=f"v_cat_{SID5}")
 
         subs = []
         if sel_cat:
-            subs = sorted(df_visa_raw.loc[
-                df_visa_raw[base_cat_col].astype(str) == sel_cat, base_sub_col
-            ].dropna().astype(str).unique().tolist())
-
+            subs = sorted(
+                df_visa_raw.loc[df_visa_raw[cat_col].astype(str) == sel_cat, sub_col]
+                .dropna().astype(str).unique().tolist()
+            )
         sel_sub = c2.selectbox("Sous-catégorie", [""] + subs, index=0, key=f"v_sub_{SID5}")
 
-        # Colonnes à cocher (autres que base)
-        option_cols = [c for c in df_visa_raw.columns if c not in {base_cat_col, base_sub_col, "Visa"}]
+        # 3) Colonnes d’options = tout sauf Catégorie / Sous-catégorie / Visa (si existe)
+        option_cols = [c for c in df_visa_raw.columns if c not in {cat_col, sub_col, "Visa"}]
 
-        # Filtrage du tableau
-        filtered = df_visa_raw.copy()
+        # 4) Filtre du tableau selon sélection
+        flt = df_visa_raw.copy()
         if sel_cat:
-            filtered = filtered[filtered[base_cat_col].astype(str) == sel_cat]
+            flt = flt[flt[cat_col].astype(str) == sel_cat]
         if sel_sub:
-            filtered = filtered[filtered[base_sub_col].astype(str) == sel_sub]
+            flt = flt[flt[sub_col].astype(str) == sel_sub]
 
         st.markdown("#### Tableau Visa filtré")
-        st.dataframe(filtered.reset_index(drop=True), use_container_width=True, height=300, key=f"visa_filtered_{SID5}")
+        st.dataframe(flt.reset_index(drop=True), use_container_width=True, height=320, key=f"visa_filtered_{SID5}")
 
-        # Détection des options cochées
-        def _truthy(v):
-            s = str(v).strip().lower()
-            return s in {"1", "true", "yes", "y", "x", "oui"}
-
-        available_options = set()
-        for _, r in filtered.iterrows():
-            for col in option_cols:
-                try:
-                    if _truthy(r.get(col, "")):
-                        available_options.add(col)
-                except Exception:
-                    pass
-
-        st.markdown("#### Options détectées pour cette sous-catégorie")
+        # 5) Détection des options disponibles (cases à cocher) sur la sous-catégorie sélectionnée
+        st.markdown("#### Options disponibles pour la sous-catégorie sélectionnée")
         if not sel_cat or not sel_sub:
             st.caption("Choisis une catégorie et une sous-catégorie pour voir les options.")
         else:
-            if not available_options:
-                st.info("Aucune option cochée détectée pour cette sous-catégorie.")
+            available = set()
+            for _, r in flt.iterrows():
+                for col in option_cols:
+                    try:
+                        if _p5_truthy(r.get(col, "")):
+                            available.add(_p5_safe_str(col))
+                    except Exception:
+                        pass
+
+            if not available:
+                st.info("Aucune option cochée détectée pour cette sous-catégorie dans le fichier Visa.")
             else:
-                cols = st.columns(min(len(available_options), 4) or 1)
+                cols = st.columns(min(len(available), 4) or 1)
                 chosen = []
-                for i, opt in enumerate(sorted(available_options)):
+                for i, opt in enumerate(sorted(available)):
                     with cols[i % len(cols)]:
-                        ck = st.checkbox(opt, key=f"visa_opt_{SID5}_{i}")
-                        if ck:
+                        if st.checkbox(opt, key=f"visa_opt_{SID5}_{i}"):
                             chosen.append(opt)
 
-                # Construction du label final de Visa
-                visa_label = sel_sub
+                # 6) Construction du label final Visa = "<Sous-catégorie> - <opt1, opt2, ...>"
+                visa_label = sel_sub if sel_sub else ""
                 if chosen:
-                    visa_label += " - " + ", ".join(chosen)
+                    visa_label = f"{visa_label} - {', '.join(chosen)}" if visa_label else ", ".join(chosen)
 
-                st.markdown(f"**Visa proposé :** `{visa_label}`")
+                st.markdown("#### Résultat")
+                if visa_label:
+                    st.success(f"**Visa proposé :** `{visa_label}`")
+                else:
+                    st.caption("Sélectionne des options pour construire le libellé du visa.")
 
-        # Bloc d'affichage du statut du dossier
-        st.markdown("#### Statut du dossier (exemple de lecture)")
-        s1, s2 = st.columns(2)
-        with s1:
-            try:
-                envoye = int(_to_num(filtered.get("Dossier envoyé", [0])[0]) or 0)
-                approuve = int(_to_num(filtered.get("Dossier approuvé", [0])[0]) or 0)
-                refuse = int(_to_num(filtered.get("Dossier refusé", [0])[0]) or 0)
-                annule = int(_to_num(filtered.get("Dossier annulé", [0])[0]) or 0)
-                rfe = int(_to_num(filtered.get("RFE", [0])[0]) or 0)
-
-                parts = [
-                    f"Dossier envoyé : {envoye}",
-                    f"Approuvé : {approuve}",
-                    f"Refusé : {refuse}",
-                    f"Annulé : {annule}",
-                    f"RFE : {rfe}",
-                ]
-
-                date_envoi = _safe_str(filtered.get("Date d'envoi", [""])[0])
-                if date_envoi:
-                    parts.append(f"Date d'envoi : {date_envoi}")
-
-                s1.write(" | ".join(parts))
-            except Exception as e:
-                s1.error(f"Erreur lecture statut : {_safe_str(e)}")
+        # 7) Aide/mémo
+        with st.expander("ℹ️ Aide — comment préparer le fichier Visa ?", expanded=False):
+            st.markdown(
+                "- La première ligne contient les **intitulés** d’options (les cases à cocher).\n"
+                "- Les colonnes **Catégorie** et **Sous-catégorie** sont obligatoires.\n"
+                "- Dans les cellules d’options, mets `1`, `x`, `true`, `yes` ou `oui` pour signaler qu’une option est disponible."
+            )
 
 # =======================================================
 # PARTIE 6/6 - Analyses (sans Plotly) & Export
