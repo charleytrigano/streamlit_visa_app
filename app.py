@@ -991,20 +991,39 @@ with tabs[3]:
         st.dataframe(view_sorted[show_cols].reset_index(drop=True),
                      use_container_width=True, key=skey("cl","table"))
 
-
 # --------------------------------------------------
-# 🧾 ONGLET 5 : Gestion (CRUD complet)
+# 🧾 ONGLET 5 : Gestion (CRUD complet) — bloc complet corrigé
 # --------------------------------------------------
 with tabs[4]:
     st.subheader("🧾 Gestion — Ajouter / Modifier / Supprimer")
 
-    # état courant depuis le chemin mémorisé
-    clients_path_curr = st.session_state.get(skey("files","clients_path")) or st.session_state.get(skey("files","all_path"), "")
-    df_live = read_clients_file(clients_path_curr)
-    if df_live.empty and not df_clients_raw.empty:
-        df_live = normalize_clients(df_clients_raw).copy()
+    # ---- Lecture sécurisée du classeur Clients depuis les chemins mémorisés ----
+    clients_path_curr = (
+        st.session_state.get(skey("files","clients_path"))
+        or st.session_state.get(skey("files","all_path"), "")
+    )
 
-    op = st.radio("Action", ["Ajouter","Modifier","Supprimer"], horizontal=True, key=skey("crud","op"))
+    def _safe_read_clients(path: str) -> pd.DataFrame:
+        if not path:
+            return pd.DataFrame()
+        try:
+            if os.path.exists(path):
+                return read_clients_file(path)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    df_live = _safe_read_clients(clients_path_curr)
+
+    # Si rien sur disque mais qu’on a déjà un DataFrame en mémoire (upload),
+    # on l’utilise ; sinon on informe l’utilisateur.
+    if df_live.empty:
+        if not df_clients_raw.empty:
+            df_live = normalize_clients(df_clients_raw).copy()
+        else:
+            st.info("Aucun fichier Clients chargé pour le moment — utilise la barre latérale pour charger un Excel.")
+
+    op = st.radio("Action", ["Ajouter", "Modifier", "Supprimer"], horizontal=True, key=skey("crud","op"))
 
     # ---------- AJOUT ----------
     if op == "Ajouter":
@@ -1172,17 +1191,13 @@ with tabs[4]:
             st.markdown("#### 📌 Statuts")
             s1, s2, s3, s4, s5 = st.columns(5)
             sent   = s1.checkbox("Dossier envoyé", value=bool(int(row.get("Dossier envoyé",0) or 0)), key=skey("mod","sent"))
-            sent_d = s1.date_input("Date d'envoi", value=_date_for_widget_safe(row.get("Date d'envoi")),
-                                   key=skey("mod","sentd"))
+            sent_d = s1.date_input("Date d'envoi", value=_date_for_widget_safe(row.get("Date d'envoi")), key=skey("mod","sentd"))
             acc    = s2.checkbox("Dossier accepté", value=bool(int(row.get("Dossier accepté",0) or 0)), key=skey("mod","acc"))
-            acc_d  = s2.date_input("Date d'acceptation", value=_date_for_widget_safe(row.get("Date d'acceptation")),
-                                   key=skey("mod","accd"))
+            acc_d  = s2.date_input("Date d'acceptation", value=_date_for_widget_safe(row.get("Date d'acceptation")), key=skey("mod","accd"))
             ref    = s3.checkbox("Dossier refusé", value=bool(int(row.get("Dossier refusé",0) or 0)), key=skey("mod","ref"))
-            ref_d  = s3.date_input("Date de refus", value=_date_for_widget_safe(row.get("Date de refus")),
-                                   key=skey("mod","refd"))
+            ref_d  = s3.date_input("Date de refus", value=_date_for_widget_safe(row.get("Date de refus")), key=skey("mod","refd"))
             ann    = s4.checkbox("Dossier annulé", value=bool(int(row.get("Dossier annulé",0) or 0)), key=skey("mod","ann"))
-            ann_d  = s4.date_input("Date d'annulation", value=_date_for_widget_safe(row.get("Date d'annulation")),
-                                   key=skey("mod","annd"))
+            ann_d  = s4.date_input("Date d'annulation", value=_date_for_widget_safe(row.get("Date d'annulation")), key=skey("mod","annd"))
             rfe_v  = s5.checkbox("RFE", value=bool(int(row.get("RFE",0) or 0)), key=skey("mod","rfe"))
 
             if rfe_v and not any([sent, acc, ref, ann]):
