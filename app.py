@@ -315,23 +315,38 @@ tabs = st.tabs([
 with tabs[0]:
     st.subheader("📊 Dashboard")
 
+    # ---- Helpers locaux pour éviter les collisions de clés & options vides
+    _SID = st.session_state.get("_sid_prefix", "sid")
+    def _k(*parts):  # clé unique et stable
+        return _SID + "_dash_" + "_".join(str(p) for p in parts)
+
+    def _clean_list(series_like):
+        try:
+            s = pd.Series(series_like).dropna().astype(str).str.strip()
+            s = s[s != ""]
+            return sorted(s.unique().tolist())
+        except Exception:
+            return []
+
     if df_all.empty:
         st.info("Aucun client chargé. Charge les fichiers dans la barre latérale.")
     else:
-        # Listes filtres
-        years = sorted([int(x) for x in pd.to_numeric(df_all["_Année_"], errors="coerce").dropna().unique().tolist()])
+        # Listes filtres (toujours calculées sur df_all, pas sur un sous-ensemble)
+        years  = sorted([int(x) for x in pd.to_numeric(df_all["_Année_"], errors="coerce").dropna().unique().tolist()])
         months = [f"{m:02d}" for m in range(1,13)]
-        cats  = sorted(df_all["Categorie"].dropna().astype(str).unique().tolist()) if "Categorie" in df_all.columns else []
-        subs  = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all.columns else []
-        visas = sorted(df_all["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all.columns else []
+        cats   = _clean_list(df_all.get("Categorie", []))
+        subs   = _clean_list(df_all.get("Sous-categorie", []))
+        visas  = _clean_list(df_all.get("Visa", []))
 
+        # Widgets — toujours avec des clés uniques
         a1, a2, a3, a4, a5 = st.columns([1,1,1,1,2])
-        fy = a1.multiselect("Année", years, default=[], key=sid("dash_y"))
-        fm = a2.multiselect("Mois (MM)", months, default=[], key=sid("dash_m"))
-        fc = a3.multiselect("Catégories", cats, default=[], key=sid("dash_c"))
-        fs = a4.multiselect("Sous-catégories", subs, default=[], key=sid("dash_s"))
-        fv = a5.multiselect("Visa", visas, default=[], key=sid("dash_v"))
+        fy = a1.multiselect("Année", years, default=[], key=_k("y"))
+        fm = a2.multiselect("Mois (MM)", months, default=[], key=_k("m"))
+        fc = a3.multiselect("Catégories", cats, default=[], key=_k("c"))
+        fs = a4.multiselect("Sous-catégories", subs, default=[], key=_k("s"))
+        fv = a5.multiselect("Visa", visas, default=[], key=_k("v"))
 
+        # Application des filtres
         f = df_all.copy()
         if fy: f = f[f["_Année_"].isin(fy)]
         if fm: f = f[f["Mois"].astype(str).isin(fm)]
@@ -339,43 +354,48 @@ with tabs[0]:
         if fs: f = f[f["Sous-categorie"].astype(str).isin(fs)]
         if fv: f = f[f["Visa"].astype(str).isin(fv)]
 
-        # KPIs (taille réduite)
+        # KPIs (taille compacte)
         k1,k2,k3,k4,k5 = st.columns([1,1,1,1,1])
         k1.metric("Dossiers", f"{len(f)}")
-        total = (_nnum(f["Montant honoraires (US $)"]) + _nnum(f["Autres frais (US $)"])).sum()
-        paye  = _nnum(f["Payé"]).sum()
-        reste = _nnum(f["Reste"]).sum()
+        total = (pd.to_numeric(f.get("Montant honoraires (US $)", 0), errors="coerce").fillna(0) +
+                 pd.to_numeric(f.get("Autres frais (US $)", 0), errors="coerce").fillna(0)).sum()
+        paye  = pd.to_numeric(f.get("Payé", 0), errors="coerce").fillna(0).sum()
+        reste = pd.to_numeric(f.get("Reste", 0), errors="coerce").fillna(0).sum()
         k2.metric("Honoraires+Frais", _fmt_money(total))
         k3.metric("Payé", _fmt_money(paye))
         k4.metric("Solde", _fmt_money(reste))
         pct_env = 0
-        if "Dossier envoyé" in f.columns and len(f)>0:
-            pct_env = int((pd.to_numeric(f["Dossier envoyé"], errors="coerce").fillna(0)>0).mean()*100)
+        if "Dossier envoyé" in f.columns and len(f) > 0:
+            pct_env = int((pd.to_numeric(f["Dossier envoyé"], errors="coerce").fillna(0) > 0).mean() * 100)
         k5.metric("Envoyés (%)", f"{pct_env}%")
 
-        # Graphiques
-        st.markdown("#### 📦 Dossiers par catégorie")
+        # Graphique : Dossiers par catégorie
+        st.markdown("#### 📦 Nombre de dossiers par catégorie")
         if "Categorie" in f.columns and not f.empty:
             vc = f["Categorie"].value_counts().reset_index()
             vc.columns = ["Categorie","Nombre"]
             st.bar_chart(vc.set_index("Categorie"))
         else:
-            st.info("Pas de données pour ce graphique.")
+            st.info("Pas de données catégories avec les filtres actuels.")
 
+        # Graphique : flux par mois
         st.markdown("#### 💵 Flux par mois")
         if not f.empty:
             gdf = f.copy()
-            gdf["hono"]  = _nnum(gdf["Montant honoraires (US $)"])
-            gdf["autre"] = _nnum(gdf["Autres frais (US $)"])
-            gdf["paye"]  = _nnum(gdf["Payé"])
-            gdf["reste"] = _nnum(gdf["Reste"])
-            gdf["Mois"]  = gdf["Mois"].astype(str)
+            gdf["Montant honoraires (US $)"] = pd.to_numeric(gdf.get("Montant honoraires (US $)", 0), errors="coerce").fillna(0)
+            gdf["Autres frais (US $)"]       = pd.to_numeric(gdf.get("Autres frais (US $)", 0), errors="coerce").fillna(0)
+            gdf["Payé"]                      = pd.to_numeric(gdf.get("Payé", 0), errors="coerce").fillna(0)
+            gdf["Reste"]                     = pd.to_numeric(gdf.get("Reste", 0), errors="coerce").fillna(0)
+            gdf["Mois"]                      = gdf["Mois"].astype(str)
 
-            g = gdf.groupby("Mois", as_index=False)[["hono","autre","paye","reste"]].sum().sort_values("Mois").set_index("Mois")
-            g.columns = ["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]
+            g = (gdf.groupby("Mois", as_index=False)[
+                    ["Montant honoraires (US $)","Autres frais (US $)","Payé","Reste"]
+                ].sum()
+                 .sort_values("Mois")
+                 .set_index("Mois"))
             st.line_chart(g)
         else:
-            st.info("Aucune donnée pour tracer les flux.")
+            st.info("Aucune donnée pour tracer les flux avec les filtres actuels.")
 
         # Détails
         st.markdown("#### 📋 Détails (après filtres)")
@@ -388,31 +408,46 @@ with tabs[0]:
         view = f.copy()
         for c in ["Montant honoraires (US $)","Autres frais (US $)","Payé","Reste"]:
             if c in view.columns:
-                view[c] = _nnum(view[c]).map(_fmt_money)
+                view[c] = pd.to_numeric(view[c], errors="coerce").fillna(0).map(_fmt_money)
+        # Tri robuste (seulement colonnes existantes)
         sort_keys = [c for c in ["_Année_","_MoisNum_","Categorie","Nom"] if c in view.columns]
         view = view.sort_values(by=sort_keys) if sort_keys else view
-        st.dataframe(view[show_cols].reset_index(drop=True), use_container_width=True, key=sid("dash_table"))
+        st.dataframe(view[show_cols].reset_index(drop=True), use_container_width=True, key=_k("table"))
 
 # ========================
 # PARTIE 3/6 — Analyses
 # ========================
 with tabs[1]:
     st.subheader("📈 Analyses")
+
+    # Helpers locaux
+    _SID2 = st.session_state.get("_sid_prefix", "sid")
+    def _kA(*parts):
+        return _SID2 + "_ana_" + "_".join(str(p) for p in parts)
+
+    def _clean_list(series_like):
+        try:
+            s = pd.Series(series_like).dropna().astype(str).str.strip()
+            s = s[s != ""]
+            return sorted(s.unique().tolist())
+        except Exception:
+            return []
+
     if df_all.empty:
         st.info("Aucune donnée client.")
     else:
         yearsA  = sorted([int(y) for y in pd.to_numeric(df_all["_Année_"], errors="coerce").dropna().unique().tolist()])
         monthsA = [f"{m:02d}" for m in range(1, 13)]
-        catsA   = sorted(df_all["Categorie"].dropna().astype(str).unique().tolist())
-        subsA   = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist())
-        visasA  = sorted(df_all["Visa"].dropna().astype(str).unique().tolist())
+        catsA   = _clean_list(df_all.get("Categorie", []))
+        subsA   = _clean_list(df_all.get("Sous-categorie", []))
+        visasA  = _clean_list(df_all.get("Visa", []))
 
         c1,c2,c3,c4,c5 = st.columns(5)
-        fy = c1.multiselect("Année", yearsA, default=[], key=sid("an_y"))
-        fm = c2.multiselect("Mois (MM)", monthsA, default=[], key=sid("an_m"))
-        fc = c3.multiselect("Catégorie", catsA, default=[], key=sid("an_c"))
-        fs = c4.multiselect("Sous-catégorie", subsA, default=[], key=sid("an_s"))
-        fv = c5.multiselect("Visa", visasA, default=[], key=sid("an_v"))
+        fy = c1.multiselect("Année", yearsA, default=[], key=_kA("y"))
+        fm = c2.multiselect("Mois (MM)", monthsA, default=[], key=_kA("m"))
+        fc = c3.multiselect("Catégorie", catsA, default=[], key=_kA("c"))
+        fs = c4.multiselect("Sous-catégorie", subsA, default=[], key=_kA("s"))
+        fv = c5.multiselect("Visa", visasA, default=[], key=_kA("v"))
 
         dfA = df_all.copy()
         if fy: dfA = dfA[dfA["_Année_"].isin(fy)]
@@ -423,25 +458,26 @@ with tabs[1]:
 
         k1,k2,k3,k4 = st.columns(4, gap="small")
         k1.metric("Dossiers", f"{len(dfA)}")
-        k2.metric("Honoraires", _fmt_money(_nnum(dfA["Montant honoraires (US $)"]).sum()))
-        k3.metric("Payé", _fmt_money(_nnum(dfA["Payé"]).sum()))
-        k4.metric("Reste", _fmt_money(_nnum(dfA["Reste"]).sum()))
+        k2.metric("Honoraires", _fmt_money(pd.to_numeric(dfA.get("Montant honoraires (US $)",0), errors="coerce").fillna(0).sum()))
+        k3.metric("Payé", _fmt_money(pd.to_numeric(dfA.get("Payé",0), errors="coerce").fillna(0).sum()))
+        k4.metric("Reste", _fmt_money(pd.to_numeric(dfA.get("Reste",0), errors="coerce").fillna(0).sum()))
 
         # % par catégorie
         st.markdown("#### Répartition par catégorie (%)")
         if not dfA.empty and "Categorie" in dfA.columns:
-            vc = (dfA["Categorie"].value_counts(normalize=True)*100).round(1).astype(str) + "%"
-            st.dataframe(vc.to_frame("Part"), use_container_width=True, key=sid("an_cat_pct"))
+            base = dfA["Categorie"].astype(str).str.strip()
+            vc = (base.value_counts(normalize=True)*100).round(1).astype(str) + "%"
+            st.dataframe(vc.to_frame("Part"), use_container_width=True, key=_kA("cat_pct"))
         else:
-            st.info("Pas de catégorie.")
+            st.info("Pas de catégorie sur l’échantillon.")
 
-        # Comparaison période A vs B (Années / Mois)
+        # Comparaison période A vs B
         st.markdown("#### Comparaison A vs B")
         ca1, ca2, cb1, cb2 = st.columns(4)
-        ya = ca1.multiselect("Année (A)", yearsA, default=[], key=sid("cmp_ya"))
-        ma = ca2.multiselect("Mois (A)", monthsA, default=[], key=sid("cmp_ma"))
-        yb = cb1.multiselect("Année (B)", yearsA, default=[], key=sid("cmp_yb"))
-        mb = cb2.multiselect("Mois (B)", monthsA, default=[], key=sid("cmp_mb"))
+        ya = ca1.multiselect("Année (A)", yearsA, default=[], key=_kA("ya"))
+        ma = ca2.multiselect("Mois (A)", monthsA, default=[], key=_kA("ma"))
+        yb = cb1.multiselect("Année (B)", yearsA, default=[], key=_kA("yb"))
+        mb = cb2.multiselect("Mois (B)", monthsA, default=[], key=_kA("mb"))
 
         def _slice(ylist, mlist):
             d = df_all.copy()
@@ -452,12 +488,15 @@ with tabs[1]:
         A = _slice(ya, ma)
         B = _slice(yb, mb)
         colA, colB = st.columns(2)
-        for lab, dset, col in [("Période A", A, colA), ("Période B", B, colB)]:
-            with col:
-                col.metric(f"Dossiers ({lab})", f"{len(dset)}")
-                col.metric("Honoraires", _fmt_money(_nnum(dset["Montant honoraires (US $)"]).sum()))
-                col.metric("Payé", _fmt_money(_nnum(dset["Payé"]).sum()))
-                col.metric("Reste", _fmt_money(_nnum(dset["Reste"]).sum()))
+        def _kpi_block(col, lab, dset):
+            col.metric(f"Dossiers ({lab})", f"{len(dset)}")
+            col.metric("Honoraires", _fmt_money(pd.to_numeric(dset.get("Montant honoraires (US $)",0), errors="coerce").fillna(0).sum()))
+            col.metric("Payé", _fmt_money(pd.to_numeric(dset.get("Payé",0), errors="coerce").fillna(0).sum()))
+            col.metric("Reste", _fmt_money(pd.to_numeric(dset.get("Reste",0), errors="coerce").fillna(0).sum()))
+        with colA:
+            _kpi_block(st, "A", A)
+        with colB:
+            _kpi_block(st, "B", B)
 
 
 # ======================
