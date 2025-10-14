@@ -1,6 +1,4 @@
-# ================================
-# PARTIE 1/6 — Imports & Utilitaires
-# ================================
+
 from __future__ import annotations
 
 import json, re, os, zipfile, uuid
@@ -241,7 +239,7 @@ def build_visa_map(df_visa: pd.DataFrame) -> Dict[str, Dict[str, Dict[str, Any]]
     return visa_map
 
 
-# ===========================================
+===========================================
 # PARTIE 2/6 — Barre latérale & Chargement
 # ===========================================
 st.set_page_config(page_title="Visa Manager", layout="wide")
