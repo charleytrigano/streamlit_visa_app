@@ -968,8 +968,17 @@ with tabs[3]:
             row = df_all[df_all["ID_Client"].astype(str) == sel].iloc[0].copy()
             st.markdown(f"**Nom :** {_safe_str(row.get('Nom',''))}  |  **Visa :** {_safe_str(row.get('Visa',''))}")
 
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Honoraires+Frais", _fmt_money(float(_to_num(row.get("Montant honoraires (US $)", 0.0)) + _to_num(row.get("Autres frais (US $)", 0.0)))))
+            c2.metric("Payé", _fmt_money(float(_to_num(row.get("Payé", 0.0)))))
+            c3.metric("Solde", _fmt_money(float(_to_num(row.get("Solde", 0.0)))))
+            sent = int(_to_num(row.get("Dossier envoyé", 0)) or 0)
+            c4.metric("Envoyé", "Oui" if sent == 1 else "Non")
+
+            # ---- Chronologie ----
             st.markdown("#### Chronologie")
             s1, s2 = st.columns(2)
+
             s1.write(f"- Date création : {_safe_str(row.get('Date', ''))}")
             s1.write(
                 "- Dossier envoyé : {}  | Date : {}".format(
@@ -997,23 +1006,6 @@ with tabs[3]:
             )
             st.write(f"- RFE : {int(_to_num(row.get('RFE', 0)) or 0)}")
             st.write(f"- Commentaires : {_safe_str(row.get('Commentaires', ''))}")
-                f"- Dossier envoyé : {int(_to_num(row.get('Dossier envoyé',0)) or 0)}  "
-                f"| Date : {_safe_str(row.get(\"Date d'envoi\",\"\"))}"
-            )
-            s1.write(
-                f"- Dossier approuvé : {int(_to_num(row.get('Dossier approuvé',0)) or 0)}  "
-                f"| Date : {_safe_str(row.get(\"Date d'acceptation\",\"\"))}"
-            )
-            s2.write(
-                f"- Dossier refusé : {int(_to_num(row.get('Dossier refusé',0)) or 0)}  "
-                f"| Date : {_safe_str(row.get(\"Date de refus\",\"\"))}"
-            )
-            s2.write(
-                f"- Dossier annulé : {int(_to_num(row.get('Dossier annulé',0)) or 0)}  "
-                f"| Date : {_safe_str(row.get(\"Date d'annulation\",\"\"))}"
-            )
-            st.write(f"- RFE : {int(_to_num(row.get('RFE',0)) or 0)}")
-            st.write(f"- Commentaires : {_safe_str(row.get('Commentaires',''))}")
 
 # ---------- GESTION (CRUD) ----------
 with tabs[4]:
@@ -1081,10 +1073,8 @@ with tabs[4]:
                     "Visa": vis,
                     "Montant honoraires (US $)": float(honor),
                     "Autres frais (US $)": float(other),
-                    "Total (US $)": total,
                     "Payé": paye,
                     "Solde": solde,
-                    "Acompte 1": 0.0, "Acompte 2": 0.0,
                     "Dossier envoyé": 1 if sent else 0,
                     "Date d'envoi": sent_d if sent_d else (dte if sent else None),
                     "Dossier approuvé": 1 if acc else 0,
@@ -1154,9 +1144,8 @@ with tabs[4]:
                     df_live.at[idx, "Visa"] = vis
                     df_live.at[idx, "Montant honoraires (US $)"] = float(honor)
                     df_live.at[idx, "Autres frais (US $)"]        = float(other)
-                    df_live.at[idx, "Total (US $)"]               = total
-                    df_live.at[idx, "Solde"]                      = solde
                     df_live.at[idx, "Commentaires"]               = comm
+                    df_live.at[idx, "Solde"]                      = solde
                     df_live.at[idx, "Dossier envoyé"]             = 1 if sent else 0
                     df_live.at[idx, "Date d'envoi"]               = sent_d
                     df_live.at[idx, "Dossier approuvé"]           = 1 if acc else 0
