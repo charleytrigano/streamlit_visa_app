@@ -77,6 +77,13 @@ def _date_for_widget(val: Any) -> date:
     except Exception:
         return date.today()
 
+        dval = _date_for_widget(row.get("Date"))
+if dval is None or isinstance(dval, pd._libs.tslibs.nattype.NaTType):
+    dval = date.today()
+
+dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
+
+
         return d.date()
     except Exception:
         return date.today()
