@@ -429,7 +429,7 @@ with tabs[1]:
         detail = view.copy()
         for c in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"]:
             if c in detail.columns:
-                detail[c] = _to_num(detail[c]).map(_fmt_money)
+                detail[c] = detail[c].apply(_to_num).map(_fmt_money)
         if "Date" in detail.columns:
             try:
                 detail["Date"] = pd.to_datetime(detail["Date"], errors="coerce").dt.date.astype(str)
