@@ -1,23 +1,30 @@
 # ================================
-# PARTIE 1/6 — Imports, constantes, helpers, I/O
+# PARTIE 1/6 — Imports, constantes, helpers, I/O (corrigée)
 # ================================
 from io import BytesIO
 from datetime import date, datetime
 from uuid import uuid4
-import json, os, re, zipfile
+import json, os, zipfile
 import pandas as pd
 import streamlit as st
 
-# --------- Constantes colonnes (tolérance orthographe) ----------
+# ---- Config de page & SID unique pour les clés Streamlit
+st.set_page_config(page_title="Visa Manager", layout="wide")
+if "SID" not in st.session_state:
+    st.session_state["SID"] = str(uuid4())
+SID = st.session_state["SID"]
+
+# ---- Canon de colonnes côté Clients (tolérant)
 COLS_CANON = {
     "ID_Client": ["ID_Client", "ID Client", "Id_Client", "Id Client"],
-    "Dossier N": ["Dossier N", "Dossier No", "Dossier", "N° Dossier", "Dossier Numero"],
+    "Dossier N": ["Dossier N", "Dossier No", "N° Dossier", "Dossier", "Dossier Numero"],
     "Nom": ["Nom", "Client", "Name"],
-    "Date": ["Date", "Date creation", "Date de création", "Date de creation"],
-    "Categorie": ["Categorie", "Categories", "Catégorie", "Catégories"],
-    "Sous-categorie": ["Sous-categorie", "Sous-catégorie", "Sous categorie", "Sous categories", "Sous-categories"],
+    "Date": ["Date", "Date creation", "Date de creation", "Date de création"],
+    "Mois": ["Mois", "Month"],
+    "Categorie": ["Categorie", "Catégorie", "Categories", "Catégories"],
+    "Sous-categorie": ["Sous-categorie", "Sous-catégorie", "Sous categorie", "Sous categories"],
     "Visa": ["Visa", "Type Visa"],
-    "Montant honoraires (US $)": ["Montant honoraires (US $)", "Montant honoraires", "Honoraires (US $)"],
+    "Montant honoraires (US $)": ["Montant honoraires (US $)", "Honoraires (US $)", "Montant honoraires"],
     "Autres frais (US $)": ["Autres frais (US $)", "Autres frais"],
     "Total (US $)": ["Total (US $)", "Total"],
     "Payé": ["Payé", "Paye", "Encaisse"],
@@ -25,7 +32,7 @@ COLS_CANON = {
     "Acompte 1": ["Acompte 1", "Acompte1"],
     "Acompte 2": ["Acompte 2", "Acompte2"],
     "RFE": ["RFE"],
-    "Dossier envoyé": ["Dossier envoyé", "Dossiers envoyé", "Envoye"],
+    "Dossier envoyé": ["Dossier envoyé", "Envoye", "Dossiers envoyé"],
     "Dossier accepté": ["Dossier accepté", "Accepte"],
     "Dossier refusé": ["Dossier refusé", "Refuse"],
     "Dossier annulé": ["Dossier annulé", "Annule"],
@@ -41,14 +48,7 @@ SHEET_CLIENTS = "Clients"
 SHEET_VISA    = "Visa"
 STATE_FILE    = ".visa_state.json"
 
-# Un identifiant de session pour des clés Streamlit uniques
-if "SID" not in st.session_state:
-    st.session_state["SID"] = f"{uuid4()}"
-SID = st.session_state["SID"]
-
-st.set_page_config(page_title="Visa Manager", layout="wide")
-
-# --------- Helpers sûrs ----------
+# ---- Helpers sûrs
 def _safe_str(v):
     try:
         if pd.isna(v):
@@ -66,8 +66,7 @@ def _to_num(v, default=0.0):
 def _series_num(df, col):
     if col not in df.columns:
         return pd.Series([0.0]*len(df), index=df.index, dtype=float)
-    x = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
-    return x
+    return pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
 def _fmt_money(x):
     try:
@@ -76,101 +75,17 @@ def _fmt_money(x):
         return "$0.00"
 
 def _date_for_widget(v, fallback=None):
-    """Donne toujours une date() exploitable pour st.date_input."""
     fb = fallback if isinstance(fallback, (date, datetime)) else date.today()
-    if isinstance(v, date):
-        return v
-    if isinstance(v, datetime):
-        return v.date()
+    if isinstance(v, date): return v
+    if isinstance(v, datetime): return v.date()
     try:
         d2 = pd.to_datetime(v, errors="coerce")
-        if pd.notna(d2):
-            return d2.date()
+        if pd.notna(d2): return d2.date()
     except Exception:
         pass
     return fb if isinstance(fb, date) else date.today()
 
-# --------- Normalisation colonnes ----------
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    cols_map = {}
-    for canon, variants in COLS_CANON.items():
-        for v in variants:
-            for c in df.columns:
-                if _safe_str(c).strip().lower() == _safe_str(v).strip().lower():
-                    cols_map[c] = canon
-    df = df.rename(columns=cols_map)
-    # Colonnes minimales
-    for need in ["ID_Client", "Dossier N", "Nom", "Date", "Mois",
-                 "Categorie", "Sous-categorie", "Visa",
-                 "Montant honoraires (US $)", "Autres frais (US $)",
-                 "Total (US $)", "Payé", "Reste", "Paiements", "Commentaires",
-                 "Dossier envoyé", "Dossier accepté", "Dossier refusé", "Dossier annulé",
-                 "Date d'envoi", "Date d'acceptation", "Date de refus", "Date d'annulation", "RFE"]:
-        if need not in df.columns:
-            df[need] = "" if need in ["ID_Client","Nom","Categorie","Sous-categorie","Visa","Paiements","Commentaires"] else 0
-    # Types :
-    for c in ["Montant honoraires (US $)", "Autres frais (US $)", "Total (US $)", "Payé", "Reste"]:
-        df[c] = _series_num(df, c)
-    for c in ["Dossier envoyé", "Dossier accepté", "Dossier refusé", "Dossier annulé", "RFE"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
-    # Dates
-    for c in ["Date", "Date d'envoi", "Date d'acceptation", "Date de refus", "Date d'annulation"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce")
-    # Mois / Année
-    if "Mois" not in df.columns:
-        df["Mois"] = df["Date"].dt.month.fillna(1).astype(int).map(lambda m: f"{int(m):02d}")
-    else:
-        df["Mois"] = df["Mois"].astype(str).str.zfill(2)
-    df["_Année_"]   = pd.to_numeric(df["Date"].dt.year, errors="coerce").fillna(1900).astype(int)
-    df["_MoisNum_"] = pd.to_numeric(df["Mois"], errors="coerce").fillna(1).astype(int)
-    # Total recalcul si vide
-    mask_total_zero = (df["Total (US $)"]<=0) | df["Total (US $)"].isna()
-    df.loc[mask_total_zero, "Total (US $)"] = df["Montant honoraires (US $)"] + df["Autres frais (US $)"]
-    # Reste recalcul si manquant
-    df["Reste"] = df["Total (US $)"] - df["Payé"]
-    return df
-
-# --------- Lecture table générique (XLSX/CSV) ----------
-def read_any_table(source, sheet_name=None) -> pd.DataFrame|None:
-    if source is None:
-        return None
-    # BytesIO (upload) ?
-    if hasattr(source, "read"):
-        # Essai excel
-        try:
-            source.seek(0)
-            if sheet_name:
-                df = pd.read_excel(source, sheet_name=sheet_name)
-            else:
-                df = pd.read_excel(source)
-            return df
-        except Exception:
-            source.seek(0)
-            try:
-                df = pd.read_csv(source)
-                return df
-            except Exception:
-                return None
-    # Chemin
-    p = str(source)
-    if not os.path.exists(p):
-        return None
-    ext = os.path.splitext(p)[1].lower()
-    try:
-        if ext in [".xlsx", ".xls"]:
-            if sheet_name:
-                return pd.read_excel(p, sheet_name=sheet_name)
-            # auto : si 2 onglets on attendra les noms côté appelant
-            return pd.read_excel(p)
-        elif ext == ".csv":
-            return pd.read_csv(p)
-        else:
-            return None
-    except Exception:
-        return None
-
-# --------- Fichiers persistance (dernier chemin) ----------
+# ---- Persistance des derniers chemins
 def save_last_paths(clients_path, visa_path):
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -188,144 +103,187 @@ def load_last_paths():
         pass
     return ("","")
 
-# --------- R/W Clients ----------
+# ---- Lecture générique (xlsx/csv, chemin ou upload)
+def read_any_table(source, sheet_name=None) -> pd.DataFrame|None:
+    if source is None:
+        return None
+    # Upload (BytesIO or UploadedFile)
+    if hasattr(source, "read"):
+        try:
+            source.seek(0)
+            return pd.read_excel(source, sheet_name=sheet_name) if sheet_name else pd.read_excel(source)
+        except Exception:
+            try:
+                source.seek(0)
+                return pd.read_csv(source)
+            except Exception:
+                return None
+    # Chemin
+    p = str(source)
+    if not os.path.exists(p):
+        return None
+    ext = os.path.splitext(p)[1].lower()
+    try:
+        if ext in [".xlsx", ".xls"]:
+            return pd.read_excel(p, sheet_name=sheet_name) if sheet_name else pd.read_excel(p)
+        if ext == ".csv":
+            return pd.read_csv(p)
+    except Exception:
+        return None
+    return None
+
+# ---- Normalisation Clients
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    cols_map = {}
+    for canon, variants in COLS_CANON.items():
+        for v in variants:
+            for c in df.columns:
+                if _safe_str(c).strip().lower() == _safe_str(v).strip().lower():
+                    cols_map[c] = canon
+    df = df.rename(columns=cols_map)
+
+    # Colonnes minimales
+    for need in ["ID_Client","Dossier N","Nom","Date","Mois",
+                 "Categorie","Sous-categorie","Visa",
+                 "Montant honoraires (US $)","Autres frais (US $)","Total (US $)",
+                 "Payé","Reste","Paiements","Commentaires",
+                 "Dossier envoyé","Dossier accepté","Dossier refusé","Dossier annulé","RFE",
+                 "Date d'envoi","Date d'acceptation","Date de refus","Date d'annulation"]:
+        if need not in df.columns:
+            df[need] = "" if need in ["ID_Client","Nom","Categorie","Sous-categorie","Visa","Paiements","Commentaires"] else 0
+
+    # Types numériques
+    for c in ["Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste"]:
+        df[c] = _series_num(df, c)
+
+    for c in ["Dossier envoyé","Dossier accepté","Dossier refusé","Dossier annulé","RFE"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+
+    # Dates
+    for c in ["Date","Date d'envoi","Date d'acceptation","Date de refus","Date d'annulation"]:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+
+    # Mois / Année techniques
+    if "Mois" not in df.columns:
+        df["Mois"] = df["Date"].dt.month.fillna(1).astype(int).map(lambda m: f"{int(m):02d}")
+    else:
+        df["Mois"] = df["Mois"].astype(str).str.zfill(2)
+
+    df["_Année_"]   = pd.to_numeric(df["Date"].dt.year, errors="coerce").fillna(1900).astype(int)
+    df["_MoisNum_"] = pd.to_numeric(df["Mois"], errors="coerce").fillna(1).astype(int)
+
+    # Total / Reste
+    mask_total_zero = (df["Total (US $)"]<=0) | df["Total (US $)"].isna()
+    df.loc[mask_total_zero, "Total (US $)"] = df["Montant honoraires (US $)"] + df["Autres frais (US $)"]
+    df["Reste"] = df["Total (US $)"] - df["Payé"]
+    return df
+
 def read_clients_file(path_or_io) -> pd.DataFrame:
-    df = read_any_table(path_or_io)
-    if df is None:
-        # Essai sur onglet
-        df = read_any_table(path_or_io, sheet_name=SHEET_CLIENTS)
-    if df is None:
-        return pd.DataFrame()
-    return normalize_columns(df)
+    df = read_any_table(path_or_io) or read_any_table(path_or_io, sheet_name=SHEET_CLIENTS)
+    return normalize_columns(df) if df is not None else pd.DataFrame()
 
 def write_clients_file(df: pd.DataFrame, dest_path: str|BytesIO):
-    # Toujours excel
     if hasattr(dest_path, "write") and not isinstance(dest_path, str):
         with pd.ExcelWriter(dest_path, engine="openpyxl") as wr:
             df.to_excel(wr, sheet_name=SHEET_CLIENTS, index=False)
         return
-    # chemin
     with pd.ExcelWriter(dest_path, engine="openpyxl") as wr:
         df.to_excel(wr, sheet_name=SHEET_CLIENTS, index=False)
 
-# --------- Lecture Visa & carte des options ----------
-def build_visa_map(visa_df: pd.DataFrame) -> dict:
-    """
-    Attend un tableau Visa avec colonnes :
-    - Categorie, Sous-categorie
-    - puis une série de colonnes d'options (par ex. COS, EOS, …) remplies à 1 si applicable
-    Retour : {Categorie: {Sous-categorie: {"exclusive": None|label, "options":[list options disponibles]}}}
-    """
-    if visa_df is None or visa_df.empty:
-        return {}
-    # normaliser noms cat/sous-cat
+
+
+# ================================
+# PARTIE 2/6 — Lecture & normalisation VISA
+# ================================
+def _normalize_visa_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Renomme Catégorie / Sous-catégorie, enlève colonnes vides, nettoie en-têtes."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # Supprimer entièrement les colonnes vides (100% NA)
+    df = df.loc[:, ~df.isna().all(axis=0)]
+
+    # Renommer Catégorie/Sous-catégorie
     ren = {}
-    for c in visa_df.columns:
+    for c in df.columns:
         cl = _safe_str(c).strip().lower()
         if cl in ["categorie", "catégorie", "categories", "catégories"]:
             ren[c] = "Categorie"
-        elif cl in ["sous-categorie", "sous-catégorie", "sous categorie", "sous-categories"]:
+        elif cl in ["sous-categorie", "sous-catégorie", "sous categorie", "sous-categories", "sous categories"]:
             ren[c] = "Sous-categorie"
     if ren:
-        visa_df = visa_df.rename(columns=ren)
+        df = df.rename(columns=ren)
 
-    opt_cols = [c for c in visa_df.columns if c not in ["Categorie","Sous-categorie","Visa","Remarques","Notes"]]
+    # S’assurer des colonnes de base
+    if "Categorie" not in df.columns: df["Categorie"] = ""
+    if "Sous-categorie" not in df.columns: df["Sous-categorie"] = ""
+
+    # Enlever lignes totalement vides
+    df = df.dropna(how="all").reset_index(drop=True)
+
+    # Nettoyer espaces/NaN sur Catégorie/Sous-catégorie
+    df["Categorie"] = df["Categorie"].apply(lambda x: _safe_str(x).strip())
+    df["Sous-categorie"] = df["Sous-categorie"].apply(lambda x: _safe_str(x).strip())
+
+    # Garder seulement les lignes qui ont au moins Catégorie & Sous-catégorie
+    df = df[(df["Categorie"]!="") & (df["Sous-categorie"]!="")].copy()
+
+    # Transformer les “1” en bool/int pour les colonnes d’options
+    for c in df.columns:
+        if c not in ["Categorie","Sous-categorie"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+
+    return df
+
+def build_visa_map(visa_df: pd.DataFrame) -> dict:
+    """
+    Construit la hiérarchie Catégorie -> Sous-catégorie -> options disponibles.
+    Les options sont toutes les colonnes (hors Catégorie / Sous-catégorie) dont la valeur == 1 sur la ligne.
+    """
     d = {}
+    if visa_df is None or visa_df.empty:
+        return d
+
+    opt_cols = [c for c in visa_df.columns if c not in ["Categorie","Sous-categorie"]]
     for _, r in visa_df.iterrows():
         cat = _safe_str(r.get("Categorie")).strip()
         sub = _safe_str(r.get("Sous-categorie")).strip()
         if not cat or not sub:
             continue
         d.setdefault(cat, {})
-        d[cat].setdefault(sub, {"exclusive": None, "options": []})  # <- CORRIGÉ (un seul point)
+        d[cat].setdefault(sub, {"exclusive": None, "options": []})
+
         opts = []
         for oc in opt_cols:
-            val = r.get(oc)
             try:
-                is_on = int(pd.to_numeric(val, errors="coerce"))
+                if int(r.get(oc, 0)) == 1:
+                    opts.append(_safe_str(oc).strip())
             except Exception:
-                is_on = 0
-            if is_on == 1:
-                opts.append(_safe_str(oc).strip())
+                pass
         d[cat][sub]["options"] = sorted(list(set(opts)))
     return d
 
+@st.cache_data(show_spinner=False)
 def read_visa_file(path_or_io) -> tuple[pd.DataFrame, dict]:
-    df = read_any_table(path_or_io)
+    """
+    Lit le fichier Visa (xlsx/csv), normalise, et renvoie (visa_df_norm, visa_map).
+    - Si le fichier a plusieurs onglets, essaie 'Visa' en priorité.
+    """
+    # 1) lecture brute
+    df = read_any_table(path_or_io, sheet_name=SHEET_VISA)
     if df is None:
-        df = read_any_table(path_or_io, sheet_name=SHEET_VISA)
-    if df is None:
+        df = read_any_table(path_or_io)  # peut être déjà la bonne feuille
+
+    if df is None or df.empty:
         return pd.DataFrame(), {}
-    # Si le fichier contient plusieurs feuilles, on récupère la feuille Visa explicitement
-    if isinstance(path_or_io, str) and os.path.splitext(path_or_io)[1].lower() in [".xlsx", ".xls"]:
-        try:
-            df = pd.read_excel(path_or_io, sheet_name=SHEET_VISA)
-        except Exception:
-            pass
-    # Normalisation simple (seulement pour labels)
-    return df, build_visa_map(df)
 
+    # 2) normalisation des colonnes
+    df_norm = _normalize_visa_columns(df)
 
-
-
-# ================================
-# PARTIE 2/6 — Sidebar (fichiers), chargement, résumé
-# ================================
-st.sidebar.header("📂 Fichiers")
-
-last_clients, last_visa = load_last_paths()
-
-mode = st.sidebar.radio("Mode de chargement", ["Un fichier (2 onglets)", "Deux fichiers (Clients + Visa)"], index=1, key=f"mode_{SID}")
-
-clients_src = None
-visa_src = None
-
-if mode == "Deux fichiers (Clients + Visa)":
-    up_c = st.sidebar.file_uploader("Clients (xlsx/csv)", type=["xlsx","xls","csv"], key=f"up_c_{SID}")
-    up_v = st.sidebar.file_uploader("Visa (xlsx/csv)", type=["xlsx","xls","csv"], key=f"up_v_{SID}")
-    # si pas d'upload, proposer les derniers chemins
-    st.sidebar.caption("Derniers chemins mémorisés :")
-    lc = st.sidebar.text_input("Dernier Clients", value=last_clients, key=f"path_c_{SID}")
-    lv = st.sidebar.text_input("Dernier Visa", value=last_visa, key=f"path_v_{SID}")
-    clients_src = up_c if up_c else (lc if lc else None)
-    visa_src    = up_v if up_v else (lv if lv else None)
-else:
-    up_one = st.sidebar.file_uploader("Fichier unique (onglets Clients & Visa)", type=["xlsx","xls"], key=f"up_one_{SID}")
-    st.sidebar.caption("Dernier fichier (unique) mémorisé :")
-    lone = st.sidebar.text_input("Dernier fichier", value=(last_clients if last_clients==last_visa else ""), key=f"path_one_{SID}")
-    one_src = up_one if up_one else (lone if lone else None)
-    clients_src = one_src
-    visa_src    = one_src
-
-# Sauvegarde vers un chemin choisi par l’utilisateur
-st.sidebar.markdown("**Chemin de sauvegarde** (sur ton PC / Drive / OneDrive) :")
-save_clients_to = st.sidebar.text_input("Sauvegarder Clients vers…", value=_safe_str(last_clients), key=f"savec_{SID}")
-save_visa_to    = st.sidebar.text_input("Sauvegarder Visa vers…", value=_safe_str(last_visa),    key=f"savev_{SID}")
-
-# Charger
-df_clients_raw = read_clients_file(clients_src) if clients_src else pd.DataFrame()
-df_clients = df_clients_raw.copy()
-
-df_visa_raw, visa_map = read_visa_file(visa_src) if visa_src else (pd.DataFrame(), {})
-
-# Mémoriser les chemins si tout est OK
-if clients_src and (isinstance(clients_src, str) and os.path.exists(clients_src)) or hasattr(clients_src, "read"):
-    # Si upload, on sauvegarde un “chemin” symbolique pour affichage
-    cmark = clients_src.name if hasattr(clients_src, "name") else clients_src
-    vmark = visa_src.name if hasattr(visa_src, "name") else visa_src
-    save_last_paths(cmark, vmark)
-
-st.title("🛂 Visa Manager")
-
-st.markdown("### 📄 Fichiers chargés")
-st.write("**Clients** :", f"`{_safe_str(clients_src.name if hasattr(clients_src,'name') else clients_src)}`")
-st.write("**Visa** :", f"`{_safe_str(visa_src.name if hasattr(visa_src,'name') else visa_src)}`")
-
-# Onglets
-tabs = st.tabs(["📊 Dashboard", "📈 Analyses", "🏦 Escrow", "👤 Compte client", "🧾 Gestion", "📄 Visa (aperçu)", "💾 Export"])
-
-# Un DataFrame "df_all" = clients normalisés
-df_all = df_clients.copy()
+    # 3) carte des visas
+    vmap = build_visa_map(df_norm)
+    return df_norm, vmap
 
 
 
