@@ -389,9 +389,10 @@ with tabs[1]:
 
         k1, k2, k3, k4, k5 = st.columns([1, 1, 1, 1, 1])
         k1.metric("Dossiers", f"{len(view)}")
-        total = (_to_num(view.get("Montant honoraires (US $)", 0)) + _to_num(view.get("Autres frais (US $)", 0))).sum()
-        paye = _to_num(view.get("Payé", 0)).sum()
-        solde = _to_num(view.get("Solde", 0)).sum()
+        total = (_to_num(view["Montant honoraires (US $)"]) + _to_num(view["Autres frais (US $)"])).sum()
+        paye = _to_num(view["Payé"]).sum()
+        solde = _to_num(view["Solde"]).sum()
+
         env_pct = 0
         if "Dossiers envoyé" in view.columns and len(view) > 0:
             env_pct = int(100 * (_to_num(view["Dossiers envoyé"]).clip(lower=0, upper=1).sum() / len(view)))
