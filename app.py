@@ -77,6 +77,10 @@ def _date_for_widget(val: Any) -> date:
     except Exception:
         return date.today()
 
+        return d.date()
+    except Exception:
+        return date.today()
+
 def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
