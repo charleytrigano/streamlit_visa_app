@@ -11,6 +11,269 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+
+# ============================
+# BLOC — FICHIERS & MÉMOIRE DES CHEMINS
+# ============================
+
+import os, json, io, re, math
+from datetime import date, datetime
+from pathlib import Path
+from typing import Tuple, Optional
+import pandas as pd
+import streamlit as st
+
+SID = "vm"  # préfixe unique pour les clés de widgets
+
+# ---------- Persistance des derniers chemins ----------
+LAST_PATHS_FILE = Path("./_last_paths.json")
+
+def _safe_str(x) -> str:
+    try:
+        if x is None:
+            return ""
+        if isinstance(x, float) and math.isnan(x):
+            return ""
+        return str(x)
+    except Exception:
+        return ""
+
+def load_last_paths() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Retourne (clients_path, visa_path, save_dir)
+    """
+    try:
+        if LAST_PATHS_FILE.exists():
+            with open(LAST_PATHS_FILE, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            return obj.get("clients"), obj.get("visa"), obj.get("save_dir")
+    except Exception:
+        pass
+    return None, None, None
+
+def save_last_paths(clients_path: Optional[str], visa_path: Optional[str], save_dir: Optional[str]) -> None:
+    try:
+        data = {
+            "clients": clients_path or None,
+            "visa": visa_path or None,
+            "save_dir": save_dir or None,
+        }
+        with open(LAST_PATHS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"Impossible d’écrire _last_paths.json : {e}")
+
+# ---------- Lecture de fichiers ----------
+@st.cache_data(show_spinner=False, ttl=0)
+def read_any_table(path_or_bytes, sheet: Optional[str] = None) -> pd.DataFrame:
+    """
+    Lit CSV ou Excel (xlsx/xls). Si 'path_or_bytes' est bytes, lit depuis mémoire.
+    """
+    try:
+        if isinstance(path_or_bytes, (str, os.PathLike)):
+            p = str(path_or_bytes)
+            low = p.lower()
+            if low.endswith(".csv"):
+                return pd.read_csv(p, dtype=str, encoding_errors="ignore")
+            # Excel
+            if sheet:
+                return pd.read_excel(p, sheet_name=sheet)
+            return pd.read_excel(p)
+        else:
+            # bytes upload (Streamlit)
+            if hasattr(path_or_bytes, "name"):
+                name = path_or_bytes.name.lower()
+                data = path_or_bytes.read()
+                bio = io.BytesIO(data)
+                if name.endswith(".csv"):
+                    return pd.read_csv(io.BytesIO(data), dtype=str, encoding_errors="ignore")
+                else:
+                    if sheet:
+                        return pd.read_excel(bio, sheet_name=sheet)
+                    return pd.read_excel(bio)
+            # fallback
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erreur de lecture: {e}")
+        return pd.DataFrame()
+
+# ---------- Normalisations simples pour Clients ----------
+def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    # Harmonise quelques noms fréquents
+    ren = {}
+    cols_lower = {c.lower(): c for c in df.columns}
+    def has(col):
+        return col in cols_lower
+
+    def col(col):
+        return cols_lower.get(col)
+
+    # Colonnes usuelles de ton modèle
+    # ID_Client, Dossier N, Nom, Date, Categorie/Sous-categorie/Visa, Montant honoraires (US $), Autres frais (US $), Payé, Reste/Solde, Paiements/Commentaires
+    mapping = {
+        "id_client": "ID_Client",
+        "dossier n": "Dossier N",
+        "nom": "Nom",
+        "date": "Date",
+        "categorie": "Categorie",
+        "catégorie": "Categorie",
+        "sous-categorie": "Sous-categorie",
+        "sous-catégorie": "Sous-categorie",
+        "visa": "Visa",
+        "montant honoraires (us $)": "Montant honoraires (US $)",
+        "autres frais (us $)": "Autres frais (US $)",
+        "payé": "Payé",
+        "paye": "Payé",
+        "reste": "Reste",
+        "solde": "Reste",
+        "commentaires": "Commentaires",
+        "paiements": "Paiements",
+        "mois": "Mois",
+        "dossier envoyé": "Dossier envoyé",
+        "dossier accepte": "Dossier accepté",
+        "dossier accepté": "Dossier accepté",
+        "dossier refuse": "Dossier refusé",
+        "dossier refusé": "Dossier refusé",
+        "dossier annule": "Dossier annulé",
+        "dossier annulé": "Dossier annulé",
+        "rfe": "RFE",
+        "date d'envoi": "Date d'envoi",
+        "date d’acceptation": "Date d'acceptation",
+        "date d'acceptation": "Date d'acceptation",
+        "date de refus": "Date de refus",
+        "date d'annulation": "Date d'annulation",
+        "date d’annulation": "Date d'annulation",
+    }
+
+    for k, target in mapping.items():
+        if has(k) and col(k) != target:
+            ren[col(k)] = target
+
+    df = df.rename(columns=ren)
+
+    # Types / compléments
+    if "Mois" not in df.columns:
+        # dérive à partir de Date si possible
+        if "Date" in df.columns:
+            try:
+                d = pd.to_datetime(df["Date"], errors="coerce")
+                df["Mois"] = d.dt.month.fillna(1).astype(int).astype(str).str.zfill(2)
+            except Exception:
+                df["Mois"] = "01"
+        else:
+            df["Mois"] = "01"
+
+    # Numériques sûrs
+    for c in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Reste"]:
+        if c in df.columns:
+            s = df[c]
+            s = s.astype(str).str.replace(",", ".", regex=False)
+            s = s.str.replace(r"[^\d.\-]", "", regex=True)
+            df[c] = pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+    # Total si absent
+    if "Total (US $)" not in df.columns:
+        h = df.get("Montant honoraires (US $)", pd.Series(0.0, index=df.index))
+        o = df.get("Autres frais (US $)", pd.Series(0.0, index=df.index))
+        df["Total (US $)"] = (h + o).astype(float)
+
+    # Reste si absent
+    if "Reste" not in df.columns:
+        p = df.get("Payé", pd.Series(0.0, index=df.index))
+        df["Reste"] = (df["Total (US $)"] - p).astype(float)
+
+    # Dates sûres -> string YYYY-MM-DD
+    for dc in ["Date", "Date d'envoi", "Date d'acceptation", "Date de refus", "Date d'annulation"]:
+        if dc in df.columns:
+            try:
+                dt = pd.to_datetime(df[dc], errors="coerce")
+                df[dc] = dt.dt.date.astype(str)
+            except Exception:
+                df[dc] = df[dc].astype(str)
+
+    # Clés absentes
+    for need in ["ID_Client", "Nom", "Categorie", "Sous-categorie", "Visa"]:
+        if need not in df.columns:
+            df[need] = ""
+
+    return df
+
+# ---------- UI de chargement ----------
+st.sidebar.markdown("## 📂 Fichiers")
+mode = st.sidebar.radio("Mode de chargement", ["Un fichier (Clients)", "Deux fichiers (Clients & Visa)"], index=0, key=f"mode_{SID}")
+
+last_clients, last_visa, last_save = load_last_paths()
+
+# Uploaders
+up_clients = st.sidebar.file_uploader("Clients (xlsx/csv)", type=["xlsx", "xls", "csv"], key=f"up_c_{SID}")
+up_visa    = None
+if mode == "Deux fichiers (Clients & Visa)":
+    up_visa = st.sidebar.file_uploader("Visa (xlsx/csv)", type=["xlsx", "xls", "csv"], key=f"up_v_{SID}")
+
+# Choix de chemins mémorisés (affichage)
+st.sidebar.caption("**Derniers chemins mémorisés :**")
+c1, c2 = st.sidebar.columns(2)
+c1.write(f"**Dernier Clients**\n{_safe_str(last_clients) or '-'}")
+c2.write(f"**Dernier Visa**\n{_safe_str(last_visa) or '-'}")
+
+# Chemin de sauvegarde
+st.sidebar.markdown("**Chemin de sauvegarde** (sur ton PC / Drive / OneDrive) :")
+save_dir = st.sidebar.text_input("Dossier de sauvegarde", value=_safe_str(last_save), key=f"save_dir_{SID}")
+
+# Boutons pour mémoriser
+colm = st.sidebar.columns(3)
+if colm[0].button("Mémoriser", key=f"mem_{SID}"):
+    # On ne connaît pas encore les chemins concrets si upload; on sauvegardera après détermination des paths
+    st.session_state[f"mem_pending_{SID}"] = True
+    st.success("Les chemins seront mémorisés après détermination des fichiers.")
+
+# ---------- Résolution des chemins courants ----------
+clients_src = up_clients if up_clients is not None else (last_clients if last_clients else None)
+visa_src    = up_visa if up_visa is not None else (last_visa if last_visa else None)
+
+# Si un seul fichier pour tout : on réutilise le même pour Visa
+if mode == "Un fichier (Clients)":
+    visa_src = visa_src or clients_src
+
+# Charger données brutes
+df_clients_raw = normalize_clients(read_any_table(clients_src)) if clients_src else pd.DataFrame()
+df_visa_raw    = read_any_table(visa_src) if visa_src else pd.DataFrame()
+
+# Déterminer des chemins “courants” pour affichage / sauvegarde
+def _materialize_upload(uploaded, fallback_name: str) -> Optional[str]:
+    """
+    Si fichier uploadé => enregistre dans ./upload_<nom> et renvoie ce chemin.
+    Sinon, renvoie la chaîne déjà reçue (chemin local).
+    """
+    if uploaded is None:
+        return None
+    if isinstance(uploaded, (str, os.PathLike)):
+        return str(uploaded)
+    # UploadedFile
+    try:
+        data = uploaded.read()
+        outname = f"./upload_{uploaded.name}"
+        with open(outname, "wb") as f:
+            f.write(data)
+        return outname
+    except Exception:
+        return None
+
+clients_path_curr = _materialize_upload(up_clients, "clients.xlsx") if up_clients is not None else (clients_src if isinstance(clients_src, (str, os.PathLike)) else None)
+visa_path_curr    = _materialize_upload(up_visa, "visa.xlsx") if up_visa is not None else (visa_src if isinstance(visa_src, (str, os.PathLike)) else None)
+
+# Mémoriser si demandé
+if st.session_state.get(f"mem_pending_{SID}"):
+    save_last_paths(clients_path_curr, visa_path_curr, save_dir)
+    st.session_state[f"mem_pending_{SID}"] = False
+
+# Affichage fichiers chargés
+st.markdown("### 📄 Fichiers chargés")
+st.write(f"**Clients** : `{_safe_str(clients_path_curr) or '—'}`")
+st.write(f"**Visa** : `{_safe_str(visa_path_curr) or '—'}`")
+
 # ---------- Config de page ----------
 st.set_page_config(page_title="Visa Manager", layout="wide")
 
