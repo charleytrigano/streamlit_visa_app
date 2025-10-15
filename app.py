@@ -81,7 +81,7 @@ dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
 
         return d.date()
     except Exception:
-        return date.today()
+            return date.today()
 
 def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     out = df.copy()
