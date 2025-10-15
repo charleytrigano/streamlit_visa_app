@@ -1819,249 +1819,127 @@ with tabs[5]:
 
 
 # ==============================
-# BLOC 8/10 — 👤 Compte client (fiche + paiements)
+# BLOC 8/10 — 👤 Compte client (détails financiers + chronologie)
+# (Dépend de : read_clients_file, _fmt_money, _ensure_num, clients_src, SID)
 # ==============================
 
 with tabs[3]:
-    st.markdown("### 👤 Compte client — fiche & paiements")
+    st.markdown("### 👤 Compte client — Détails et historique")
 
-    # petite fabrique de clés pour éviter les collisions
-    def skey(*parts): 
-        return f"{SID}_" + "_".join(str(p) for p in parts)
-
-    # utilitaires locaux robustes (au cas où)
-    def _json_list(v):
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return []
-        if isinstance(v, list):
-            return v
-        s = str(v).strip()
-        if not s or s in ("nan", "NaN", "None"):
-            return []
-        try:
-            r = json.loads(s)
-            return r if isinstance(r, list) else []
-        except Exception:
-            # format simple "amt|date|methode;amt|..."
-            items = []
-            for chunk in s.split(";"):
-                parts = [p.strip() for p in chunk.split("|")]
-                if not parts or parts == [""]:
-                    continue
-                try:
-                    amt = float(str(parts[0]).replace(",", "."))
-                except Exception:
-                    amt = 0.0
-                dte = parts[1] if len(parts) > 1 else ""
-                mth = parts[2] if len(parts) > 2 else ""
-                if amt > 0:
-                    items.append({"amount": amt, "date": dte, "method": mth})
-            return items
-
-    def _payments_sum(pay_list):
-        try:
-            return float(sum(float(p.get("amount", 0) or 0) for p in (pay_list or [])))
-        except Exception:
-            return 0.0
-
-    def _ensure_num(v, default=0.0):
-        try:
-            if isinstance(v, str):
-                v = v.replace(" ", "").replace("$","").replace("€","").replace(",", ".")
-            return float(v)
-        except Exception:
-            return float(default)
-
-    # Charger l'état courant (depuis la source choisie)
-    df_live = read_clients_file(clients_src)
-    if df_live is None or df_live.empty:
-        st.info("Aucun client chargé. Utilise la barre latérale pour charger le fichier Clients.")
+    df_acc = read_clients_file(clients_src)
+    if df_acc is None or df_acc.empty:
+        st.info("Aucun client chargé.")
         st.stop()
 
-    # Normalisation de quelques colonnes attendues
-    for col in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"]:
-        if col not in df_live.columns:
-            df_live[col] = 0.0
-
-    # Sélection du client (par Nom ou ID)
     c1, c2 = st.columns([2,2])
-    noms = sorted(df_live.get("Nom", pd.Series([], dtype=str)).astype(str).unique().tolist())
-    ids  = sorted(df_live.get("ID_Client", pd.Series([], dtype=str)).astype(str).unique().tolist())
+    noms = sorted(df_acc["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_acc.columns else []
+    ids  = sorted(df_acc["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_acc.columns else []
 
-    sel_nom = c1.selectbox("Nom", [""] + noms, index=0, key=skey("acct","nom"))
-    sel_id  = c2.selectbox("ID_Client", [""] + ids, index=0, key=skey("acct","id"))
+    sel_nom = c1.selectbox("Nom", [""] + noms, index=0, key=f"acct_nom_{SID}")
+    sel_id  = c2.selectbox("ID_Client", [""] + ids, index=0, key=f"acct_id_{SID}")
 
     mask = None
     if sel_id:
-        mask = (df_live["ID_Client"].astype(str) == sel_id)
+        mask = (df_acc["ID_Client"].astype(str) == sel_id)
     elif sel_nom:
-        mask = (df_live["Nom"].astype(str) == sel_nom)
+        mask = (df_acc["Nom"].astype(str) == sel_nom)
 
     if mask is None or not mask.any():
         st.stop()
 
-    idx = df_live[mask].index[0]
-    row = df_live.loc[idx].copy()
+    row = df_acc[mask].iloc[0]
 
-    # --- Bandeau d'infos & KPI mini
-    st.markdown("#### 🧾 Synthèse dossier")
+    st.markdown(f"#### 🧾 Dossier N° {row.get('Dossier N','?')} — {_safe_str(row.get('Nom',''))}")
 
-    honor = _ensure_num(row.get("Montant honoraires (US $)", 0))
-    other = _ensure_num(row.get("Autres frais (US $)", 0))
-    total = honor + other
+    # --- Section financière ---
+    honor  = float(_ensure_num(row.get("Montant honoraires (US $)",0)))
+    other  = float(_ensure_num(row.get("Autres frais (US $)",0)))
+    paye   = float(_ensure_num(row.get("Payé",0)))
+    solde  = float(_ensure_num(row.get("Solde", honor + other - paye)))
 
-    # paiements (liste d'objets)
-    pay_list = _json_list(row.get("Paiements"))
-    paid = _payments_sum(pay_list)
-    reste = max(0.0, total - paid)
+    f1, f2, f3, f4 = st.columns(4)
+    f1.metric("Honoraires", f"${honor:,.2f}")
+    f2.metric("Autres frais", f"${other:,.2f}")
+    f3.metric("Payé", f"${paye:,.2f}")
+    f4.metric("Solde", f"${solde:,.2f}")
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Honoraires", _fmt_money(honor))
-    k2.metric("Autres frais", _fmt_money(other))
-    k3.metric("Payé", _fmt_money(paid))
-    k4.metric("Solde", _fmt_money(reste))
+    st.divider()
 
-    # --- Infos de la fiche
-    st.markdown("#### 📄 Fiche")
-    f1, f2, f3 = st.columns([2,2,2])
-    f1.write(f"**Nom :** {row.get('Nom','')}")
-    f1.write(f"**ID_Client :** {row.get('ID_Client','')}")
-    # date
-    dval = row.get("Date")
+    # --- Chronologie & Statuts ---
+    s_env = int(_ensure_num(row.get("Dossier envoyé",0))) == 1
+    s_acc = int(_ensure_num(row.get("Dossier approuvé",0))) == 1
+    s_ref = int(_ensure_num(row.get("Dossier refusé",0))) == 1
+    s_ann = int(_ensure_num(row.get("Dossier annulé",0))) == 1
+    s_rfe = int(_ensure_num(row.get("RFE",0))) == 1
+
+    def sdate(col):
+        val = _safe_str(row.get(col,""))
+        return val if val else "—"
+
+    st.markdown("##### 📅 Statuts du dossier")
+
+    f1, f2, f3 = st.columns(3)
+    f1.write(f"**RFE :** {'Oui' if s_rfe else 'Non'}")
+    f2.write(f"**Catégorie :** {_safe_str(row.get('Categorie',''))}")
+    f3.write(f"**Sous-catégorie :** {_safe_str(row.get('Sous-categorie',''))}")
+
+    st.divider()
+
+    f1, f2, f3, f4 = st.columns(4)
+    f1.write(f"**Dossier envoyé :** {'Oui' if s_env else 'Non'} — {sdate(\"Date d'envoi\")}")
+    f2.write(f"**Dossier approuvé :** {'Oui' if s_acc else 'Non'} — {sdate(\"Date d'acceptation\")}")
+    f3.write(f"**Dossier refusé :** {'Oui' if s_ref else 'Non'} — {sdate(\"Date de refus\")}")
+    f4.write(f"**Dossier annulé :** {'Oui' if s_ann else 'Non'} — {sdate(\"Date d'annulation\")}")
+
+    st.divider()
+
+    st.markdown("##### 💬 Commentaires")
+    st.info(_safe_str(row.get("Commentaires","(aucun)")))
+
+    # --- Paiements (liste et historique) ---
+    st.markdown("##### 💵 Historique des paiements")
     try:
-        dval = pd.to_datetime(dval, errors="coerce")
-        dstr = "" if pd.isna(dval) else str(dval.date())
+        payments = json.loads(row.get("Paiements","[]")) if isinstance(row.get("Paiements"), str) else []
     except Exception:
-        dstr = str(dval) if dval is not None else ""
-    f1.write(f"**Date de création :** {dstr}")
+        payments = []
 
-    # visa
-    f2.write(f"**Catégorie :** {row.get('Categorie','')}")
-    f2.write(f"**Sous-catégorie :** {row.get('Sous-categorie','')}")
-    f2.write(f"**Visa :** {row.get('Visa','')}")
-
-    # statuts (bool + dates libres)
-    s_env = int(_ensure_num(row.get("Dossier envoyé", 0))) == 1
-    s_acc = int(_ensure_num(row.get("Dossier approuvé", 0))) == 1
-    s_ref = int(_ensure_num(row.get("Dossier refusé", 0))) == 1
-    s_ann = int(_ensure_num(row.get("Dossier annulé", 0))) == 1
-    s_rfe = int(_ensure_num(row.get("RFE", 0))) == 1
-
-    # dates
-    def sdate(key):
-        v = row.get(key, "")
-        try:
-            d = pd.to_datetime(v, errors="coerce")
-            return "" if pd.isna(d) else str(d.date())
-        except Exception:
-            return str(v) if v else ""
-
-    f3.write(f"**Dossier envoyé :** {'Oui' if s_env else 'Non'} — {sdate('Date d\\'envoi')}")
-    f3.write(f"**Dossier approuvé :** {'Oui' if s_acc else 'Non'} — {sdate('Date d\\'acceptation')}")
-    f3.write(f"**Dossier refusé :** {'Oui' if s_ref else 'Non'} — {sdate('Date de refus')}")
-    f3.write(f"**Dossier annulé :** {'Oui' if s_ann else 'Non'} — {sdate('Date d\\'annulation')}")
-    f3.write(f"**RFE :** {'Oui' if s_rfe else 'Non'}")
-
-    # Commentaires (lecture seule ici)
-    if "Commentaires" in df_live.columns:
-        st.caption("**Commentaires :**")
-        st.write(str(row.get("Commentaires","")))
-
-    st.markdown("---")
-
-    # --- Historique des paiements
-    st.markdown("#### 💳 Historique des paiements")
-    if pay_list:
-        jdf = pd.DataFrame(pay_list)
-        # nettoyage colonnes
-        if "amount" in jdf.columns:
-            jdf["amount"] = jdf["amount"].apply(_ensure_num)
-        if "date" in jdf.columns:
-            # laissez tel quel, juste affichage
-            jdf["date"] = jdf["date"].astype(str)
-        if "method" not in jdf.columns:
-            jdf["method"] = ""
-        jdf = jdf.rename(columns={"amount":"Montant", "date":"Date", "method":"Mode"})
-        st.dataframe(jdf[["Date","Mode","Montant"]].sort_values("Date"), use_container_width=True, hide_index=True, key=skey("acct","payhist"))
+    if payments:
+        ptable = pd.DataFrame(payments)
+        st.dataframe(ptable, use_container_width=True)
     else:
-        st.info("Aucun paiement enregistré.")
+        st.write("Aucun paiement enregistré.")
 
-    # --- Ajouter un paiement si solde > 0
-    if reste > 0.0:
-        st.markdown("#### ➕ Ajouter un paiement")
-        p1, p2, p3, p4 = st.columns([1.2, 1.2, 1.2, 1])
-        p_amt = p1.number_input("Montant (US $)", min_value=0.0, step=10.0, format="%.2f", key=skey("acct","pamt"))
-        p_date = p2.date_input("Date du paiement", value=date.today(), key=skey("acct","pdate"))
-        p_method = p3.selectbox("Mode", ["CB","Chèque","Cash","Virement","Venmo","Autre"], index=0, key=skey("acct","pmethod"))
-        add_p = p4.button("💾 Enregistrer ce paiement", key=skey("acct","paybtn"))
+    st.divider()
 
-        if add_p:
-            if p_amt <= 0:
-                st.warning("Le montant doit être > 0.")
-                st.stop()
-            # reconstruire la liste
-            pay_list = _json_list(df_live.at[idx, "Paiements"])
-            pay_list.append({
-                "amount": float(p_amt),
-                "date": (p_date if isinstance(p_date, (date, datetime)) else date.today()).strftime("%Y-%m-%d"),
-                "method": str(p_method),
-            })
-            # recalculs
-            new_paid = _payments_sum(pay_list)
-            new_reste = max(0.0, (honor + other) - new_paid)
+    # --- Ajout d’un nouveau paiement ---
+    st.markdown("##### ➕ Ajouter un paiement")
+    pay_col1, pay_col2, pay_col3 = st.columns([1,1,2])
+    new_date = pay_col1.date_input("Date", value=date.today(), key=f"pay_date_{SID}")
+    new_amount = pay_col2.number_input("Montant (US $)", min_value=0.0, step=50.0, format="%.2f", key=f"pay_amt_{SID}")
+    new_note = pay_col3.text_input("Note", "", key=f"pay_note_{SID}")
 
-            # écrire dans le DF
-            df_live.at[idx, "Paiements"] = json.dumps(pay_list, ensure_ascii=False)
-            df_live.at[idx, "Payé"] = new_paid
-            # compatibilité "Reste" / "Solde"
-            if "Solde" in df_live.columns:
-                df_live.at[idx, "Solde"] = new_reste
-            if "Reste" in df_live.columns:
-                df_live.at[idx, "Reste"] = new_reste
+    if st.button("💾 Ajouter ce paiement", key=f"add_payment_{SID}"):
+        payments.append({
+            "date": str(new_date),
+            "montant": float(new_amount),
+            "note": new_note,
+        })
+        total_paye = sum(p.get("montant",0) for p in payments)
+        total_due  = honor + other
+        solde = max(0.0, total_due - total_paye)
 
-            # sauvegarde
-            write_clients_file(df_live, clients_save_path)
-            st.success("Paiement ajouté, totaux mis à jour.")
-            st.cache_data.clear()
-            st.rerun()
-    else:
-        st.success("✅ Dossier soldé.")
+        row["Paiements"] = json.dumps(payments, ensure_ascii=False)
+        row["Payé"] = total_paye
+        row["Solde"] = solde
 
-    st.markdown("---")
+        df_acc.loc[mask, "Paiements"] = row["Paiements"]
+        df_acc.loc[mask, "Payé"] = total_paye
+        df_acc.loc[mask, "Solde"] = solde
 
-    # --- Mise à jour rapide des statuts & dates
-    st.markdown("#### 🏷️ Statuts du dossier (édition rapide)")
-    q1, q2, q3, q4, q5 = st.columns(5)
-    env = q1.toggle("Envoyé", value=s_env, key=skey("st","env"))
-    acc = q2.toggle("Approuvé", value=s_acc, key=skey("st","acc"))
-    ref = q3.toggle("Refusé", value=s_ref, key=skey("st","ref"))
-    ann = q4.toggle("Annulé", value=s_ann, key=skey("st","ann"))
-    rfe = q5.toggle("RFE", value=s_rfe, key=skey("st","rfe"))
-
-    r1, r2, r3, r4 = st.columns(4)
-    # dates (texte libre pour compatibilité maxi)
-    de = r1.text_input("Date d'envoi", value=sdate("Date d'envoi"), key=skey("st","de"))
-    da = r2.text_input("Date d'acceptation", value=sdate("Date d'acceptation"), key=skey("st","da"))
-    dr = r3.text_input("Date de refus", value=sdate("Date de refus"), key=skey("st","dr"))
-    dn = r4.text_input("Date d'annulation", value=sdate("Date d'annulation"), key=skey("st","dn"))
-
-    if st.button("💾 Mettre à jour les statuts", key=skey("st","save")):
-        df_live.at[idx, "Dossier envoyé"] = 1 if env else 0
-        df_live.at[idx, "Dossier approuvé"] = 1 if acc else 0
-        df_live.at[idx, "Dossier refusé"] = 1 if ref else 0
-        df_live.at[idx, "Dossier annulé"] = 1 if ann else 0
-        df_live.at[idx, "RFE"] = 1 if rfe else 0
-        # dates (laisser au format tel quel saisi)
-        df_live.at[idx, "Date d'envoi"] = de
-        df_live.at[idx, "Date d'acceptation"] = da
-        df_live.at[idx, "Date de refus"] = dr
-        df_live.at[idx, "Date d'annulation"] = dn
-
-        write_clients_file(df_live, clients_save_path)
-        st.success("Statuts mis à jour.")
+        write_clients_file(df_acc, clients_save_path)
+        st.success("Paiement ajouté avec succès ✅")
         st.cache_data.clear()
         st.rerun()
-
 
 
 
