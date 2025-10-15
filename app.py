@@ -78,10 +78,10 @@ def _date_for_widget(val: Any) -> date:
         return date.today()
 
         dval = _date_for_widget(row.get("Date"))
-if dval is None or isinstance(dval, pd._libs.tslibs.nattype.NaTType):
-    dval = date.today()
+        if dval is None or isinstance(dval, pd._libs.tslibs.nattype.NaTType):
+        dval = date.today()
 
-dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
+        dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
 
 
         return d.date()
