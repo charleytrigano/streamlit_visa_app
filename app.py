@@ -320,6 +320,22 @@ tab_titles = [
     "💾 Export",
 ]
 tab_dash, tab_analyses, tab_escrow, tab_compte, tab_gestion, tab_visa, tab_export = st.tabs(tab_titles)
+
+# ---------- Entête & onglets (version corrigée sans index)
+st.markdown("### 📄 Fichiers chargés")
+st.write("**Clients** :", f"`{clients_path_curr}`" if clients_path_curr else "_(aucun)_")
+st.write("**Visa**    :", f"`{visa_path_curr}`" if visa_path_curr else "_(aucun)_")
+
+# Création des onglets nommés pour éviter les erreurs d’index
+tab_dash, tab_analyses, tab_escrow, tab_compte, tab_gestion, tab_visa, tab_export = st.tabs([
+    "📊 Dashboard",
+    "📈 Analyses",
+    "🏦 Escrow",
+    "👤 Compte client",
+    "🧾 Gestion",
+    "📄 Visa (aperçu)",
+    "💾 Export"
+])
 # =========================
 # PARTIE 2/4 — DASHBOARD & ANALYSES
 # =========================
