@@ -560,78 +560,283 @@ else:
 
 
 
-# ================================
-# PARTIE 3/6 — 📊 Dashboard
-# ================================
-with tabs[0]:
-    st.subheader("📊 Dashboard")
+# ============ BLOC 3/10 — 📈 Analyses (COMPLET, autonome) ============
 
-    if df_all.empty:
-        st.info("Aucun client chargé. Charge les fichiers dans la barre latérale.")
+# Ce bloc suppose l’existence de :
+# - df_all : dataframe clients normalisé (colonnes attendues si dispo : "Categorie","Sous-categorie","Visa",
+#           "Mois","_Année_","Montant honoraires (US $)","Autres frais (US $)","Payé","Reste","Date", etc.)
+# - df_visa_raw : dataframe Visa brut (facultatif). Si absent ou vide, on reconstruit depuis df_all.
+# - tabs : liste de st.tabs([...]) dans laquelle l’onglet 📈 Analyses est le dernier.
+#
+# Rien d’autre n’est requis. Les helpers utilisés ci-dessous sont locaux au bloc pour ne rien casser.
+
+import math
+from datetime import date, datetime
+
+# --- helpers locaux (ne touchent à rien d’existant) ---
+def _sid(prefix: str) -> str:
+    """UID stable pour les clés Streamlit de ce bloc uniquement."""
+    return f"an_{prefix}"
+
+def _to_num_local(x):
+    """Sécurise conversion float (gère None, '', NaN, etc.)."""
+    try:
+        if x is None:
+            return 0.0
+        if isinstance(x, (int, float)):
+            return float(x)
+        s = str(x).strip().replace("\u00A0", " ")  # no-break space
+        s = s.replace(",", ".")
+        # garde uniquement chiffres, ., -
+        import re as _re
+        s = _re.sub(r"[^0-9.\-]", "", s)
+        return float(s) if s not in ("", "-", ".", "-.") else 0.0
+    except Exception:
+        return 0.0
+
+def _num_series_local(df, col):
+    if col not in df.columns:
+        return pd.Series([0.0] * len(df), index=df.index, dtype=float)
+    return df[col].apply(_to_num_local).astype(float)
+
+def _fmt_money_local(v: float) -> str:
+    try:
+        return f"${v:,.2f}"
+    except Exception:
+        return "$0.00"
+
+def _build_visa_map_for_analyses(df_visa_raw, df_all):
+    """
+    Construit un 'visa_map' minimal (cat -> sub -> set(visa)) pour les filtres Analyses.
+    Source prioritaire : df_visa_raw si colonnes présentes.
+    Sinon, reconstruit depuis df_all.
+    """
+    vm = {}
+    # 1) depuis le fichier Visa si les colonnes existent
+    if df_visa_raw is not None and not df_visa_raw.empty:
+        cols = [c for c in df_visa_raw.columns]
+        has_cat = any(c.lower().startswith("cat") for c in cols)
+        has_sub = any(c.lower().startswith("sous") for c in cols)
+        has_vis = any("visa" == c.strip().lower() for c in cols)
+
+        if has_cat or has_sub or has_vis:
+            def _getcol(df, wanted):
+                for c in df.columns:
+                    if c.strip().lower().startswith(wanted):
+                        return c
+                return None
+            c_cat = _getcol(df_visa_raw, "cat")
+            c_sub = _getcol(df_visa_raw, "sous")
+            c_vis = None
+            for c in df_visa_raw.columns:
+                if c.strip().lower() == "visa":
+                    c_vis = c
+                    break
+
+            dsrc = df_visa_raw.copy()
+            if c_cat is not None: dsrc[c_cat] = dsrc[c_cat].astype(str).str.strip()
+            if c_sub is not None: dsrc[c_sub] = dsrc[c_sub].astype(str).str.strip()
+            if c_vis is not None: dsrc[c_vis] = dsrc[c_vis].astype(str).str.strip()
+
+            for _, r in dsrc.iterrows():
+                cat = r.get(c_cat, "") if c_cat else ""
+                sub = r.get(c_sub, "") if c_sub else ""
+                vis = r.get(c_vis, "") if c_vis else ""
+
+                if cat:
+                    vm.setdefault(cat, {})
+                    if sub:
+                        vm[cat].setdefault(sub, set())
+                        if vis:
+                            vm[cat][sub].add(vis)
+                    else:
+                        # si pas de sous-catégorie, on met tout sous ""
+                        vm[cat].setdefault("", set())
+                        if vis:
+                            vm[cat][""].add(vis)
+
+    # 2) fallback depuis df_all si vm reste vide
+    if (not vm) and (df_all is not None) and (not df_all.empty):
+        dsrc = df_all.copy()
+        if "Categorie" in dsrc.columns:
+            dsrc["Categorie"] = dsrc["Categorie"].astype(str).str.strip()
+        if "Sous-categorie" in dsrc.columns:
+            dsrc["Sous-categorie"] = dsrc["Sous-categorie"].astype(str).str.strip()
+        if "Visa" in dsrc.columns:
+            dsrc["Visa"] = dsrc["Visa"].astype(str).str.strip()
+
+        cats = dsrc["Categorie"].dropna().unique().tolist() if "Categorie" in dsrc.columns else []
+        for cat in cats:
+            vm.setdefault(cat, {})
+            subs = dsrc.loc[dsrc["Categorie"] == cat, "Sous-categorie"].dropna().unique().tolist() \
+                   if "Sous-categorie" in dsrc.columns else [""]
+            for sub in subs:
+                vm[cat].setdefault(sub, set())
+                if "Visa" in dsrc.columns:
+                    visas = dsrc.loc[(dsrc["Categorie"] == cat) &
+                                     (dsrc["Sous-categorie"] == sub if "Sous-categorie" in dsrc.columns else True),
+                                     "Visa"].dropna().unique().tolist()
+                    for v in visas:
+                        vm[cat][sub].add(v)
+    # transformer sets en listes triées
+    for cat in list(vm.keys()):
+        for sub in list(vm[cat].keys()):
+            vm[cat][sub] = sorted(list(vm[cat][sub]))
+    return vm
+
+# ---------------------------------------------------------
+# RENDU DE L’ONGLET ANALYSES
+# ---------------------------------------------------------
+# Si tu as déjà construit 'tabs' avec l’onglet "📈 Analyses" en dernier :
+target_container = tabs[-1] if 'tabs' in globals() and isinstance(tabs, (list, tuple)) and len(tabs) > 0 else st
+
+with target_container:
+    st.subheader("📈 Analyses")
+
+    if 'df_all' not in globals() or df_all is None or df_all.empty:
+        st.info("Aucune donnée client. Charge d’abord un fichier Clients.")
     else:
-        # KPIs
-        left, right = st.columns([1.2, 2.8])
-        with left:
-            k1, k2 = st.columns([1,1])
-            k3, k4 = st.columns([1,1])
-            k1.metric("Dossiers", f"{len(df_all)}")
-            k2.metric("Honoraires+Frais", _fmt_money((_series_num(df_all,"Montant honoraires (US $)") + _series_num(df_all,"Autres frais (US $)")).sum()))
-            k3.metric("Payé", _fmt_money(_series_num(df_all, "Payé").sum()))
-            k4.metric("Solde", _fmt_money(_series_num(df_all, "Reste").sum()))
-            # % envoyés
-            pct_env = 0.0
-            if len(df_all) > 0:
-                pct_env = 100.0 * (_series_num(df_all, "Dossier envoyé")>0).sum() / len(df_all)
-            st.metric("Envoyés (%)", f"{pct_env:0.0f}%")
+        # Visa map minimal pour alimenter des filtres corrects
+        visa_map_local = _build_visa_map_for_analyses(globals().get('df_visa_raw', None), df_all)
 
-        with right:
-            st.markdown("#### 🎛️ Filtres")
-            cats  = sorted(df_all["Categorie"].dropna().astype(str).unique().tolist()) if "Categorie" in df_all.columns else []
-            subs  = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all.columns else []
-            visas = sorted(df_all["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all.columns else []
+        # --- Jeux d’options pour filtres
+        yearsA  = sorted([int(y) for y in pd.to_numeric(df_all.get("_Année_", pd.Series(dtype=float)),
+                                                        errors="coerce").dropna().unique().tolist()])
+        monthsA = [f"{m:02d}" for m in range(1, 13)]
+        catsA   = sorted(df_all.get("Categorie", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+        subsA   = sorted(df_all.get("Sous-categorie", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+        visasA  = sorted(df_all.get("Visa", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
 
-            a1, a2, a3 = st.columns(3)
-            fc = a1.multiselect("Catégories", cats, default=[], key=f"dash_c_{SID}")
-            fs = a2.multiselect("Sous-catégories", subs, default=[], key=f"dash_s_{SID}")
-            fv = a3.multiselect("Visa", visas, default=[], key=f"dash_v_{SID}")
+        st.caption("Filtre libre + comparatifs (mois/années). Les clés Streamlit sont isolées pour éviter les collisions.")
+        a1, a2, a3, a4, a5 = st.columns([1,1,1,1,1])
 
-        view = df_all.copy()
-        if fc: view = view[view["Categorie"].astype(str).isin(fc)]
-        if fs: view = view[view["Sous-categorie"].astype(str).isin(fs)]
-        if fv: view = view[view["Visa"].astype(str).isin(fv)]
+        fy = a1.multiselect("Année", yearsA, default=[], key=_sid("years"))
+        fm = a2.multiselect("Mois (MM)", monthsA, default=[], key=_sid("months"))
+        fc = a3.multiselect("Catégorie", catsA, default=[], key=_sid("cats"))
+        fs = a4.multiselect("Sous-catégorie", subsA, default=[], key=_sid("subs"))
+        fv = a5.multiselect("Visa", visasA, default=[], key=_sid("visas"))
 
-        st.markdown("#### 📦 Nombre de dossiers par catégorie")
-        if not view.empty and "Categorie" in view.columns:
-            vc = view["Categorie"].value_counts().sort_index()
-            st.bar_chart(vc)
+        dfA = df_all.copy()
 
-        st.markdown("#### 💵 Flux par mois")
-        flux = pd.DataFrame({
-            "Mois": view["Mois"].astype(str),
-            "Montant honoraires (US $)": _series_num(view, "Montant honoraires (US $)"),
-            "Autres frais (US $)": _series_num(view, "Autres frais (US $)"),
-            "Payé": _series_num(view, "Payé"),
-            "Solde": _series_num(view, "Reste")
-        })
-        flux = flux.groupby("Mois", as_index=False).sum().sort_values("Mois")
-        st.line_chart(flux.set_index("Mois"))
+        # Normalisation de base pour éviter surprises
+        if "Mois" in dfA.columns:
+            dfA["Mois"] = dfA["Mois"].astype(str).str.zfill(2)
+        if "_Année_" in dfA.columns:
+            dfA["_Année_"] = pd.to_numeric(dfA["_Année_"], errors="coerce").astype("Int64")
 
+        # Application des filtres
+        if fy:
+            dfA = dfA[dfA["_Année_"].isin(fy)] if "_Année_" in dfA.columns else dfA
+        if fm:
+            dfA = dfA[dfA["Mois"].astype(str).isin(fm)] if "Mois" in dfA.columns else dfA
+        if fc:
+            dfA = dfA[dfA["Categorie"].astype(str).isin(fc)] if "Categorie" in dfA.columns else dfA
+        if fs:
+            dfA = dfA[dfA["Sous-categorie"].astype(str).isin(fs)] if "Sous-categorie" in dfA.columns else dfA
+        if fv:
+            dfA = dfA[dfA["Visa"].astype(str).isin(fv)] if "Visa" in dfA.columns else dfA
+
+        # --- KPI
+        k1, k2, k3, k4, k5 = st.columns([1,1,1,1,1])
+        k1.metric("Dossiers", f"{len(dfA)}")
+        totalA = _num_series_local(dfA, "Montant honoraires (US $)").sum() + _num_series_local(dfA, "Autres frais (US $)").sum()
+        k2.metric("Honoraires+Frais", _fmt_money_local(totalA))
+        payA   = _num_series_local(dfA, "Payé").sum()
+        k3.metric("Payé", _fmt_money_local(payA))
+        resteA = _num_series_local(dfA, "Reste").sum()
+        k4.metric("Solde", _fmt_money_local(resteA))
+        # % envoyés
+        env_col = dfA.get("Dossier envoyé", pd.Series([0]*len(dfA)))
+        env_num = env_col.apply(_to_num_local)
+        pct_env = (env_num > 0).mean() * 100 if len(env_num) else 0.0
+        k5.metric("Envoyés (%)", f"{pct_env:.0f}%")
+
+        st.markdown("#### 📦 Dossiers par catégorie")
+        if "Categorie" in dfA.columns and not dfA.empty:
+            vc = dfA["Categorie"].value_counts().sort_values(ascending=False)
+            st.bar_chart(vc, use_container_width=True, key=_sid("bar_cat"))
+        else:
+            st.info("Pas de colonne 'Categorie' ou données vides.")
+
+        st.markdown("#### 💵 Flux par mois (Honoraires / Frais / Payé / Solde)")
+        tmp = dfA.copy()
+        if "Mois" in tmp.columns:
+            tmp["Mois"] = tmp["Mois"].astype(str).str.zfill(2)
+            grp = pd.DataFrame({
+                "Montant honoraires (US $)": tmp.groupby("Mois", as_index=True).apply(lambda d: _num_series_local(d, "Montant honoraires (US $)").sum()),
+                "Autres frais (US $)"      : tmp.groupby("Mois", as_index=True).apply(lambda d: _num_series_local(d, "Autres frais (US $)").sum()),
+                "Payé"                     : tmp.groupby("Mois", as_index=True).apply(lambda d: _num_series_local(d, "Payé").sum()),
+                "Solde"                    : tmp.groupby("Mois", as_index=True).apply(lambda d: _num_series_local(d, "Reste").sum()),
+            }).fillna(0.0).sort_index()
+            st.line_chart(grp, use_container_width=True, key=_sid("line_month"))
+        else:
+            st.info("Pas de colonne 'Mois'.")
+
+        # Comparaison périodisée (Année A vs Année B / Mois A vs Mois B)
+        st.markdown("#### 🔁 Comparaisons A/B")
+        ca1, ca2, cb1, cb2 = st.columns(4)
+        ya = ca1.selectbox("Année A", ["" ] + [str(y) for y in yearsA], index=0, key=_sid("ya"))
+        yb = ca2.selectbox("Année B", ["" ] + [str(y) for y in yearsA], index=0, key=_sid("yb"))
+        ma = cb1.selectbox("Mois A",  ["" ] + monthsA, index=0, key=_sid("ma"))
+        mb = cb2.selectbox("Mois B",  ["" ] + monthsA, index=0, key=_sid("mb"))
+
+        def _slice(df, yr, mo):
+            dd = df.copy()
+            if yr and "_Année_" in dd.columns:
+                dd = dd[dd["_Année_"].astype(str) == str(yr)]
+            if mo and "Mois" in dd.columns:
+                dd = dd[dd["Mois"].astype(str).str.zfill(2) == str(mo).zfill(2)]
+            return dd
+
+        A = _slice(df_all, ya, ma)
+        B = _slice(df_all, yb, mb)
+
+        def sum_block(D):
+            return {
+                "Dossiers": len(D),
+                "Honoraires+Frais": _num_series_local(D, "Montant honoraires (US $)").sum() + _num_series_local(D, "Autres frais (US $)").sum(),
+                "Payé": _num_series_local(D, "Payé").sum(),
+                "Solde": _num_series_local(D, "Reste").sum()
+            }
+
+        colA, colB = st.columns(2)
+        sa, sb = sum_block(A), sum_block(B)
+        with colA:
+            st.markdown("**Période A**")
+            st.metric("Dossiers", f"{sa['Dossiers']}")
+            st.metric("Honoraires+Frais", _fmt_money_local(sa["Honoraires+Frais"]))
+            st.metric("Payé", _fmt_money_local(sa["Payé"]))
+            st.metric("Solde", _fmt_money_local(sa["Solde"]))
+        with colB:
+            st.markdown("**Période B**")
+            st.metric("Dossiers", f"{sb['Dossiers']}")
+            st.metric("Honoraires+Frais", _fmt_money_local(sb["Honoraires+Frais"]))
+            st.metric("Payé", _fmt_money_local(sb["Payé"]))
+            st.metric("Solde", _fmt_money_local(sb["Solde"]))
+
+        # Détails formatés
         st.markdown("#### 📋 Détails (après filtres)")
-        det = view.copy()
-        for c in ["Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste"]:
+        det = dfA.copy()
+        for c in ["Montant honoraires (US $)", "Autres frais (US $)", "Total (US $)", "Payé", "Reste"]:
             if c in det.columns:
-                det[c] = _series_num(det, c).map(_fmt_money)
+                det[c] = _num_series_local(det, c).apply(_fmt_money_local)
         if "Date" in det.columns:
-            det["Date"] = pd.to_datetime(det["Date"], errors="coerce").dt.date.astype(str)
+            try:
+                det["Date"] = pd.to_datetime(det["Date"], errors="coerce").dt.date.astype(str)
+            except Exception:
+                det["Date"] = det["Date"].astype(str)
 
         show_cols = [c for c in [
             "Dossier N","ID_Client","Nom","Categorie","Sous-categorie","Visa","Date","Mois",
             "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Reste",
-            "Dossier envoyé","Dossier accepté","Dossier refusé","Dossier annulé","RFE","Commentaires"
+            "Dossier envoyé","Dossier accepté","Dossier refusé","Dossier annulé","RFE"
         ] if c in det.columns]
-        sort_keys = [c for c in ["_Année_","_MoisNum_","Categorie","Nom"] if c in det.columns]
-        det = det.sort_values(by=sort_keys) if sort_keys else det
-        st.dataframe(det[show_cols].reset_index(drop=True), use_container_width=True, key=f"dash_table_{SID}")
+
+        sort_keys = [c for c in ["_Année_", "_MoisNum_", "Categorie", "Nom"] if c in det.columns]
+        det_sorted = det.sort_values(by=sort_keys) if sort_keys else det
+        st.dataframe(det_sorted[show_cols].reset_index(drop=True),
+                     use_container_width=True, key=_sid("detail"))
+# ===================== FIN BLOC 3/10 =====================
 
 
 
