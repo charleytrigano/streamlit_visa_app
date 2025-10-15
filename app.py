@@ -516,10 +516,11 @@ with tabs[2]:
         def _kpis(df):
             return {
                 "Dossiers": len(df),
-                "Honoraires": _to_num(df.get("Montant honoraires (US $)", 0)).sum(),
-                "Payé": _to_num(df.get("Payé", 0)).sum(),
-                "Solde": _to_num(df.get("Solde", 0)).sum(),
+                "Honoraires": df["Montant honoraires (US $)"].apply(_to_num).sum(),
+                "Payé": df["Payé"].apply(_to_num).sum(),
+                "Solde": df["Solde"].apply(_to_num).sum(),
             }
+
 
         kA, kB = _kpis(A), _kpis(B)
         dcmp = pd.DataFrame({
