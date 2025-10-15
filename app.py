@@ -473,7 +473,7 @@ with tabs[2]:
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Dossiers", f"{len(dfA)}")
-        c2.metric("Honoraires", _fmt_money(_to_num(dfA.get("Montant honoraires (US $)", 0)).sum()))
+        c2.metric("Honoraires", _fmt_money(dfA["Montant honoraires (US $)"].apply(_to_num).sum()))
         c3.metric("Payé", _fmt_money(_to_num(dfA.get("Payé", 0)).sum()))
         c4.metric("Solde", _fmt_money(_to_num(dfA.get("Solde", 0)).sum()))
 
