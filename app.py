@@ -308,11 +308,8 @@ def write_clients_file(path: str, df: pd.DataFrame):
     except Exception:
         pass
 
-# ---------- Entête & onglets
-st.markdown("### 📄 Fichiers chargés")
-st.write("**Clients** :", f"`{clients_path_curr}`" if clients_path_curr else "_(aucun)_")
-st.write("**Visa**    :", f"`{visa_path_curr}`" if visa_path_curr else "_(aucun)_")
 
+# --- Création des onglets (remplace tes 2 lignes existantes) ---
 tab_titles = [
     "📊 Dashboard",
     "📈 Analyses",
@@ -322,8 +319,7 @@ tab_titles = [
     "📄 Visa (aperçu)",
     "💾 Export",
 ]
-tabs = st.tabs(tab_titles)
-
+tab_dash, tab_analyses, tab_escrow, tab_compte, tab_gestion, tab_visa, tab_export = st.tabs(tab_titles)
 # =========================
 # PARTIE 2/4 — DASHBOARD & ANALYSES
 # =========================
