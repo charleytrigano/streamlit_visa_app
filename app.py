@@ -354,6 +354,11 @@ if not df_all.empty:
         df_all["Total (US $)"] = df_all["Montant honoraires (US $)"] + df_all["Autres frais (US $)"]
 
 
+# Identifiant unique de session pour les widgets
+import uuid
+SID = str(uuid.uuid4()).replace("-", "")[:8]
+
+
 # =========================
 # Création des onglets (nommés) — PARTIE 2/4
 # =========================
