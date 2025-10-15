@@ -237,20 +237,17 @@ def build_visa_map(visa_df: pd.DataFrame) -> dict:
         if not cat or not sub:
             continue
         d.setdefault(cat, {})
-        d[cat]..setdefault(sub, {"exclusive": None, "options": []})
+        d[cat].setdefault(sub, {"exclusive": None, "options": []})  # <- CORRIGÉ (un seul point)
         opts = []
         for oc in opt_cols:
             val = r.get(oc)
             try:
-                is_on = int(pd.to_numeric(val, errors="coerce").fillna(0)) if hasattr(val, "fillna") else int(pd.to_numeric(val, errors="coerce"))
+                is_on = int(pd.to_numeric(val, errors="coerce"))
             except Exception:
                 is_on = 0
             if is_on == 1:
                 opts.append(_safe_str(oc).strip())
-        # par défaut : options simples (COS/EOS…), pas d’exclusivité stricte
         d[cat][sub]["options"] = sorted(list(set(opts)))
-        # Si on veut une exclusivité (ex : COS/EOS exclusifs), on peut définir "exclusive" = "radio"
-        # Ici on laisse None → cases à cocher libres
     return d
 
 def read_visa_file(path_or_io) -> tuple[pd.DataFrame, dict]:
