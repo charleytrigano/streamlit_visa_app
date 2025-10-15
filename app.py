@@ -79,21 +79,15 @@ if dval is None or isinstance(dval, pd._libs.tslibs.nattype.NaTType):
 dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
 
 
-    return d.date()
-    except Exception:
-            return date.today()
+  dval = _date_for_widget(row.get("Date"))
+if dval is None:
+    dval = date.today()
 
-def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    out = df.copy()
-    for c in cols:
-        if c not in out.columns:
-            if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"]:
-                out[c] = 0.0
-            elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
-                out[c] = 0
-            else:
-                out[c] = ""
-    return out[cols]
+if isinstance(dval, datetime):
+    dval = dval.date()
+
+dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
+
 
 def _normalize_clients_numeric(df: pd.DataFrame) -> pd.DataFrame:
     num_cols = ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde", "Acompte 1", "Acompte 2"]
