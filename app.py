@@ -301,97 +301,261 @@ tabs = st.tabs([
 
 
 
-# ================================
-# PARTIE 2/6 — Lecture & normalisation VISA
-# ================================
-def _normalize_visa_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Renomme Catégorie / Sous-catégorie, enlève colonnes vides, nettoie en-têtes."""
-    if df is None or df.empty:
-        return pd.DataFrame()
+# # ==============================================
+# BLOC 2/10 — 📊 Dashboard (construction df_all + KPI + filtres + graphiques + détails)
+# ==============================================
+import pandas as pd
+from datetime import datetime, date
+import streamlit as st
+from io import BytesIO
 
-    # Supprimer entièrement les colonnes vides (100% NA)
-    df = df.loc[:, ~df.isna().all(axis=0)]
+# ---------- Helpers locaux (autonomes pour ce bloc) ----------
+def _safe_str(x):
+    try:
+        return "" if x is None else str(x)
+    except Exception:
+        return ""
 
-    # Renommer Catégorie/Sous-catégorie
-    ren = {}
-    for c in df.columns:
-        cl = _safe_str(c).strip().lower()
-        if cl in ["categorie", "catégorie", "categories", "catégories"]:
-            ren[c] = "Categorie"
-        elif cl in ["sous-categorie", "sous-catégorie", "sous categorie", "sous-categories", "sous categories"]:
-            ren[c] = "Sous-categorie"
-    if ren:
-        df = df.rename(columns=ren)
-
-    # S’assurer des colonnes de base
-    if "Categorie" not in df.columns: df["Categorie"] = ""
-    if "Sous-categorie" not in df.columns: df["Sous-categorie"] = ""
-
-    # Enlever lignes totalement vides
-    df = df.dropna(how="all").reset_index(drop=True)
-
-    # Nettoyer espaces/NaN sur Catégorie/Sous-catégorie
-    df["Categorie"] = df["Categorie"].apply(lambda x: _safe_str(x).strip())
-    df["Sous-categorie"] = df["Sous-categorie"].apply(lambda x: _safe_str(x).strip())
-
-    # Garder seulement les lignes qui ont au moins Catégorie & Sous-catégorie
-    df = df[(df["Categorie"]!="") & (df["Sous-categorie"]!="")].copy()
-
-    # Transformer les “1” en bool/int pour les colonnes d’options
-    for c in df.columns:
-        if c not in ["Categorie","Sous-categorie"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
-
+def _to_num_col(df, col):
+    if col not in df.columns:
+        df[col] = 0.0
+    s = df[col]
+    if not pd.api.types.is_numeric_dtype(s):
+        s = (
+            s.astype(str)
+             .str.replace(r"[^\d,.\-]", "", regex=True)
+             .str.replace(",", ".", regex=False)
+        )
+    s = pd.to_numeric(s, errors="coerce").fillna(0.0)
+    df[col] = s
     return df
 
-def build_visa_map(visa_df: pd.DataFrame) -> dict:
-    """
-    Construit la hiérarchie Catégorie -> Sous-catégorie -> options disponibles.
-    Les options sont toutes les colonnes (hors Catégorie / Sous-catégorie) dont la valeur == 1 sur la ligne.
-    """
-    d = {}
-    if visa_df is None or visa_df.empty:
-        return d
+def _parse_date_col(df, col):
+    if col not in df.columns:
+        df[col] = pd.NaT
+    df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
 
-    opt_cols = [c for c in visa_df.columns if c not in ["Categorie","Sous-categorie"]]
-    for _, r in visa_df.iterrows():
-        cat = _safe_str(r.get("Categorie")).strip()
-        sub = _safe_str(r.get("Sous-categorie")).strip()
-        if not cat or not sub:
-            continue
-        d.setdefault(cat, {})
-        d[cat].setdefault(sub, {"exclusive": None, "options": []})
+def _fmt_money(v):
+    try:
+        return f"${float(v):,.2f}"
+    except Exception:
+        return "$0.00"
 
-        opts = []
-        for oc in opt_cols:
-            try:
-                if int(r.get(oc, 0)) == 1:
-                    opts.append(_safe_str(oc).strip())
-            except Exception:
-                pass
-        d[cat][sub]["options"] = sorted(list(set(opts)))
-    return d
-
-@st.cache_data(show_spinner=False)
-def read_visa_file(path_or_io) -> tuple[pd.DataFrame, dict]:
-    """
-    Lit le fichier Visa (xlsx/csv), normalise, et renvoie (visa_df_norm, visa_map).
-    - Si le fichier a plusieurs onglets, essaie 'Visa' en priorité.
-    """
-    # 1) lecture brute
-    df = read_any_table(path_or_io, sheet_name=SHEET_VISA)
-    if df is None:
-        df = read_any_table(path_or_io)  # peut être déjà la bonne feuille
-
+def _standardize_client_columns(df):
+    """Aligne les noms de colonnes ‘clients’ sur un schéma commun."""
     if df is None or df.empty:
-        return pd.DataFrame(), {}
+        return pd.DataFrame()
+    # Renommages tolérants (accents / variations)
+    ren = {
+        "Categorie":"Categorie", "Catégorie":"Categorie",
+        "Sous-categorie":"Sous-categorie","Sous-catégorie":"Sous-categorie",
+        "Montant honoraires (US $)":"Montant honoraires (US $)",
+        "Autres frais (US $)":"Autres frais (US $)",
+        "Payé":"Payé","Paye":"Payé",
+        "Solde":"Solde","Reste":"Solde",
+        "Date":"Date","Mois":"Mois","Visa":"Visa","Nom":"Nom",
+        "Dossier N":"Dossier N","ID_Client":"ID_Client",
+        "Commentaires":"Commentaires",
+        "Dossier envoyé":"Dossier envoyé",
+        "Dossier accepté":"Dossier accepté",
+        "Dossier refusé":"Dossier refusé",
+        "Dossier annulé":"Dossier annulé",
+        "RFE":"RFE"
+    }
+    # essaie de mapper en insensible à la casse/espace
+    cols_map = {}
+    for c in df.columns:
+        c_clean = c.strip()
+        if c_clean in ren:
+            cols_map[c] = ren[c_clean]
+        else:
+            # quelques alias probables
+            low = c_clean.lower()
+            if low == "categorie": cols_map[c] = "Categorie"
+            elif low in ("sous-categorie","sous-catégorie","sous categorie","sous-catégorie"):
+                cols_map[c] = "Sous-categorie"
+            elif "honoraire" in low: cols_map[c] = "Montant honoraires (US $)"
+            elif "autres frais" in low: cols_map[c] = "Autres frais (US $)"
+            elif low in ("paye","payé"): cols_map[c] = "Payé"
+            elif low in ("solde","reste"): cols_map[c] = "Solde"
+            elif low == "visa": cols_map[c] = "Visa"
+            elif low == "nom": cols_map[c] = "Nom"
+            elif "dossier" in low and "n" in low: cols_map[c] = "Dossier N"
+            elif "id_client" in low: cols_map[c] = "ID_Client"
+            elif "comment" in low: cols_map[c] = "Commentaires"
+            elif "envoy" in low: cols_map[c] = "Dossier envoyé"
+            elif "accept" in low: cols_map[c] = "Dossier accepté"
+            elif "refus" in low: cols_map[c] = "Dossier refusé"
+            elif "annul" in low: cols_map[c] = "Dossier annulé"
+            elif low == "rfe": cols_map[c] = "RFE"
+            elif low == "mois": cols_map[c] = "Mois"
+            elif low == "date": cols_map[c] = "Date"
+            else:
+                cols_map[c] = c  # conserve
+    df = df.rename(columns=cols_map)
 
-    # 2) normalisation des colonnes
-    df_norm = _normalize_visa_columns(df)
+    # Colonnes minimales
+    for c in ["Nom","Categorie","Sous-categorie","Visa","Date","Mois",
+              "Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]:
+        if c not in df.columns:
+            df[c] = pd.NA
 
-    # 3) carte des visas
-    vmap = build_visa_map(df_norm)
-    return df_norm, vmap
+    # Typages
+    df = _to_num_col(df, "Montant honoraires (US $)")
+    df = _to_num_col(df, "Autres frais (US $)")
+    df = _to_num_col(df, "Payé")
+    # si 'Solde' absent ou incohérent, recalcule à partir du total
+    total_calc = df["Montant honoraires (US $)"].fillna(0) + df["Autres frais (US $)"].fillna(0)
+    if "Solde" not in df.columns or df["Solde"].isna().all():
+        df["Solde"] = (total_calc - df["Payé"]).clip(lower=0)
+    else:
+        df = _to_num_col(df, "Solde")
+
+    # Dates / Année / Mois
+    df = _parse_date_col(df, "Date")
+    # Complète Mois si absent
+    if "Mois" in df.columns:
+        df["Mois"] = df["Mois"].astype(str).str.extract(r"(\d{1,2})", expand=False).fillna("")
+        df["Mois"] = df["Mois"].apply(lambda x: f"{int(x):02d}" if x and x.isdigit() else "")
+    else:
+        df["Mois"] = ""
+
+    df["_Année_"] = df["Date"].dt.year.fillna(pd.NA)
+    df["_MoisNum_"] = df["Date"].dt.month.fillna(pd.NA)
+    return df
+
+def _load_df_from_session_or_path(session_key_df, session_key_path):
+    """Essaye d'abord df en session, sinon lit le chemin en session si présent."""
+    df = st.session_state.get(session_key_df)
+    if df is None:
+        p = st.session_state.get(session_key_path)
+        if p:
+            try:
+                if str(p).lower().endswith(".csv"):
+                    df = pd.read_csv(p)
+                else:
+                    df = pd.read_excel(p)
+            except Exception:
+                df = None
+    return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+# ---------- Récupération sources ----------
+# attendus (posés par le bloc Fichiers) :
+# - st.session_state["clients_df_raw"] ou st.session_state["clients_path_curr"]
+# - st.session_state["visa_df_raw"]    ou st.session_state["visa_path_curr"]
+
+clients_raw = st.session_state.get("clients_df_raw")
+if clients_raw is None or not isinstance(clients_raw, pd.DataFrame) or clients_raw.empty:
+    clients_raw = _load_df_from_session_or_path("clients_df_raw", "clients_path_curr")
+
+visa_raw = st.session_state.get("visa_df_raw")
+if visa_raw is None or not isinstance(visa_raw, pd.DataFrame) or visa_raw.empty:
+    # si l’app utilise le même fichier pour tout, le chemin peut être sur clients_path_curr
+    visa_raw = _load_df_from_session_or_path("visa_df_raw", "visa_path_curr")
+    if visa_raw.empty:
+        # fallback : tente aussi le chemin clients si visa manquant
+        visa_raw = _load_df_from_session_or_path("visa_df_raw", "clients_path_curr")
+
+# Normalisation clients
+df_clients = _standardize_client_columns(clients_raw.copy()) if not clients_raw.empty else pd.DataFrame()
+
+# Pour le Dashboard on n’a pas besoin de pivot « Visa structure » ; on garde juste les colonnes visa du client.
+df_all = df_clients.copy()
+
+# ---------- Interface Dashboard ----------
+st.markdown("### 📊 Dashboard")
+
+if df_all.empty:
+    st.info("Aucun client chargé. Charge les fichiers dans la barre latérale.")
+else:
+    # Listes filtres
+    cats  = sorted(df_all["Categorie"].dropna().astype(str).unique().tolist()) if "Categorie" in df_all.columns else []
+    subs  = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all.columns else []
+    visas = sorted(df_all["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all.columns else []
+
+    # KPI
+    tot_dossiers = len(df_all)
+    total_hono   = float(_to_num_col(df_all.copy(), "Montant honoraires (US $)")["Montant honoraires (US $)"].sum())
+    total_autre  = float(_to_num_col(df_all.copy(), "Autres frais (US $)")["Autres frais (US $)"].sum())
+    total_all    = total_hono + total_autre
+    total_paye   = float(_to_num_col(df_all.copy(), "Payé")["Payé"].sum())
+    total_solde  = float(_to_num_col(df_all.copy(), "Solde")["Solde"].sum())
+    # % envoyés (si colonne existe)
+    if "Dossier envoyé" in df_all.columns:
+        try:
+            sent_ratio = (pd.to_numeric(df_all["Dossier envoyé"], errors="coerce").fillna(0) > 0).mean() * 100
+        except Exception:
+            sent_ratio = 0.0
+    else:
+        sent_ratio = 0.0
+
+    k1, k2, k3, k4, k5 = st.columns([1,1,1,1,1])
+    with k1: st.metric("Dossiers", f"{tot_dossiers}")
+    with k2: st.metric("Honoraires+Frais", _fmt_money(total_all))
+    with k3: st.metric("Payé", _fmt_money(total_paye))
+    with k4: st.metric("Solde", _fmt_money(total_solde))
+    with k5: st.metric("Envoyés (%)", f"{sent_ratio:.0f}%")
+
+    st.markdown("#### 🎛️ Filtres")
+    a1, a2, a3 = st.columns(3)
+    fc = a1.multiselect("Catégories", cats, default=[], key="dash_f_cats")
+    fs = a2.multiselect("Sous-catégories", subs, default=[], key="dash_f_subs")
+    fv = a3.multiselect("Visa", visas, default=[], key="dash_f_visas")
+
+    view = df_all.copy()
+    if fc: view = view[view["Categorie"].astype(str).isin(fc)]
+    if fs: view = view[view["Sous-categorie"].astype(str).isin(fs)]
+    if fv: view = view[view["Visa"].astype(str).isin(fv)]
+
+    # Graphique : dossiers par catégorie
+    st.markdown("#### 📦 Nombre de dossiers par catégorie")
+    if not view.empty and "Categorie" in view.columns:
+        vc = view["Categorie"].astype(str).value_counts().reset_index()
+        vc.columns = ["Categorie", "Nombre"]
+        st.bar_chart(vc.set_index("Categorie"))
+    else:
+        st.caption("Aucune donnée pour ce graphique.")
+
+    # Graphique : flux par mois (honoraires / autres / payé / solde)
+    st.markdown("#### 💵 Flux par mois")
+    g = view.copy()
+    g = _parse_date_col(g, "Date")
+    g["MoisLbl"] = g["Date"].dt.to_period("M").astype(str)
+    g = _to_num_col(g, "Montant honoraires (US $)")
+    g = _to_num_col(g, "Autres frais (US $)")
+    g = _to_num_col(g, "Payé")
+    g = _to_num_col(g, "Solde")
+    if not g.empty:
+        gb = (g.groupby("MoisLbl", as_index=False)
+                [["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]]
+                .sum()
+                .sort_values("MoisLbl"))
+        st.line_chart(gb.set_index("MoisLbl"))
+    else:
+        st.caption("Aucune donnée pour ce graphique.")
+
+    # Tableau détaillé
+    st.markdown("#### 📋 Détails (après filtres)")
+    det = view.copy()
+    for c in ["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]:
+        if c in det.columns:
+            det[c] = pd.to_numeric(det[c], errors="coerce").fillna(0.0).apply(_fmt_money)
+    if "Date" in det.columns:
+        try:
+            det["Date"] = pd.to_datetime(det["Date"], errors="coerce").dt.date.astype(str)
+        except Exception:
+            det["Date"] = det["Date"].astype(str)
+
+    show_cols = [c for c in [
+        "Dossier N","ID_Client","Nom","Categorie","Sous-categorie","Visa",
+        "Date","Mois","Montant honoraires (US $)","Autres frais (US $)","Payé","Solde",
+        "Dossier envoyé","Dossier accepté","Dossier refusé","Dossier annulé","RFE","Commentaires"
+    ] if c in det.columns]
+
+    sort_keys = [c for c in ["_Année_","_MoisNum_","Categorie","Nom"] if c in det.columns]
+    det_sorted = det.sort_values(by=sort_keys) if sort_keys else det
+    st.dataframe(det_sorted[show_cols].reset_index(drop=True), use_container_width=True, key="dash_detail_table")
 
 
 
