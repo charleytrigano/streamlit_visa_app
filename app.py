@@ -16,6 +16,23 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from datetime import date, datetime
+import pandas as pd
+
+def _date_for_widget(val):
+    """Convertit proprement une valeur Excel/pandas en date utilisable dans Streamlit."""
+    if val is None or pd.isna(val):
+        return date.today()
+    if isinstance(val, datetime):
+        return val.date()
+    try:
+        d = pd.to_datetime(val, errors="coerce")
+        if pd.isna(d):
+            return date.today()
+        return d.date()
+    except Exception:
+        return date.today()
+
 # =========================
 # Constantes et configuration
 # =========================
