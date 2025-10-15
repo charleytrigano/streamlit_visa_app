@@ -362,10 +362,12 @@ if mode == "Deux fichiers (Clients & Visa)":
 else:
     visa_src = up_clients if up_clients is not None else (clients_path_in if clients_path_in else last_clients)
 
-df_visa_raw = read_any_table(visa_src, sheet=SHEET_VISA) or read_any_table(visa_src)
+df_visa_raw = read_any_table(visa_src, sheet=SHEET_VISA)
+if df_visa_raw is None or getattr(df_visa_raw, "empty", True):
+    df_visa_raw = read_any_table(visa_src)
+
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
-
 # Affichage des fichiers chargés
 with st.expander("📄 Fichiers chargés", expanded=True):
     st.write("**Clients** :", ("(aucun)" if (df_clients_raw is None or df_clients_raw.empty) else (getattr(clients_src, 'name', str(clients_src)))))
