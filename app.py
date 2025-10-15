@@ -331,7 +331,10 @@ if mode == "Deux fichiers (Clients & Visa)":
 else:
     visa_src = up_clients if up_clients is not None else (clients_path_in if clients_path_in else last_clients)
 
-df_visa_raw = read_any_table(visa_src, sheet=SHEET_VISA) or read_any_table(visa_src)
+# Correction de la lecture du fichier Visa
+df_visa_raw = read_any_table(visa_src, sheet=SHEET_VISA)
+if df_visa_raw is None:
+    df_visa_raw = read_any_table(visa_src)
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
