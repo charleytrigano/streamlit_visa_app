@@ -12,36 +12,27 @@ import numpy as np
 import streamlit as st
 
 
-# ============================
-# BLOC — FICHIERS & MÉMOIRE DES CHEMINS
-# ============================
+# ============ BLOC FICHIERS & MÉMOIRE (UN SEUL EXEMPLAIRE) ============
+# Place ce bloc après les imports (pandas/streamlit) et AVANT d'utiliser df_clients_raw/df_visa_raw
 
-import os, json, io, re, math
-from datetime import date, datetime
+import os, io, json, math
 from pathlib import Path
-from typing import Tuple, Optional
+from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
-SID = "vm"  # préfixe unique pour les clés de widgets
-
-# ---------- Persistance des derniers chemins ----------
+KEY_NS = "files_v1"             # espace de clés unique pour éviter ttes collisions
 LAST_PATHS_FILE = Path("./_last_paths.json")
 
-def _safe_str(x) -> str:
+def _safe_str(x):
     try:
-        if x is None:
-            return ""
-        if isinstance(x, float) and math.isnan(x):
-            return ""
+        if x is None: return ""
+        if isinstance(x, float) and math.isnan(x): return ""
         return str(x)
     except Exception:
         return ""
 
-def load_last_paths() -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """
-    Retourne (clients_path, visa_path, save_dir)
-    """
+def _persist_load():
     try:
         if LAST_PATHS_FILE.exists():
             with open(LAST_PATHS_FILE, "r", encoding="utf-8") as f:
@@ -51,111 +42,86 @@ def load_last_paths() -> Tuple[Optional[str], Optional[str], Optional[str]]:
         pass
     return None, None, None
 
-def save_last_paths(clients_path: Optional[str], visa_path: Optional[str], save_dir: Optional[str]) -> None:
+def _persist_save(clients_path, visa_path, save_dir):
     try:
-        data = {
+        payload = {
             "clients": clients_path or None,
             "visa": visa_path or None,
             "save_dir": save_dir or None,
         }
         with open(LAST_PATHS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        st.warning(f"Impossible d’écrire _last_paths.json : {e}")
+        st.warning(f"Erreur écriture _last_paths.json : {e}")
 
-# ---------- Lecture de fichiers ----------
 @st.cache_data(show_spinner=False, ttl=0)
-def read_any_table(path_or_bytes, sheet: Optional[str] = None) -> pd.DataFrame:
-    """
-    Lit CSV ou Excel (xlsx/xls). Si 'path_or_bytes' est bytes, lit depuis mémoire.
-    """
+def _read_any(path_or_upload, sheet=None) -> pd.DataFrame:
+    """Lecture robuste CSV / Excel. Force openpyxl pour .xlsx/.xlsm."""
     try:
-        if isinstance(path_or_bytes, (str, os.PathLike)):
-            p = str(path_or_bytes)
+        # UploadedFile ?
+        if hasattr(path_or_upload, "read") and hasattr(path_or_upload, "name"):
+            name = path_or_upload.name.lower()
+            data = path_or_upload.read()
+            bio = io.BytesIO(data)
+            if name.endswith(".csv"):
+                return pd.read_csv(io.BytesIO(data), dtype=str, encoding_errors="ignore")
+            if name.endswith(".xlsx") or name.endswith(".xlsm"):
+                if sheet:
+                    return pd.read_excel(bio, sheet_name=sheet, engine="openpyxl")
+                return pd.read_excel(bio, engine="openpyxl")
+            if name.endswith(".xls"):
+                # xlrd peut ne pas être installé… on tente sans forcer
+                if sheet:
+                    return pd.read_excel(bio, sheet_name=sheet)
+                return pd.read_excel(bio)
+            # fallback CSV
+            return pd.read_csv(io.BytesIO(data), dtype=str, encoding_errors="ignore")
+
+        # Chemin disque
+        if isinstance(path_or_upload, (str, os.PathLike)):
+            p = str(path_or_upload)
             low = p.lower()
             if low.endswith(".csv"):
                 return pd.read_csv(p, dtype=str, encoding_errors="ignore")
-            # Excel
+            if low.endswith(".xlsx") or low.endswith(".xlsm"):
+                if sheet:
+                    return pd.read_excel(p, sheet_name=sheet, engine="openpyxl")
+                return pd.read_excel(p, engine="openpyxl")
+            # .xls ou autre => on laisse pandas choisir
             if sheet:
                 return pd.read_excel(p, sheet_name=sheet)
             return pd.read_excel(p)
-        else:
-            # bytes upload (Streamlit)
-            if hasattr(path_or_bytes, "name"):
-                name = path_or_bytes.name.lower()
-                data = path_or_bytes.read()
-                bio = io.BytesIO(data)
-                if name.endswith(".csv"):
-                    return pd.read_csv(io.BytesIO(data), dtype=str, encoding_errors="ignore")
-                else:
-                    if sheet:
-                        return pd.read_excel(bio, sheet_name=sheet)
-                    return pd.read_excel(bio)
-            # fallback
-            return pd.DataFrame()
+
+        return pd.DataFrame()
     except Exception as e:
-        st.error(f"Erreur de lecture: {e}")
+        st.error(f"Erreur lecture: {e}")
         return pd.DataFrame()
 
-# ---------- Normalisations simples pour Clients ----------
-def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    # Harmonise quelques noms fréquents
+    # renommage soft
     ren = {}
-    cols_lower = {c.lower(): c for c in df.columns}
-    def has(col):
-        return col in cols_lower
+    lower = {c.lower(): c for c in df.columns}
+    def has(k): return k in lower
+    def col(k): return lower.get(k)
 
-    def col(col):
-        return cols_lower.get(col)
-
-    # Colonnes usuelles de ton modèle
-    # ID_Client, Dossier N, Nom, Date, Categorie/Sous-categorie/Visa, Montant honoraires (US $), Autres frais (US $), Payé, Reste/Solde, Paiements/Commentaires
     mapping = {
-        "id_client": "ID_Client",
-        "dossier n": "Dossier N",
-        "nom": "Nom",
-        "date": "Date",
-        "categorie": "Categorie",
-        "catégorie": "Categorie",
-        "sous-categorie": "Sous-categorie",
-        "sous-catégorie": "Sous-categorie",
-        "visa": "Visa",
-        "montant honoraires (us $)": "Montant honoraires (US $)",
-        "autres frais (us $)": "Autres frais (US $)",
-        "payé": "Payé",
-        "paye": "Payé",
-        "reste": "Reste",
-        "solde": "Reste",
-        "commentaires": "Commentaires",
-        "paiements": "Paiements",
-        "mois": "Mois",
-        "dossier envoyé": "Dossier envoyé",
-        "dossier accepte": "Dossier accepté",
-        "dossier accepté": "Dossier accepté",
-        "dossier refuse": "Dossier refusé",
-        "dossier refusé": "Dossier refusé",
-        "dossier annule": "Dossier annulé",
-        "dossier annulé": "Dossier annulé",
-        "rfe": "RFE",
-        "date d'envoi": "Date d'envoi",
-        "date d’acceptation": "Date d'acceptation",
-        "date d'acceptation": "Date d'acceptation",
-        "date de refus": "Date de refus",
-        "date d'annulation": "Date d'annulation",
-        "date d’annulation": "Date d'annulation",
+        "id_client":"ID_Client","dossier n":"Dossier N","nom":"Nom","date":"Date",
+        "categorie":"Categorie","catégorie":"Categorie","sous-categorie":"Sous-categorie","sous-catégorie":"Sous-categorie",
+        "visa":"Visa","montant honoraires (us $)":"Montant honoraires (US $)","autres frais (us $)":"Autres frais (US $)",
+        "payé":"Payé","paye":"Payé","reste":"Reste","solde":"Reste","mois":"Mois","commentaires":"Commentaires",
+        "dossier envoyé":"Dossier envoyé","dossier accepte":"Dossier accepté","dossier accepté":"Dossier accepté",
+        "dossier refuse":"Dossier refusé","dossier refusé":"Dossier refusé","dossier annule":"Dossier annulé","dossier annulé":"Dossier annulé",
+        "rfe":"RFE","date d'envoi":"Date d'envoi","date d'acceptation":"Date d'acceptation","date de refus":"Date de refus","date d'annulation":"Date d'annulation",
     }
-
-    for k, target in mapping.items():
-        if has(k) and col(k) != target:
-            ren[col(k)] = target
-
+    for k, tgt in mapping.items():
+        if has(k) and col(k) != tgt:
+            ren[col(k)] = tgt
     df = df.rename(columns=ren)
 
-    # Types / compléments
+    # Mois
     if "Mois" not in df.columns:
-        # dérive à partir de Date si possible
         if "Date" in df.columns:
             try:
                 d = pd.to_datetime(df["Date"], errors="coerce")
@@ -165,40 +131,109 @@ def normalize_clients(df: pd.DataFrame) -> pd.DataFrame:
         else:
             df["Mois"] = "01"
 
-    # Numériques sûrs
-    for c in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Reste"]:
+    # num
+    for c in ["Montant honoraires (US $)","Autres frais (US $)","Payé","Reste"]:
         if c in df.columns:
-            s = df[c]
-            s = s.astype(str).str.replace(",", ".", regex=False)
+            s = df[c].astype(str).str.replace(",",".",regex=False)
             s = s.str.replace(r"[^\d.\-]", "", regex=True)
             df[c] = pd.to_numeric(s, errors="coerce").fillna(0.0)
 
-    # Total si absent
     if "Total (US $)" not in df.columns:
-        h = df.get("Montant honoraires (US $)", pd.Series(0.0, index=df.index))
-        o = df.get("Autres frais (US $)", pd.Series(0.0, index=df.index))
-        df["Total (US $)"] = (h + o).astype(float)
+        df["Total (US $)"] = (
+            df.get("Montant honoraires (US $)", 0.0) + df.get("Autres frais (US $)", 0.0)
+        ).astype(float)
 
-    # Reste si absent
     if "Reste" not in df.columns:
-        p = df.get("Payé", pd.Series(0.0, index=df.index))
-        df["Reste"] = (df["Total (US $)"] - p).astype(float)
+        df["Reste"] = (df["Total (US $)"] - df.get("Payé", 0.0)).astype(float)
 
-    # Dates sûres -> string YYYY-MM-DD
-    for dc in ["Date", "Date d'envoi", "Date d'acceptation", "Date de refus", "Date d'annulation"]:
+    # Dates -> string ISO
+    for dc in ["Date","Date d'envoi","Date d'acceptation","Date de refus","Date d'annulation"]:
         if dc in df.columns:
             try:
-                dt = pd.to_datetime(df[dc], errors="coerce")
-                df[dc] = dt.dt.date.astype(str)
+                d = pd.to_datetime(df[dc], errors="coerce")
+                df[dc] = d.dt.date.astype(str)
             except Exception:
                 df[dc] = df[dc].astype(str)
 
-    # Clés absentes
-    for need in ["ID_Client", "Nom", "Categorie", "Sous-categorie", "Visa"]:
+    for need in ["ID_Client","Nom","Categorie","Sous-categorie","Visa"]:
         if need not in df.columns:
             df[need] = ""
 
     return df
+
+def _materialize(upload, fallback_name: str) -> str | None:
+    """Sauve un UploadedFile en ./upload_<name> et retourne le chemin. Sinon retourne tel quel."""
+    if upload is None:
+        return None
+    if hasattr(upload, "read") and hasattr(upload, "name"):
+        try:
+            data = upload.read()
+            out = f"./upload_{upload.name}"
+            with open(out, "wb") as f:
+                f.write(data)
+            return out
+        except Exception:
+            return None
+    # déjà un chemin
+    return str(upload)
+
+# ---------- UI (unique) ----------
+st.sidebar.markdown("## 📂 Fichiers")
+mode = st.sidebar.radio("Mode de chargement", ["Un fichier (Clients)", "Deux fichiers (Clients + Visa)"],
+                        index=0, key=f"{KEY_NS}_mode")
+
+last_clients, last_visa, last_save = _persist_load()
+
+up_clients = st.sidebar.file_uploader("Clients (xlsx/csv)", type=["xlsx","xls","csv"],
+                                      key=f"{KEY_NS}_up_clients")
+up_visa    = None
+if mode == "Deux fichiers (Clients + Visa)":
+    up_visa = st.sidebar.file_uploader("Visa (xlsx/csv)", type=["xlsx","xls","csv"],
+                                       key=f"{KEY_NS}_up_visa")
+
+st.sidebar.caption("**Derniers chemins mémorisés :**")
+lc = _safe_str(last_clients) or "-"
+lv = _safe_str(last_visa) or "-"
+st.sidebar.code(f"Dernier Clients : {lc}\nDernier Visa    : {lv}")
+
+save_dir = st.sidebar.text_input("**Chemin de sauvegarde** (sur ton PC / Drive / OneDrive) :",
+                                 value=_safe_str(last_save), key=f"{KEY_NS}_save_dir")
+
+if st.sidebar.button("Mémoriser les chemins", key=f"{KEY_NS}_mem"):
+    # on mémorise après matérialisation ci-dessous
+
+    st.session_state[f"{KEY_NS}_mem_pending"] = True
+    st.sidebar.success("Chemins mémorisés après résolution des fichiers.")
+
+# Résolution des sources (upload prioritaire, sinon derniers chemins)
+clients_src = up_clients if up_clients is not None else (last_clients if last_clients else None)
+visa_src    = up_visa    if up_visa    is not None else (last_visa    if last_visa    else None)
+if mode == "Un fichier (Clients)":
+    visa_src = visa_src or clients_src
+
+# Chargement data brutes
+df_clients_raw = _normalize_clients(_read_any(clients_src)) if clients_src else pd.DataFrame()
+df_visa_raw    = _read_any(visa_src) if visa_src else pd.DataFrame()
+
+# Matérialiser les fichiers uploadés en chemins réels (pour persistance)
+clients_path_curr = _materialize(up_clients, "clients.xlsx") if up_clients is not None else (
+    clients_src if isinstance(clients_src, (str, os.PathLike)) else None
+)
+visa_path_curr = _materialize(up_visa, "visa.xlsx") if up_visa is not None else (
+    visa_src if isinstance(visa_src, (str, os.PathLike)) else None
+)
+
+# Mémoriser si demandé
+if st.session_state.get(f"{KEY_NS}_mem_pending"):
+    _persist_save(clients_path_curr, visa_path_curr, save_dir)
+    st.session_state[f"{KEY_NS}_mem_pending"] = False
+    st.toast("Chemins mémorisés.", icon="✅")
+
+# Affichage résumé
+st.markdown("### 📄 Fichiers chargés")
+st.write(f"**Clients** : `{_safe_str(clients_path_curr) or '—'}`")
+st.write(f"**Visa** : `{_safe_str(visa_path_curr) or '—'}`")
+# ============ FIN DU BLOC FICHIERS & MÉMOIRE ============
 
 # ---------- UI de chargement ----------
 st.sidebar.markdown("## 📂 Fichiers")
