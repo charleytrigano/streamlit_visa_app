@@ -1820,7 +1820,6 @@ with tabs[5]:
 
 # ==============================
 # BLOC 8/10 — 👤 Compte client (détails financiers + chronologie)
-# (Dépend de : read_clients_file, _fmt_money, _ensure_num, clients_src, SID)
 # ==============================
 
 with tabs[3]:
@@ -1831,12 +1830,12 @@ with tabs[3]:
         st.info("Aucun client chargé.")
         st.stop()
 
-    c1, c2 = st.columns([2,2])
+    c1, c2 = st.columns([2, 2])
     noms = sorted(df_acc["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_acc.columns else []
-    ids  = sorted(df_acc["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_acc.columns else []
+    ids = sorted(df_acc["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_acc.columns else []
 
     sel_nom = c1.selectbox("Nom", [""] + noms, index=0, key=f"acct_nom_{SID}")
-    sel_id  = c2.selectbox("ID_Client", [""] + ids, index=0, key=f"acct_id_{SID}")
+    sel_id = c2.selectbox("ID_Client", [""] + ids, index=0, key=f"acct_id_{SID}")
 
     mask = None
     if sel_id:
@@ -1849,13 +1848,13 @@ with tabs[3]:
 
     row = df_acc[mask].iloc[0]
 
-    st.markdown(f"#### 🧾 Dossier N° {row.get('Dossier N','?')} — {_safe_str(row.get('Nom',''))}")
+    st.markdown(f"#### 🧾 Dossier N° {row.get('Dossier N', '?')} — {_safe_str(row.get('Nom', ''))}")
 
     # --- Section financière ---
-    honor  = float(_ensure_num(row.get("Montant honoraires (US $)",0)))
-    other  = float(_ensure_num(row.get("Autres frais (US $)",0)))
-    paye   = float(_ensure_num(row.get("Payé",0)))
-    solde  = float(_ensure_num(row.get("Solde", honor + other - paye)))
+    honor = float(_ensure_num(row.get("Montant honoraires (US $)", 0)))
+    other = float(_ensure_num(row.get("Autres frais (US $)", 0)))
+    paye = float(_ensure_num(row.get("Payé", 0)))
+    solde = float(_ensure_num(row.get("Solde", honor + other - paye)))
 
     f1, f2, f3, f4 = st.columns(4)
     f1.metric("Honoraires", f"${honor:,.2f}")
@@ -1866,119 +1865,22 @@ with tabs[3]:
     st.divider()
 
     # --- Chronologie & Statuts ---
-    s_env = int(_ensure_num(row.get("Dossier envoyé",0))) == 1
-    s_acc = int(_ensure_num(row.get("Dossier approuvé",0))) == 1
-    s_ref = int(_ensure_num(row.get("Dossier refusé",0))) == 1
-    s_ann = int(_ensure_num(row.get("Dossier annulé",0))) == 1
-    s_rfe = int(_ensure_num(row.get("RFE",0))) == 1
+    s_env = int(_ensure_num(row.get("Dossier envoyé", 0))) == 1
+    s_acc = int(_ensure_num(row.get("Dossier approuvé", 0))) == 1
+    s_ref = int(_ensure_num(row.get("Dossier refusé", 0))) == 1
+    s_ann = int(_ensure_num(row.get("Dossier annulé", 0))) == 1
+    s_rfe = int(_ensure_num(row.get("RFE", 0))) == 1
 
     def sdate(col):
-        val = _safe_str(row.get(col,""))
-        return val if val else "—"
-
-    st.markdown("##### 📅 Statuts du dossier")
-
-    f1, f2, f3 = st.columns(3)
-    f1.write(f"**RFE :** {'Oui' if s_rfe else 'Non'}")
-    f2.write(f"**Catégorie :** {_safe_str(row.get('Categorie',''))}")
-    f3.write(f"**Sous-catégorie :** {_safe_str(row.get('Sous-categorie',''))}")
-
-    st.divider()
-
-    f1, f2, f3, f4 = st.columns(4)
-    f1.write(f"**Dossier envoyé :** {'Oui' if s_env else 'Non'} — {sdate(\"Date d'envoi\")}")
-    f2.write(f"**Dossier approuvé :** {'Oui' if s_acc else 'Non'} — {sdate(\"Date d'acceptation\")}")
-    f3.write(f"**Dossier refusé :** {'Oui' if s_ref else 'Non'} — {sdate(\"Date de refus\")}")
-    f4.write(f"**Dossier annulé :** {'Oui' if s_ann else 'Non'} — {sdate(\"Date d'annulation\")}")
-
-    st.divider()
-
-    st.markdown("##### 💬 Commentaires")
-    st.info(_safe_str(row.get("Commentaires","(aucun)")))
-
-    # --- Paiements (liste et historique) ---
-    st.markdown("##### 💵 Historique des paiements")
-    try:
-        payments = json.loads(row.get("Paiements","[]")) if isinstance(row.get("Paiements"), str) else []
-    except Exception:
-        payments = []
-
-    if payments:
-        ptable = pd.DataFrame(payments)
-        st.dataframe(ptable, use_container_width=True)
-    else:
-        st.write("Aucun paiement enregistré.")
-
-    st.divider()
-
-    # --- Ajout d’un nouveau paiement ---
-    st.markdown("##### ➕ Ajouter un paiement")
-    pay_col1, pay_col2, pay_col3 = st.columns([1,1,2])
-    new_date = pay_col1.date_input("Date", value=date.today(), key=f"pay_date_{SID}")
-    new_amount = pay_col2.number_input("Montant (US $)", min_value=0.0, step=50.0, format="%.2f", key=# ==============================
-# BLOC 8/10 — 👤 Compte client (détails financiers + chronologie)
-# (Dépend de : read_clients_file, _fmt_money, _ensure_num, clients_src, SID)
-# ==============================
-
-with tabs[3]:
-    st.markdown("### 👤 Compte client — Détails et historique")
-
-    df_acc = read_clients_file(clients_src)
-    if df_acc is None or df_acc.empty:
-        st.info("Aucun client chargé.")
-        st.stop()
-
-    c1, c2 = st.columns([2,2])
-    noms = sorted(df_acc["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_acc.columns else []
-    ids  = sorted(df_acc["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_acc.columns else []
-
-    sel_nom = c1.selectbox("Nom", [""] + noms, index=0, key=f"acct_nom_{SID}")
-    sel_id  = c2.selectbox("ID_Client", [""] + ids, index=0, key=f"acct_id_{SID}")
-
-    mask = None
-    if sel_id:
-        mask = (df_acc["ID_Client"].astype(str) == sel_id)
-    elif sel_nom:
-        mask = (df_acc["Nom"].astype(str) == sel_nom)
-
-    if mask is None or not mask.any():
-        st.stop()
-
-    row = df_acc[mask].iloc[0]
-
-    st.markdown(f"#### 🧾 Dossier N° {row.get('Dossier N','?')} — {_safe_str(row.get('Nom',''))}")
-
-    # --- Section financière ---
-    honor  = float(_ensure_num(row.get("Montant honoraires (US $)",0)))
-    other  = float(_ensure_num(row.get("Autres frais (US $)",0)))
-    paye   = float(_ensure_num(row.get("Payé",0)))
-    solde  = float(_ensure_num(row.get("Solde", honor + other - paye)))
-
-    f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Honoraires", f"${honor:,.2f}")
-    f2.metric("Autres frais", f"${other:,.2f}")
-    f3.metric("Payé", f"${paye:,.2f}")
-    f4.metric("Solde", f"${solde:,.2f}")
-
-    st.divider()
-
-    # --- Chronologie & Statuts ---
-    s_env = int(_ensure_num(row.get("Dossier envoyé",0))) == 1
-    s_acc = int(_ensure_num(row.get("Dossier approuvé",0))) == 1
-    s_ref = int(_ensure_num(row.get("Dossier refusé",0))) == 1
-    s_ann = int(_ensure_num(row.get("Dossier annulé",0))) == 1
-    s_rfe = int(_ensure_num(row.get("RFE",0))) == 1
-
-    def sdate(col):
-        val = _safe_str(row.get(col,""))
+        val = _safe_str(row.get(col, ""))
         return val if val else "—"
 
     st.markdown("##### 📅 Statuts du dossier")
 
     f1, f2, f3 = st.columns(3)
     f1.write("**RFE :** " + ("Oui" if s_rfe else "Non"))
-    f2.write("**Catégorie :** " + _safe_str(row.get("Categorie","")))
-    f3.write("**Sous-catégorie :** " + _safe_str(row.get("Sous-categorie","")))
+    f2.write("**Catégorie :** " + _safe_str(row.get("Categorie", "")))
+    f3.write("**Sous-catégorie :** " + _safe_str(row.get("Sous-categorie", "")))
 
     st.divider()
 
@@ -1991,12 +1893,12 @@ with tabs[3]:
     st.divider()
 
     st.markdown("##### 💬 Commentaires")
-    st.info(_safe_str(row.get("Commentaires","(aucun)")))
+    st.info(_safe_str(row.get("Commentaires", "(aucun)")))
 
     # --- Paiements (liste et historique) ---
     st.markdown("##### 💵 Historique des paiements")
     try:
-        payments = json.loads(row.get("Paiements","[]")) if isinstance(row.get("Paiements"), str) else []
+        payments = json.loads(row.get("Paiements", "[]")) if isinstance(row.get("Paiements"), str) else []
     except Exception:
         payments = []
 
@@ -2010,7 +1912,7 @@ with tabs[3]:
 
     # --- Ajout d’un nouveau paiement ---
     st.markdown("##### ➕ Ajouter un paiement")
-    pay_col1, pay_col2, pay_col3 = st.columns([1,1,2])
+    pay_col1, pay_col2, pay_col3 = st.columns([1, 1, 2])
     new_date = pay_col1.date_input("Date", value=date.today(), key=f"pay_date_{SID}")
     new_amount = pay_col2.number_input("Montant (US $)", min_value=0.0, step=50.0, format="%.2f", key=f"pay_amt_{SID}")
     new_note = pay_col3.text_input("Note", "", key=f"pay_note_{SID}")
@@ -2021,8 +1923,8 @@ with tabs[3]:
             "montant": float(new_amount),
             "note": new_note,
         })
-        total_paye = sum(p.get("montant",0) for p in payments)
-        total_due  = honor + other
+        total_paye = sum(p.get("montant", 0) for p in payments)
+        total_due = honor + other
         solde = max(0.0, total_due - total_paye)
 
         row["Paiements"] = json.dumps(payments, ensure_ascii=False)
