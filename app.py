@@ -71,7 +71,7 @@ if dval is None:
 if isinstance(dval, datetime):
     dval = dval.date()
 
-dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
+        dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
 
         if dval is None or isinstance(dval, pd._libs.tslibs.nattype.NaTType):
         dval = date.today()
