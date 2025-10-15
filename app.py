@@ -79,7 +79,7 @@ if dval is None or isinstance(dval, pd._libs.tslibs.nattype.NaTType):
 dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
 
 
-            return d.date()
+    return d.date()
     except Exception:
             return date.today()
 
