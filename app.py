@@ -354,19 +354,20 @@ if not df_all.empty:
         df_all["Total (US $)"] = df_all["Montant honoraires (US $)"] + df_all["Autres frais (US $)"]
 
 
-
 # =========================
-# Création des onglets (nommés)
+# Création des onglets (nommés) — PARTIE 2/4
 # =========================
-tab_dash, tab_analyses, tab_escrow, tab_compte, tab_gestion, tab_visa, tab_export = st.tabs([
-    "📊 Dashboard",
-    "📈 Analyses",
-    "🏦 Escrow",
-    "👤 Compte client",
-    "🧾 Gestion",
-    "📄 Visa (aperçu)",
-    "💾 Export"
-])
+tab_dash, tab_analyses, tab_escrow, tab_compte, tab_gestion, tab_visa, tab_export = st.tabs(
+    [
+        "📊 Dashboard",
+        "📈 Analyses",
+        "🏦 Escrow",
+        "👤 Compte client",
+        "🧾 Gestion",
+        "📄 Visa (aperçu)",
+        "💾 Export",
+    ]
+)
 
 # =========================
 # 📊 DASHBOARD
@@ -376,8 +377,8 @@ with tab_dash:
     if df_all.empty:
         st.info("Aucun client chargé. Charge les fichiers dans la barre latérale.")
     else:
-        # KPIs (réduits visuellement via colonnes)
-        k1, k2, k3, k4, k5 = st.columns([1,1,1,1,1])
+        # KPIs
+        k1, k2, k3, k4, k5 = st.columns([1, 1, 1, 1, 1])
         k1.metric("Dossiers", f"{len(df_all)}")
         k2.metric("Honoraires+Frais", _fmt_money(df_all["Total (US $)"].sum()))
         k3.metric("Payé", _fmt_money(df_all["Payé"].sum()))
@@ -388,9 +389,21 @@ with tab_dash:
 
         # Filtres
         st.markdown("#### 🎛️ Filtres")
-        cats  = sorted(df_all["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all.columns else []
-        subs  = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all.columns else []
-        visas = sorted(df_all["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all.columns else []
+        cats = (
+            sorted(df_all["Categories"].dropna().astype(str).unique().tolist())
+            if "Categories" in df_all.columns
+            else []
+        )
+        subs = (
+            sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist())
+            if "Sous-categorie" in df_all.columns
+            else []
+        )
+        visas = (
+            sorted(df_all["Visa"].dropna().astype(str).unique().tolist())
+            if "Visa" in df_all.columns
+            else []
+        )
 
         a1, a2, a3 = st.columns(3)
         fc = a1.multiselect("Catégories", cats, default=[])
@@ -398,15 +411,18 @@ with tab_dash:
         fv = a3.multiselect("Visa", visas, default=[])
 
         view = df_all.copy()
-        if fc: view = view[view["Categories"].astype(str).isin(fc)]
-        if fs: view = view[view["Sous-categorie"].astype(str).isin(fs)]
-        if fv: view = view[view["Visa"].astype(str).isin(fv)]
+        if fc:
+            view = view[view["Categories"].astype(str).isin(fc)]
+        if fs:
+            view = view[view["Sous-categorie"].astype(str).isin(fs)]
+        if fv:
+            view = view[view["Visa"].astype(str).isin(fv)]
 
         # Graph 1 : Nombre de dossiers par catégorie
         st.markdown("#### 📦 Nombre de dossiers par catégorie")
         if not view.empty and "Categories" in view.columns:
             g1 = view["Categories"].value_counts().reset_index()
-            g1.columns = ["Catégorie","Nombre"]
+            g1.columns = ["Catégorie", "Nombre"]
             st.bar_chart(g1.set_index("Catégorie"))
         else:
             st.write("0")
@@ -416,7 +432,13 @@ with tab_dash:
         if not view.empty:
             tmp = view.copy()
             tmp["Mois"] = tmp["Mois"].astype(str)
-            gm = tmp.groupby("Mois", as_index=False)[["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]].sum().sort_values("Mois")
+            gm = (
+                tmp.groupby("Mois", as_index=False)[
+                    ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"]
+                ]
+                .sum()
+                .sort_values("Mois")
+            )
             gm = gm.set_index("Mois")
             st.line_chart(gm)
         else:
@@ -424,23 +446,50 @@ with tab_dash:
 
         # Détails
         st.markdown("#### 📋 Détails (après filtres)")
-        show = ["Dossier N","ID_Client","Nom","Date","Mois","Categories","Sous-categorie","Visa",
-                "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Solde",
-                "Dossiers envoyé","Dossier approuvé","Dossier refusé","Dossier Annulé","RFE"]
+        show = [
+            "Dossier N",
+            "ID_Client",
+            "Nom",
+            "Date",
+            "Mois",
+            "Categories",
+            "Sous-categorie",
+            "Visa",
+            "Montant honoraires (US $)",
+            "Autres frais (US $)",
+            "Total (US $)",
+            "Payé",
+            "Solde",
+            "Dossiers envoyé",
+            "Dossier approuvé",
+            "Dossier refusé",
+            "Dossier Annulé",
+            "RFE",
+        ]
         show = [c for c in show if c in view.columns]
         view2 = view.copy()
-        # Format monnaie
-        for c in ["Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Solde"]:
+        for c in [
+            "Montant honoraires (US $)",
+            "Autres frais (US $)",
+            "Total (US $)",
+            "Payé",
+            "Solde",
+        ]:
             if c in view2.columns:
                 view2[c] = view2[c].apply(_fmt_money)
-        # Date propre
         if "Date" in view2.columns:
             try:
-                view2["Date"] = pd.to_datetime(view2["Date"], errors="coerce").dt.date.astype(str)
+                view2["Date"] = (
+                    pd.to_datetime(view2["Date"], errors="coerce").dt.date.astype(str)
+                )
             except Exception:
                 view2["Date"] = view2["Date"].astype(str)
 
-        st.dataframe(view2[show].reset_index(drop=True), use_container_width=True, height=420)
+        st.dataframe(
+            view2[show].reset_index(drop=True),
+            use_container_width=True,
+            height=420,
+        )
 
 # =========================
 # 📈 ANALYSES
@@ -450,11 +499,21 @@ with tab_analyses:
     if df_all.empty:
         st.info("Aucune donnée.")
     else:
-        yearsA  = sorted([int(y) for y in pd.to_numeric(df_all["_Année_"], errors="coerce").dropna().unique().tolist()])
-        monthsA = [f"{m:02d}" for m in range(1,13)]
-        catsA   = sorted(df_all["Categories"].dropna().astype(str).unique().tolist())
-        subsA   = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist())
-        visasA  = sorted(df_all["Visa"].dropna().astype(str).unique().tolist())
+        yearsA = sorted(
+            [
+                int(y)
+                for y in pd.to_numeric(df_all["_Année_"], errors="coerce")
+                .dropna()
+                .unique()
+                .tolist()
+            ]
+        )
+        monthsA = [f"{m:02d}" for m in range(1, 13)]
+        catsA = sorted(df_all["Categories"].dropna().astype(str).unique().tolist())
+        subsA = sorted(
+            df_all["Sous-categorie"].dropna().astype(str).unique().tolist()
+        )
+        visasA = sorted(df_all["Visa"].dropna().astype(str).unique().tolist())
 
         b1, b2, b3, b4, b5 = st.columns(5)
         fy = b1.multiselect("Année", yearsA, default=[])
@@ -464,11 +523,16 @@ with tab_analyses:
         fv = b5.multiselect("Visa", visasA, default=[])
 
         A = df_all.copy()
-        if fy: A = A[A["_Année_"].isin(fy)]
-        if fm: A = A[A["Mois"].astype(str).isin(fm)]
-        if fc: A = A[A["Categories"].astype(str).isin(fc)]
-        if fs: A = A[A["Sous-categorie"].astype(str).isin(fs)]
-        if fv: A = A[A["Visa"].astype(str).isin(fv)]
+        if fy:
+            A = A[A["_Année_"].isin(fy)]
+        if fm:
+            A = A[A["Mois"].astype(str).isin(fm)]
+        if fc:
+            A = A[A["Categories"].astype(str).isin(fc)]
+        if fs:
+            A = A[A["Sous-categorie"].astype(str).isin(fs)]
+        if fv:
+            A = A[A["Visa"].astype(str).isin(fv)]
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Dossiers", f"{len(A)}")
@@ -480,14 +544,21 @@ with tab_analyses:
         st.markdown("#### % par catégorie")
         if not A.empty:
             totalA = max(1.0, float(A["Total (US $)"].sum()))
-            part = (A.groupby("Categories", as_index=False)["Total (US $)"].sum()
-                      .assign(Part=lambda df: (df["Total (US $)"]/totalA*100.0).round(1)))
+            part = (
+                A.groupby("Categories", as_index=False)["Total (US $)"]
+                .sum()
+                .assign(Part=lambda df: (df["Total (US $)"] / totalA * 100.0).round(1))
+            )
             st.dataframe(part, use_container_width=True)
+
         st.markdown("#### % par sous-catégorie")
         if not A.empty and "Sous-categorie" in A.columns:
             totalA = max(1.0, float(A["Total (US $)"].sum()))
-            part2 = (A.groupby("Sous-categorie", as_index=False)["Total (US $)"].sum()
-                        .assign(Part=lambda df: (df["Total (US $)"]/totalA*100.0).round(1)))
+            part2 = (
+                A.groupby("Sous-categorie", as_index=False)["Total (US $)"]
+                .sum()
+                .assign(Part=lambda df: (df["Total (US $)"] / totalA * 100.0).round(1))
+            )
             st.dataframe(part2, use_container_width=True)
 
         # Comparaison simple période (Années A vs B)
@@ -498,11 +569,22 @@ with tab_analyses:
 
         def agg_years(sel):
             if not sel:
-                return pd.DataFrame(columns=["_Année_","Total (US $)","Payé","Solde","Dossiers"])
+                return pd.DataFrame(
+                    columns=["_Année_", "Total (US $)", "Payé", "Solde", "Dossiers"]
+                )
             X = df_all[df_all["_Année_"].isin(sel)]
-            return (X.groupby("_Année_", as_index=False)
-                     .agg({"Total (US $)":"sum","Payé":"sum","Solde":"sum","ID_Client":"count"})
-                     .rename(columns={"ID_Client":"Dossiers"}))
+            return (
+                X.groupby("_Année_", as_index=False)
+                .agg(
+                    {
+                        "Total (US $)": "sum",
+                        "Payé": "sum",
+                        "Solde": "sum",
+                        "ID_Client": "count",
+                    }
+                )
+                .rename(columns={"ID_Client": "Dossiers"})
+            )
 
         ga = agg_years(ya)
         gb = agg_years(yb)
@@ -514,17 +596,42 @@ with tab_analyses:
         # Détails
         st.markdown("#### Détails")
         det = A.copy()
-        for c in ["Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Solde"]:
+        for c in [
+            "Montant honoraires (US $)",
+            "Autres frais (US $)",
+            "Total (US $)",
+            "Payé",
+            "Solde",
+        ]:
             if c in det.columns:
                 det[c] = det[c].apply(_fmt_money)
         if "Date" in det.columns:
             try:
-                det["Date"] = pd.to_datetime(det["Date"], errors="coerce").dt.date.astype(str)
+                det["Date"] = (
+                    pd.to_datetime(det["Date"], errors="coerce").dt.date.astype(str)
+                )
             except Exception:
                 det["Date"] = det["Date"].astype(str)
-        showA = ["Dossier N","ID_Client","Nom","Date","Mois","Categories","Sous-categorie","Visa",
-                 "Montant honoraires (US $)","Autres frais (US $)","Total (US $)","Payé","Solde",
-                 "Dossiers envoyé","Dossier approuvé","Dossier refusé","Dossier Annulé","RFE"]
+        showA = [
+            "Dossier N",
+            "ID_Client",
+            "Nom",
+            "Date",
+            "Mois",
+            "Categories",
+            "Sous-categorie",
+            "Visa",
+            "Montant honoraires (US $)",
+            "Autres frais (US $)",
+            "Total (US $)",
+            "Payé",
+            "Solde",
+            "Dossiers envoyé",
+            "Dossier approuvé",
+            "Dossier refusé",
+            "Dossier Annulé",
+            "RFE",
+        ]
         showA = [c for c in showA if c in det.columns]
         st.dataframe(det[showA].reset_index(drop=True), use_container_width=True, height=400)
 
