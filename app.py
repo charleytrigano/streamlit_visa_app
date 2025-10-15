@@ -11,6 +11,8 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+SID = "v1"  # identifiant stable pour les clés de widgets
+
 
 # ============ BLOC FICHIERS & MÉMOIRE (UN SEUL EXEMPLAIRE) ============
 # Place ce bloc après les imports (pandas/streamlit) et AVANT d'utiliser df_clients_raw/df_visa_raw
