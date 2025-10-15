@@ -599,6 +599,7 @@ tabs = st.tabs([
 
 
 
+
 # # ==============================================
 # BLOC 2/10 — 📊 Dashboard (construction df_all + KPI + filtres + graphiques + détails)
 # ==============================================
