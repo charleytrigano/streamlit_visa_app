@@ -397,7 +397,7 @@ with tabs[1]:
 
         env_pct = 0
         if "Dossiers envoyé" in view.columns and len(view) > 0:
-            env_pct = int(100 * (_to_num(view["Dossiers envoyé"]).clip(lower=0, upper=1).sum() / len(view)))
+            env_pct = int(100 * (view["Dossiers envoyé"].apply(_to_num).clip(lower=0, upper=1).sum() / len(view)))
         k2.metric("Honoraires+Frais", _fmt_money(total))
         k3.metric("Payé", _fmt_money(paye))
         k4.metric("Solde", _fmt_money(solde))
