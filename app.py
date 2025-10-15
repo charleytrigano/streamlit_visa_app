@@ -308,7 +308,7 @@ def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
             df["_MoisNum_"] = pd.NA
         if "Mois" not in df.columns:
             df["Mois"] = ""
-    return df df
+    return df 
 
 
 def _series_sum(df: pd.DataFrame, col: str) -> float:
