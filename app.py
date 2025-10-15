@@ -1542,4 +1542,4 @@ with tabs[7]:
                 vpath = (getattr(up_visa, "name", "") and f"upload_{up_visa.name}") if (mode=="Deux fichiers (Clients & Visa)") else last_visa
                 save_last_paths(cpath, vpath, str(pdir))
             except Exception as e:
-                st.error(f"Erreur de sauvegarde : {e}")
+                st.error(f"Erreur de sauvegarde : {e}"
