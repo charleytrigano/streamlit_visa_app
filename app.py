@@ -79,7 +79,7 @@ if dval is None or isinstance(dval, pd._libs.tslibs.nattype.NaTType):
 dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
 
 
-  dval = _date_for_widget(row.get("Date"))
+dval = _date_for_widget(row.get("Date"))
 if dval is None:
     dval = date.today()
 
