@@ -297,7 +297,7 @@ def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
         try:
             dd = pd.to_datetime(df["Date"], errors="coerce")
         except Exception:
-            dd = pd.to_datetime(pd.Series([], dtype="datetime64[ns]"]))
+            dd = pd.to_datetime(pd.Series([], dtype="datetime64[ns]"))
         df["_Année_"] = dd.dt.year
         df["_MoisNum_"] = dd.dt.month
         df["Mois"] = dd.dt.month.apply(lambda m: f"{int(m):02d}" if pd.notna(m) else "")
@@ -308,7 +308,7 @@ def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
             df["_MoisNum_"] = pd.NA
         if "Mois" not in df.columns:
             df["Mois"] = ""
-    return df
+    return df df
 
 
 def _series_sum(df: pd.DataFrame, col: str) -> float:
