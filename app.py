@@ -81,9 +81,11 @@ def _fmt_money(v: float) -> str:
     except Exception:
         return "$0.00"
 
-dval = _date_for_widget(row.get("Date"))
-if dval is None:
-    dval = date.today()
+# Vérifier si row est défini et si "Date" est bien dans row
+if row is not None and "Date" in row:
+    dval = _date_for_widget(row.get("Date"))
+else:
+    dval = date.today()  # Définit une valeur par défaut (aujourd'hui)
 
 if isinstance(dval, datetime):
     dval = dval.date()
