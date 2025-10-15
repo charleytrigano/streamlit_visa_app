@@ -13,6 +13,75 @@ import streamlit as st
 
 SID = "v1"  # identifiant stable pour les clés de widgets
 
+# =========================
+# 🔧 Mémoire des derniers chemins (Clients / Visa / Dossier de sauvegarde)
+# =========================
+import json
+import os
+from pathlib import Path
+
+# Fichier JSON local où on mémorise les derniers chemins utilisés
+LAST_PATHS_FILE = Path("./.visa_manager_last_paths.json")
+
+def load_last_paths():
+    """
+    Retourne (last_clients, last_visa, last_save_dir).
+    Si le fichier n'existe pas ou est invalide -> (None, None, None).
+    """
+    try:
+        if LAST_PATHS_FILE.exists():
+            data = json.loads(LAST_PATHS_FILE.read_text(encoding="utf-8"))
+            return (
+                data.get("clients_path") or None,
+                data.get("visa_path") or None,
+                data.get("save_dir") or None,
+            )
+    except Exception:
+        pass
+    return (None, None, None)
+
+def save_last_paths(clients_path=None, visa_path=None, save_dir=None):
+    """
+    Met à jour les chemins mémorisés. Les valeurs à None ne modifient pas l’existant.
+    """
+    current = {}
+    if LAST_PATHS_FILE.exists():
+        try:
+            current = json.loads(LAST_PATHS_FILE.read_text(encoding="utf-8"))
+            if not isinstance(current, dict):
+                current = {}
+        except Exception:
+            current = {}
+
+    if clients_path is not None:
+        current["clients_path"] = str(clients_path)
+    if visa_path is not None:
+        current["visa_path"] = str(visa_path)
+    if save_dir is not None:
+        current["save_dir"] = str(save_dir)
+
+    try:
+        LAST_PATHS_FILE.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        # On ne bloque pas l'app si l'écriture échoue.
+        pass
+
+def resolve_path(p):
+    """
+    Normalise un chemin venant d’un uploader / input texte :
+    - str | Path -> renvoyé sous forme de str absolu si possible
+    - None -> None
+    """
+    if not p:
+        return None
+    try:
+        return str(Path(p).expanduser().resolve())
+    except Exception:
+        try:
+            return str(Path(p))
+        except Exception:
+            return None
+
 
 # ============ BLOC FICHIERS & MÉMOIRE (UN SEUL EXEMPLAIRE) ============
 # Place ce bloc après les imports (pandas/streamlit) et AVANT d'utiliser df_clients_raw/df_visa_raw
