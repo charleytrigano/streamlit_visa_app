@@ -64,20 +64,15 @@ def _fmt_money(v: float) -> str:
     except Exception:
         return "$0.00"
 
-def _date_for_widget(val: Any) -> date:
-    if isinstance(val, date):
-        return val
-    if isinstance(val, datetime):
-        return val.date()
-    try:
-        d = pd.to_datetime(val, errors="coerce")
-        if pd.isna(d):
-            return date.today()
-        return d.date()
-    except Exception:
-        return date.today()
+dval = _date_for_widget(row.get("Date"))
+if dval is None:
+    dval = date.today()
 
-        dval = _date_for_widget(row.get("Date"))
+if isinstance(dval, datetime):
+    dval = dval.date()
+
+dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
+
         if dval is None or isinstance(dval, pd._libs.tslibs.nattype.NaTType):
         dval = date.today()
 
