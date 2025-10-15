@@ -81,7 +81,6 @@ def _date_for_widget(val: Any) -> date:
         return date.today()
 
 
-
 def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
