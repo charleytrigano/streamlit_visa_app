@@ -195,6 +195,51 @@ def load_excel_to_session(uploaded_file: BytesIO, filename: str):
     st.session_state[DF_PAYMENTS_KEY] = dfp
 
 
+def load_excels_to_session(uploaded_files):
+    """Supporte un ou plusieurs fichiers .xlsx. En cas de multiple, on fusionne les feuilles Clients et Payments."""
+    if not uploaded_files:
+        return
+
+    merged_clients = []
+    merged_payments = []
+
+    last_name = None
+    for up in uploaded_files:
+        last_name = up.name
+        data = up.read()
+        with pd.ExcelFile(BytesIO(data)) as xls:
+            dfc = pd.read_excel(xls, CLIENTS_SHEET) if CLIENTS_SHEET in xls.sheet_names else pd.DataFrame(columns=CLIENTS_COLUMNS)
+            dfp = pd.read_excel(xls, PAYMENTS_SHEET) if PAYMENTS_SHEET in xls.sheet_names else pd.DataFrame(columns=PAYMENTS_COLUMNS)
+        merged_clients.append(_ensure_columns(dfc, CLIENTS_COLUMNS))
+        merged_payments.append(_ensure_columns(dfp, PAYMENTS_COLUMNS))
+
+    dfc = pd.concat(merged_clients, ignore_index=True) if merged_clients else pd.DataFrame(columns=CLIENTS_COLUMNS)
+    dfp = pd.concat(merged_payments, ignore_index=True) if merged_payments else pd.DataFrame(columns=PAYMENTS_COLUMNS)
+
+    # Normalisations
+    dfc["CreatedAt"] = pd.to_datetime(dfc["CreatedAt"], errors="coerce").dt.date
+    dfp["Date"] = pd.to_datetime(dfp["Date"], errors="coerce").dt.date
+
+    # Supprimer doublons éventuels (même ClientID ou PaymentID)
+    if "ClientID" in dfc.columns:
+        dfc = dfc.drop_duplicates(subset=["ClientID"], keep="last")
+    if "PaymentID" in dfp.columns:
+        dfp = dfp.drop_duplicates(subset=["PaymentID"], keep="last")
+
+    dfc = _recompute_balances(dfc, dfp)
+
+    st.session_state[DF_CLIENTS_KEY] = dfc
+    st.session_state[DF_PAYMENTS_KEY] = dfp
+
+    # On sauvegarde aussi un fichier fusionné en mémoire pour téléchargement
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        dfc.to_excel(writer, index=False, sheet_name=CLIENTS_SHEET)
+        dfp.to_excel(writer, index=False, sheet_name=PAYMENTS_SHEET)
+    st.session_state[FILE_KEY] = output.getvalue()
+    st.session_state[FILE_NAME_KEY] = "merged_visa_manager.xlsx" if len(uploaded_files) > 1 else (last_name or "visa_manager.xlsx")
+
+
 def save_session_to_excel_bytes() -> bytes:
     dfc = st.session_state.get(DF_CLIENTS_KEY, pd.DataFrame(columns=CLIENTS_COLUMNS))
     dfp = st.session_state.get(DF_PAYMENTS_KEY, pd.DataFrame(columns=PAYMENTS_COLUMNS))
@@ -219,10 +264,30 @@ def persist_back_to_same_file():
 
 def sidebar_file_section():
     st.sidebar.header("Fichier Excel")
-    up = st.sidebar.file_uploader("Charger le fichier Excel (xlsx)", type=["xlsx"], key="uploader")
-    if up is not None:
-        load_excel_to_session(up, up.name)
-        st.sidebar.success(f"Chargé: {up.name}")
+    up_list = st.sidebar.file_uploader(
+        "Charger un ou plusieurs fichiers Excel (xlsx)",
+        type=["xlsx"],
+        key="uploader",
+        accept_multiple_files=True,
+    )
+    if up_list:
+        # Autorise 1 ou N fichiers
+        load_excels_to_session(up_list)
+        if len(up_list) == 1:
+            st.sidebar.success(f"Chargé: {up_list[0].name}")
+        else:
+            st.sidebar.success(f"{len(up_list)} fichiers fusionnés")
+
+    if st.session_state.get(FILE_KEY):
+        st.sidebar.download_button(
+            "📥 Télécharger la version actuelle",
+            data=st.session_state[FILE_KEY],
+            file_name=st.session_state.get(FILE_NAME_KEY, "visa_manager.xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        if st.sidebar.button("💾 Enregistrer (écraser en mémoire)"):
+            persist_back_to_same_file()
+
 
     if st.session_state.get(FILE_KEY):
         st.sidebar.download_button(
@@ -344,9 +409,17 @@ def page_clients():
     # Sélection client
     options = dfc.sort_values("CreatedAt", ascending=False)
     label_map = {row.ClientID: f"{row.FullName} — {row.Service} — {row.Month}/{row.Year} — {row.Balance:.2f} {CURRENCY}" for _, row in options.iterrows()}
-    selected_id = st.selectbox("Sélectionner un client", list(label_map.keys()), format_func=lambda k: label_map[k])
+    selected_id = st.selectbox("Sélectionner un client", list(label_map.keys()), format_func=lambda k: label_map[k] if k in label_map else str(k))
 
-    row_idx = dfc.index[dfc["ClientID"] == selected_id][0]
+    if selected_id is None or selected_id not in dfc["ClientID"].values:
+        st.warning("Client introuvable ou non sélectionné.")
+        return
+
+    idxs = dfc.index[dfc["ClientID"] == selected_id]
+    if len(idxs) == 0:
+        st.warning("Client introuvable (index).")
+        return
+    row_idx = idxs[0]
     row = dfc.loc[row_idx].to_dict()
 
     with st.form("edit_client_form", clear_on_submit=False):
