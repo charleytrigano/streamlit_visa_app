@@ -280,23 +280,13 @@ def sidebar_file_section():
 
     if st.session_state.get(FILE_KEY):
         st.sidebar.download_button(
-            "📥 Télécharger la version actuelle",
+            label="📥 Télécharger la version actuelle",
             data=st.session_state[FILE_KEY],
             file_name=st.session_state.get(FILE_NAME_KEY, "visa_manager.xlsx"),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_current",
         )
-        if st.sidebar.button("💾 Enregistrer (écraser en mémoire)"):
-            persist_back_to_same_file()
-
-
-    if st.session_state.get(FILE_KEY):
-        st.sidebar.download_button(
-            "📥 Télécharger la version actuelle",
-            data=st.session_state[FILE_KEY],
-            file_name=st.session_state.get(FILE_NAME_KEY, "visa_manager.xlsx"),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        if st.sidebar.button("💾 Enregistrer (écraser en mémoire)"):
+        if st.sidebar.button("💾 Enregistrer (écraser en mémoire)", key="save_memory"):
             persist_back_to_same_file()
 
 
