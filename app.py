@@ -481,10 +481,23 @@ def page_paiements():
 
     # Sélection client
     options = dfc.sort_values(["Balance", "CreatedAt"], ascending=[False, False])
-    label_map = {row.ClientID: f"{row.FullName} — Solde {row.Balance:.2f} {CURRENCY}" for _, row in options.iterrows()}
-    selected_id = st.selectbox("Client", list(label_map.keys()), format_func=lambda k: label_map[k])
+    if options.empty:
+        st.info("Aucun client disponible.")
+        return
 
-    client = dfc[dfc["ClientID"] == selected_id].iloc[0]
+    label_map = {row.ClientID: f"{row.FullName} — Solde {row.Balance:.2f} {CURRENCY}" for _, row in options.iterrows()}
+    selected_id = st.selectbox("Client", list(label_map.keys()), format_func=lambda k: label_map.get(k, str(k)), key="pay_client")
+
+    if selected_id is None or selected_id not in dfc["ClientID"].values:
+        st.warning("Client non sélectionné ou introuvable.")
+        return
+
+    client_rows = dfc[dfc["ClientID"] == selected_id]
+    if client_rows.empty:
+        st.warning("Client introuvable dans les données.")
+        return
+
+    client = client_rows.iloc[0]
 
     st.write(f"**Total**: {client.TotalAmount:.2f} {CURRENCY} | **Payé**: {client.PaidAmount:.2f} {CURRENCY} | **Solde**: {client.Balance:.2f} {CURRENCY}")
 
@@ -493,7 +506,7 @@ def page_paiements():
         newp["Date"] = safe_date_input(st, "Date du paiement", date.today(), key="pay_date")
         max_amount = max(0.0, float(client.Balance))
         newp["Amount"] = st.number_input(f"Montant ({CURRENCY})", min_value=0.0, max_value=float(max_amount), value=float(max_amount) if max_amount > 0 else 0.0, step=10.0, help="Le montant est plafonné au solde restant.")
-        newp["Method"] = st.selectbox("Méthode", ["Cash", "Card", "Wire", "Other"]) 
+        newp["Method"] = st.selectbox("Méthode", ["Cash", "Card", "Wire", "Other"], key="pay_method")
         newp["Reference"] = st.text_input("Référence", "")
         newp["Comment"] = st.text_input("Commentaire", "")
         add_btn = st.form_submit_button("Ajouter le paiement")
