@@ -37,8 +37,7 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
     is_excel = file_name.endswith(('.xls', '.xlsx')) or 'xlsx' in file_name.lower() or 'xls' in file_name.lower()
     
     # Assurez-vous que le pointeur est au début du fichier
-    file_content.seek(0) 
-
+    File "/mount/src/streamlit_visa_app/app.py", line 40      file_content.seek(0)                          ^SyntaxError: invalid non-printable character U+00A0
     if is_excel:
         try:
             # Tenter la lecture Excel pour les formats xls/xlsx
