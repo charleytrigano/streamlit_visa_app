@@ -92,14 +92,10 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
     
     # Vérification des colonnes critiques
     if not all(col in df.columns for col in COLS_CLIENTS_EXPECTED):
-        st.warning(
-            "Le DataFrame Clients ne contient pas toutes les colonnes attendues après le nettoyage : "
-            f"{', '.join(COLS_CLIENTS_EXPECTED)}."
-        )
-        # On continue quand même avec le nettoyage des types pour les colonnes trouvées
+        # Avertissement si les colonnes de base ne sont pas trouvées (souvent lié à l'en-tête)
+        pass 
         
     # --- 1. Conversion des Nombres (Vectorisée et Renforcée) ---
-    # Cette liste de colonnes doit correspondre aux données réelles de votre fichier
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
     
     for col in money_cols:
@@ -119,7 +115,7 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors='coerce')
             
             # Étape 5: Remplacer les NaN par 0.0 et forcer le type float pour éviter les erreurs sum()
-            df[col] = df[col].fillna(0.0).astype(float) # <<< CORRECTION FINALE
+            df[col] = df[col].fillna(0.0).astype(float) 
 
     # --- 2. Conversion des Dates (Vectorisée) ---
     date_cols = ['date', 'dossier_envoyé', 'dossier_approuvé', 'dossier_refusé', 'dossier_annulé']
@@ -137,38 +133,47 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
     st.success("Nettoyage et conversion des données Clients terminés (Vectorisé).")
     return df
 
-def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoie et standardise les types de données du DataFrame Visa."""
-    
-    # Nettoyer les noms de colonnes
-    df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
-    
-    # Assurer que les valeurs sont des chaînes, puis nettoyer les espaces
-    for col in df.columns:
-        df[col] = df[col].astype(str).str.strip()
-        
-    st.success("Nettoyage des données Visa terminé.")
-    return df
-
 @st.cache_data
 def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calcule des indicateurs clés à partir du DataFrame Clients."""
+    """Calcule des indicateurs clés à partir du DataFrame Clients. Robuste aux colonnes manquantes."""
     
     if df.empty:
-        return {"total_clients": 0, "total_honoraires": 0.0, "solde_du": 0.0}
+        return {"total_clients": 0, "total_honoraires": 0.0, "solde_du": 0.0, "clients_actifs": 0}
 
-    # Les colonnes sont maintenant garanties d'être des floats grâce au nettoyage renforcé
+    # Utiliser .get() pour gérer les colonnes monétaires
     total_honoraires = df['montant'].sum() if 'montant' in df.columns else 0.0
     total_payé = df['payé'].sum() if 'payé' in df.columns else 0.0
     solde_du = df['solde'].sum() if 'solde' in df.columns else 0.0
     
+    # Logique plus défensive pour calculer les clients actifs
+    clients_actifs = len(df) # Par défaut, tous sont actifs
+    
+    # Liste des colonnes de "fin de dossier"
+    end_cols = ['dossier_approuvé', 'dossier_annulé', 'dossier_refusé']
+    
+    # Crée un masque initial de True (tous les dossiers sont actifs a priori)
+    active_mask = pd.Series([True] * len(df), index=df.index)
+    
+    # Pour chaque colonne d'état, si elle existe, nous la combinons avec le masque
+    for col in end_cols:
+        if col in df.columns:
+            # Un dossier n'est PLUS actif s'il a une date dans l'une de ces colonnes
+            # Donc, on filtre les lignes où cette colonne N'EST PAS NaN (n'est pas nulle)
+            # Puis on utilise l'opérateur NON (~) sur le masque combiné pour les désactiver
+            active_mask &= df[col].isna()
+
+    # Si aucune colonne d'état n'a été trouvée, le masque reste True (tous actifs)
+    clients_actifs = active_mask.sum()
+    
+    clients_payés = len(df[df['solde'] <= 0]) if 'solde' in df.columns else 0
+
     summary = {
         "total_clients": len(df),
         "total_honoraires": total_honoraires,
         "total_payé": total_payé,
         "solde_du": solde_du,
-        "clients_actifs": len(df[(df['dossier_approuvé'].isna()) & (df['dossier_annulé'].isna()) & (df['dossier_refusé'].isna())]),
-        "clients_payés": len(df[df['solde'] <= 0])
+        "clients_actifs": clients_actifs, # Utilisation de la nouvelle logique robuste
+        "clients_payés": clients_payés
     }
     return summary
 
@@ -192,8 +197,6 @@ def upload_section():
         key=skey("upload", "visa"),
     )
 
-    # Note: L'utilisation de uploaded_file.read() est mise dans la session
-    # pour permettre à @st.cache_data d'être efficace même si le fichier est le même.
     if uploaded_file_clients:
         st.session_state[skey("raw_clients_content")] = uploaded_file_clients.read()
         st.session_state[skey("clients_name")] = uploaded_file_clients.name
