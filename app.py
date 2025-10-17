@@ -9,74 +9,103 @@ import streamlit as st
 # =========================
 # Constantes et Configuration
 # =========================
-APP_TITLE = "🛂 Visa Manager - Amélioré"
-SID = "vmgr_v2"
+APP_TITLE = "🛂 Visa Manager - Projet Stable"
+SID = "vmgr_v3"
+
+# Dictionnaire du modèle de classification (pour la saisie de nouveaux dossiers)
+VISA_STRUCTURE = {
+    "Affaires / Tourisme": {
+        "B-1": ["COS", "EOS"],
+        "B-2": ["COS", "EOS"],
+    },
+    "Etudiants": {
+        "F-1": ["COS", "EOS"],
+        "F-2": ["COS", "EOS"],
+    },
+    "Treaty": {
+        "E-2": {
+            "E-2 Inv.": ["CP", "USCIS"],
+            "E-2 Inv. Ren.": ["CP", "USCIS"],
+            "E-2 ESE": ["CP", "USCIS"],
+            "E-2 ESE Ren.": ["CP", "USCIS"],
+        }
+    },
+    "Trader": {
+        "E-1": {
+            "E-1 Trad.": ["CP", "USCIS"],
+            "E-1 Trad. Ren.": ["CP", "USCIS"],
+            "E-1 ESE": ["CP", "USCIS"],
+            "E-1 ESE Ren.": ["CP", "USCIS"],
+        },
+        "H-1B": ["Initial", "Extension", "Transfer", "CP"],
+        "L-1": ["Initial", "Extension", "Transfer", "CP"],
+        "R-1": ["Initial", "Extension", "Transfer", "CP"],
+        "TN": ["Initial", "Extension", "Transfer", "CP"],
+        "K-1": ["Initial", "CP"],
+    },
+    "Residence Permanente": {
+        "Employment": {
+            "Executive/Manager": ["I-140", "AOS", "I-140 & AOS", "CP"],
+            "EB-2/EB-3": ["Perm", "I-140", "AOS", "I-140 & AOS", "CP"],
+            "EB-5": ["I-526", "AOS", "I-527 & AOS", "CP", "I-829"],
+        },
+        "Family": {
+            "Marriage": {
+                "USC": ["I-130", "AOS", "I-130 & AOS", "CP"],
+                "LPR": ["I-130", "AOS", "I-130 & AOS", "CP"],
+            },
+            "Family": {
+                "USC": ["I-130", "AOS", "I-130 & AOS", "CP"],
+                "LPR": ["I-130", "AOS", "I-130 & AOS", "CP"],
+            },
+        },
+        "DV lottery": ["CP", "AOS"],
+    }
+}
+
+SIMPLE_SERVICE_OPTIONS = {
+    "Derivatives": None, "Travel Permit": None, "Work Permit": None, "I-751": None, 
+    "Re-entry Permit": None, "I-90": None, "Consultation": None, 
+    "Analysis": None, "Referral": None, "I-407": None,
+    "Naturalization": ["Traditional", "Marriage"],
+    "Other": ["Détail à écrire dans une case"],
+}
+
 
 # =========================
-# Fonctions utilitaires
+# Fonctions utilitaires de DataFrames
 # =========================
 
 def skey(*args) -> str:
     """Génère une clé unique pour st.session_state."""
     return f"{SID}_{'_'.join(map(str, args))}"
 
-# Utilitaire de chargement de fichier CSV/Excel avec gestion de l'en-tête.
 @st.cache_data(show_spinner="Lecture du fichier...")
 def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) -> pd.DataFrame:
     """Lit les données d'un fichier téléchargé (CSV ou Excel)."""
     
-    # 1. Déterminer le type de fichier
+    # ... (Le code de lecture de fichier est inchangé et reste robuste) ...
     if file_name.endswith(('.xls', '.xlsx')):
         try:
-            # Pour Excel, utiliser la première feuille par défaut
-            df = pd.read_excel(
-                file_content, 
-                header=header_row, 
-                engine='openpyxl',
-                # Tenter de lire tous les types comme des chaînes pour éviter des erreurs initiales
-                dtype=str, 
-            )
+            df = pd.read_excel(file_content, header=header_row, engine='openpyxl', dtype=str)
         except Exception as e:
             st.error(f"Erreur de lecture Excel : {e}")
             return pd.DataFrame()
-    else: # Supposer CSV si ce n'est pas Excel
+    else: # Supposer CSV
         try:
-            # Tenter plusieurs encodages courants
-            df = pd.read_csv(
-                file_content, 
-                header=header_row, 
-                sep=None, # Détection automatique du séparateur
-                engine='python', # Nécessaire pour sep=None
-                encoding='utf-8',
-                on_bad_lines='skip',
-                # Tenter de lire tous les types comme des chaînes
-                dtype=str, 
-            )
+            df = pd.read_csv(file_content, header=header_row, sep=None, engine='python', encoding='utf-8', on_bad_lines='skip', dtype=str)
         except UnicodeDecodeError:
             try:
-                df = pd.read_csv(
-                    file_content, 
-                    header=header_row, 
-                    sep=None, 
-                    engine='python', 
-                    encoding='latin1',
-                    on_bad_lines='skip',
-                    dtype=str,
-                )
+                df = pd.read_csv(file_content, header=header_row, sep=None, engine='python', encoding='latin1', on_bad_lines='skip', dtype=str)
             except Exception as e:
-                st.error(f"Erreur de lecture CSV : {e}")
+                st.error(f"Erreur de lecture CSV (Latin1) : {e}")
                 return pd.DataFrame()
         except Exception as e:
             st.error(f"Erreur de lecture CSV : {e}")
             return pd.DataFrame()
     
-    # Nettoyage des colonnes : supprimer les colonnes entièrement vides
     df = df.dropna(axis=1, how='all')
-    
-    # Nettoyage des noms de colonnes : supprimer les espaces de début/fin
     df.columns = df.columns.str.strip().fillna('')
-    
-    # Supprimer les lignes entièrement vides
     df = df.dropna(axis=0, how='all')
     
     return df
@@ -84,98 +113,75 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
 def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
     """Nettoie et standardise les types de données du DataFrame Clients."""
     
-    # Nettoyer les noms de colonnes pour une manipulation plus facile
+    # 1. Nettoyer les noms de colonnes : supprime les caractères spéciaux, minuscules.
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
     
-    # Colonnes attendues après nettoyage pour vérification
-    COLS_CLIENTS_EXPECTED = ['id_client', 'dossier_n', 'nom', 'date', 'categorie', 'sous_categorie', 'visa']
-    
-    # Vérification des colonnes critiques
-    if not all(col in df.columns for col in COLS_CLIENTS_EXPECTED):
-        # Avertissement si les colonnes de base ne sont pas trouvées (souvent lié à l'en-tête)
-        pass 
-        
-    # --- 1. Conversion des Nombres (Vectorisée et Renforcée) ---
+    # --- 2. Conversion des Nombres (Vectorisée et Renforcée) ---
+    # Basé sur les colonnes trouvées dans le fichier "Clients.csv"
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
     
     for col in money_cols:
-        # S'assurer que la colonne existe avant de la traiter
         if col in df.columns:
-            # Étape 1: Conversion en chaîne et nettoyage des espaces
-            df[col] = df[col].astype(str).str.strip()
-            
-            # Étape 2: Remplacement des virgules par des points (standard décimal)
-            df[col] = df[col].str.replace(',', '.', regex=False)
-            
-            # Étape 3: Suppression des symboles monétaires/caractères non numériques pour sécurisation
-            # Conserve seulement les chiffres et le point décimal.
+            # Remplacement ',' par '.' et suppression des non-numériques pour robustesse
+            df[col] = df[col].astype(str).str.strip().str.replace(',', '.', regex=False)
             df[col] = df[col].str.replace(r'[^\d.]', '', regex=True)
+            # Conversion en float, les erreurs sont à NaN, puis NaN à 0.0
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float) 
 
-            # Étape 4: Conversion en numérique. Les erreurs sont mises à NaN.
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            # Étape 5: Remplacer les NaN par 0.0 et forcer le type float pour éviter les erreurs sum()
-            df[col] = df[col].fillna(0.0).astype(float) 
-
-    # --- 2. Conversion des Dates (Vectorisée) ---
+    # --- 3. Conversion des Dates (Vectorisée) ---
     date_cols = ['date', 'dossier_envoyé', 'dossier_approuvé', 'dossier_refusé', 'dossier_annulé']
     
     for col in date_cols:
         if col in df.columns:
-            # Conversion vectorielle en datetime
             df[col] = pd.to_datetime(df[col], errors='coerce')
     
-    # --- 3. Création de Colonnes Dérivées ---
-    # Calcul des jours écoulés entre la date du dossier et aujourd'hui
+    # --- 4. Colonne dérivée pour les statistiques actives ---
     if 'date' in df.columns:
          df['jours_ecoules'] = (pd.to_datetime('today') - df['date']).dt.days
 
-    st.success("Nettoyage et conversion des données Clients terminés (Vectorisé).")
+    st.success("Nettoyage et conversion des données Clients terminés (Vectorisé et Robuste).")
+    return df
+
+def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Nettoie et standardise les types de données du DataFrame Visa."""
+    # Le nettoyage pour le fichier Visa est minimal, car il est principalement une table de référence
+    df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
+    for col in df.columns:
+        df[col] = df[col].astype(str).str.strip()
     return df
 
 @st.cache_data
 def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calcule des indicateurs clés à partir du DataFrame Clients. Robuste aux colonnes manquantes."""
+    """Calcule des indicateurs clés à partir du DataFrame Clients (robuste aux colonnes manquantes)."""
     
     if df.empty:
         return {"total_clients": 0, "total_honoraires": 0.0, "solde_du": 0.0, "clients_actifs": 0}
 
-    # Utiliser .get() pour gérer les colonnes monétaires
-    total_honoraires = df['montant'].sum() if 'montant' in df.columns else 0.0
+    # Calculs financiers robustes (les colonnes sont garanties float/0.0 après nettoyage)
+    total_honoraires = df['honoraires'].sum() if 'honoraires' in df.columns else 0.0
     total_payé = df['payé'].sum() if 'payé' in df.columns else 0.0
     solde_du = df['solde'].sum() if 'solde' in df.columns else 0.0
     
-    # Logique plus défensive pour calculer les clients actifs
-    clients_actifs = len(df) # Par défaut, tous sont actifs
-    
-    # Liste des colonnes de "fin de dossier"
+    # Logique robuste pour les clients actifs (si aucune colonne d'état n'est présente, tous sont actifs)
     end_cols = ['dossier_approuvé', 'dossier_annulé', 'dossier_refusé']
-    
-    # Crée un masque initial de True (tous les dossiers sont actifs a priori)
     active_mask = pd.Series([True] * len(df), index=df.index)
     
-    # Pour chaque colonne d'état, si elle existe, nous la combinons avec le masque
     for col in end_cols:
         if col in df.columns:
             # Un dossier n'est PLUS actif s'il a une date dans l'une de ces colonnes
-            # Donc, on filtre les lignes où cette colonne N'EST PAS NaN (n'est pas nulle)
-            # Puis on utilise l'opérateur NON (~) sur le masque combiné pour les désactiver
             active_mask &= df[col].isna()
 
-    # Si aucune colonne d'état n'a été trouvée, le masque reste True (tous actifs)
     clients_actifs = active_mask.sum()
     
-    clients_payés = len(df[df['solde'] <= 0]) if 'solde' in df.columns else 0
-
     summary = {
         "total_clients": len(df),
         "total_honoraires": total_honoraires,
         "total_payé": total_payé,
         "solde_du": solde_du,
-        "clients_actifs": clients_actifs, # Utilisation de la nouvelle logique robuste
-        "clients_payés": clients_payés
+        "clients_actifs": clients_actifs,
     }
     return summary
+
 
 # =========================
 # Fonctions de l'Interface Utilisateur (UI)
@@ -185,6 +191,7 @@ def upload_section():
     """Section de chargement des fichiers."""
     st.sidebar.header("📁 Chargement des Fichiers")
     
+    # ... (Logique de chargement inchangée)
     uploaded_file_clients = st.sidebar.file_uploader(
         "Clients/Dossiers (.csv, .xlsx)",
         type=['csv', 'xlsx'],
@@ -208,11 +215,10 @@ def upload_section():
 def data_processing_flow():
     """Gère le chargement, le nettoyage et le stockage des DataFrames."""
     
-    # Utiliser st.session_state pour les DataFrames (état principal)
     st.session_state.setdefault(skey("df_clients"), pd.DataFrame())
     st.session_state.setdefault(skey("df_visa"), pd.DataFrame())
 
-    # --- 1. Chargement et Nettoyage Clients ---
+    # --- 1. Clients ---
     content_clients = st.session_state.get(skey("raw_clients_content"))
     file_name_clients = st.session_state.get(skey("clients_name"), "")
     header_clients = st.session_state.get(skey("header_clients_row"), 0)
@@ -227,7 +233,7 @@ def data_processing_flow():
     else:
         st.session_state[skey("df_clients")] = pd.DataFrame()
 
-    # --- 2. Chargement et Nettoyage Visa ---
+    # --- 2. Visa ---
     content_visa = st.session_state.get(skey("raw_visa_content"))
     file_name_visa = st.session_state.get(skey("visa_name"), "")
     header_visa = st.session_state.get(skey("header_visa_row"), 0)
@@ -257,33 +263,134 @@ def home_tab(df_clients: pd.DataFrame):
 
     # Affichage des métriques
     col1.metric("Clients Totaux", f"{summary['total_clients']:,}".replace(",", " "))
-    col2.metric("Honoraires Totaux", f"${summary['total_honoraires']:,.2f}".replace(",", " "))
+    col2.metric("Honoraires Facturés", f"${summary['total_honoraires']:,.2f}".replace(",", " "))
     col3.metric("Solde Total Dû", f"${summary['solde_du']:,.2f}".replace(",", " "))
-    col4.metric("Dossiers Actifs", f"{summary['clients_actifs']:,}".replace(",", " "))
+    col4.metric("Dossiers Actifs (Non Clôturés)", f"{summary['clients_actifs']:,}".replace(",", " "))
     
     st.divider()
     
-    st.subheader("Distribution des Catégories")
-    # Exemple d'analyse graphique simple
+    st.subheader("Analyse Rapide")
     if 'categorie' in df_clients.columns:
         counts = df_clients['categorie'].value_counts().head(10)
         st.bar_chart(counts, use_container_width=True)
     else:
-        st.warning("Colonne 'categorie' introuvable pour l'analyse.")
+        st.warning("Colonne 'categorie' introuvable pour l'analyse. Vérifiez l'index d'en-tête.")
+
+# --- NOUVEAU: Logique de Classification de Visa ---
+def visa_classification_logic():
+    st.header("🛂 Saisie et Classification de Visa")
+    st.markdown("---")
+
+    # 1. Sélection de la Grande Catégorie (Affaires/Tourisme, Etudiants, etc.)
+    col_main, col_type = st.columns(2)
+    
+    with col_main:
+        main_category = st.selectbox(
+            "1. Catégorie de Visa (Grand Groupe)",
+            ["Sélectionnez un groupe"] + list(VISA_STRUCTURE.keys()),
+            key=skey("cat", "main"),
+            help="Les noms ne sont pas enregistrés, juste pour le regroupement.",
+        )
+
+    # 2. Sélection du Type de Visa (B-1, F-1, E-2, etc. - les points ●)
+    selected_options = VISA_STRUCTURE.get(main_category, {})
+    selected_type = None
+
+    if selected_options:
+        # Si la structure est profonde (Treaty, Residence Permanente), il y a des sous-groupes
+        # Nous prenons le premier niveau de clés pour la première sélection (Selectbox)
+        visa_types = list(selected_options.keys())
+        
+        with col_type:
+            selected_type = st.selectbox(
+                f"2. Type de Visa ({main_category})",
+                ["Sélectionnez un type"] + visa_types,
+                key=skey("cat", "type"),
+            )
+        
+        # 3. Affichage des Sous-Catégories (Radio Buttons)
+        if selected_type and selected_type != "Sélectionnez un type":
+            current_options = selected_options.get(selected_type)
+
+            if isinstance(current_options, list):
+                # Cas simple : liste d'options (ex: B-1 -> COS/EOS)
+                st.subheader(f"3. Option pour {selected_type} (Rond à sélectionner)")
+                
+                # Le rond de sélection (Radio) pour les sous-catégories
+                final_selection = st.radio(
+                    "Choisissez l'option finale",
+                    current_options,
+                    key=skey("cat", "sub1"),
+                    horizontal=True
+                )
+                st.success(f"Dossier sélectionné : {main_category} > {selected_type} > {final_selection}")
+                
+            elif isinstance(current_options, dict):
+                # Cas complexe/imbriqué : Dictionnaire (ex: E-2 -> E-2 Inv.)
+                st.subheader(f"3. Sous-catégorie pour {selected_type}")
+                
+                # Niveau 3 : Selectbox pour les clés du dictionnaire imbriqué
+                nested_key = st.selectbox(
+                    f"Sous-catégorie de {selected_type}",
+                    list(current_options.keys()),
+                    key=skey("cat", "nested_key"),
+                )
+                
+                # Niveau 4 : Radio Buttons pour les options finales
+                nested_options = current_options.get(nested_key)
+                if nested_options and isinstance(nested_options, list):
+                    st.subheader(f"4. Option finale pour {nested_key} (Rond à sélectionner)")
+                    final_selection = st.radio(
+                        "Choisissez l'option finale",
+                        nested_options,
+                        key=skey("cat", "sub2"),
+                        horizontal=True
+                    )
+                    st.success(f"Dossier sélectionné : {main_category} > {selected_type} > {nested_key} > {final_selection}")
+    
+    # --- Affichage des options simples (Derivatives, etc.) ---
+    st.markdown("---")
+    st.subheader("Services Simples (Affichage sur une ligne)")
+    
+    simple_cols = st.columns(6)
+    
+    for i, (key, sub_options) in enumerate(SIMPLE_SERVICE_OPTIONS.items()):
+        # Utiliser st.expander pour les options avec des sous-choix comme Naturalization
+        if sub_options:
+             with simple_cols[i % 6]:
+                 if key == "Other":
+                     st.text_input("Autre service (détail)", key=skey("simple", key))
+                 elif key == "Naturalization":
+                     st.radio(
+                         key,
+                         sub_options,
+                         key=skey("simple", key),
+                         horizontal=False,
+                         help="Sélectionnez le type de Naturalisation"
+                     )
+                 else:
+                    st.expander(key).radio(
+                        f"Option pour {key}",
+                        sub_options,
+                        key=skey("simple", key),
+                        horizontal=True
+                    )
+        else:
+             with simple_cols[i % 6]:
+                # Utiliser un simple checkbox pour les options sans sous-choix
+                st.checkbox(key, key=skey("simple", key), help="Cocher pour sélectionner")
 
 
+# --- Le reste des onglets est inchangé ---
 def settings_tab():
     """Contenu de l'onglet Configuration."""
+    # ... (Le code de configuration d'en-tête est inchangé)
     st.header("⚙️ Configuration du Chargement")
     
     st.markdown("""
-        Étant donné que votre fichier d'origine semble avoir des en-têtes sur plusieurs lignes, 
-        vous pouvez spécifier l'index de la ligne contenant les noms de colonnes réels.
-        
-        * **0** (par défaut) : première ligne (index 0).
-        * **1** : deuxième ligne (index 1), etc.
-        
-        **Attention** : Changer ces valeurs nécessitera un rechargement des fichiers pour appliquer le nouvel en-tête.
+        Veuillez spécifier l'index de la ligne contenant les noms de colonnes réels.
+        * **0** (par défaut) : première ligne.
+        * **1** : deuxième ligne, etc.
     """)
     
     # Paramètre d'en-tête pour Clients
@@ -295,11 +402,10 @@ def settings_tab():
         value=current_header_clients,
         step=1,
         key=skey("input", "header_clients"),
-        help="L'index de la ligne qui contient les noms de colonnes réels (commence à 0)."
     )
     if new_header_clients != current_header_clients:
          st.session_state[skey("header_clients_row")] = new_header_clients
-         st.rerun() # Rechargement pour appliquer le changement
+         st.rerun() 
 
     # Paramètre d'en-tête pour Visa
     st.subheader("Fichier Visa")
@@ -310,11 +416,10 @@ def settings_tab():
         value=current_header_visa,
         step=1,
         key=skey("input", "header_visa"),
-        help="L'index de la ligne qui contient les noms de colonnes réels (commence à 0)."
     )
     if new_header_visa != current_header_visa:
          st.session_state[skey("header_visa_row")] = new_header_visa
-         st.rerun() # Rechargement pour appliquer le changement
+         st.rerun() 
 
 
 def export_tab(df_clients: pd.DataFrame, df_visa: pd.DataFrame):
@@ -330,14 +435,12 @@ def export_tab(df_clients: pd.DataFrame, df_visa: pd.DataFrame):
         else:
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                # Exporter le DataFrame nettoyé
                 df_clients.to_excel(w, index=False, sheet_name="Clients_Nettoyes")
             st.download_button(
                 "⬇️ Exporter Clients_Nettoyes.xlsx",
                 data=buf.getvalue(),
                 file_name="Clients_export_nettoye.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=skey("exp", "clients"),
             )
 
     # Export Visa
@@ -353,7 +456,6 @@ def export_tab(df_clients: pd.DataFrame, df_visa: pd.DataFrame):
                 data=bufv.getvalue(),
                 file_name="Visa_export_nettoye.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=skey("exp", "visa"),
             )
 
 
@@ -381,9 +483,10 @@ def main():
     df_visa = st.session_state.get(skey("df_visa"), pd.DataFrame())
 
     # 3. Affichage des onglets
-    tab_home, tab_config, tab_clients_view, tab_visa_view, tab_export = st.tabs([
+    tab_home, tab_config, tab_visa_entry, tab_clients_view, tab_visa_view, tab_export = st.tabs([
         "🏠 Accueil & Stats", 
         "⚙️ Configuration",
+        "📝 Saisie Dossier", # Nouvel onglet pour tester la classification
         "📄 Clients - Aperçu", 
         "📄 Visa - Aperçu", 
         "💾 Export",
@@ -394,13 +497,15 @@ def main():
 
     with tab_config:
         settings_tab()
+        
+    with tab_visa_entry:
+        visa_classification_logic()
 
     with tab_clients_view:
         st.header("📄 Clients — Aperçu des Données Nettoyées")
         if df_clients.empty:
             st.info("Aucun fichier Clients chargé ou données non valides.")
         else:
-            # Affichage de l'aperçu du DataFrame nettoyé
             st.dataframe(df_clients, use_container_width=True)
 
     with tab_visa_view:
@@ -408,7 +513,6 @@ def main():
         if df_visa.empty:
             st.info("Aucun fichier Visa chargé ou données non valides.")
         else:
-            # Affichage de l'aperçu du DataFrame nettoyé
             st.dataframe(df_visa, use_container_width=True)
 
     with tab_export:
