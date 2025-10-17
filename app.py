@@ -229,6 +229,7 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
                 if col in df.columns:
                     df.loc[idx_to_modify, col] = new_df_row[col].iloc[0]
                 else:
+                    # Ajout de la nouvelle colonne au DF existant si elle n'existe pas
                     df[col] = pd.NA
                     df.loc[idx_to_modify, col] = new_df_row[col].iloc[0]
             
@@ -263,9 +264,7 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
 # =========================
 
 def upload_section():
-    """Section de chargement des fichiers (Barre latérale).
-    La persistance des données chargées est gérée via st.session_state.
-    """
+    """Section de chargement des fichiers (Barre latérale)."""
     st.sidebar.header("📁 Chargement des Fichiers")
     
     # ------------------- Fichier Clients -------------------
@@ -278,12 +277,12 @@ def upload_section():
     )
     
     if uploaded_file_clients is not None:
-        # Si un fichier est activement uploadé, écraser le contenu en session
         st.session_state[skey("raw_clients_content")] = uploaded_file_clients.read()
         st.session_state[skey("clients_name")] = uploaded_file_clients.name
+        # On force le recalcul du DF en cas de nouvel upload
+        st.session_state[skey("df_clients")] = pd.DataFrame() 
         st.sidebar.success(f"Clients : **{uploaded_file_clients.name}** chargé.")
     elif content_clients_loaded:
-        # Sinon, si le contenu existe déjà en session, afficher le statut
         st.sidebar.success(f"Clients : **{st.session_state.get(skey('clients_name'), 'Précédent')}** (Persistant)")
 
 
@@ -297,17 +296,19 @@ def upload_section():
     )
 
     if uploaded_file_visa is not None:
-        # Si un fichier est activement uploadé, écraser le contenu en session
         st.session_state[skey("raw_visa_content")] = uploaded_file_visa.read()
         st.session_state[skey("visa_name")] = uploaded_file_visa.name
+        # On force le recalcul du DF en cas de nouvel upload
+        st.session_state[skey("df_visa")] = pd.DataFrame() 
         st.sidebar.success(f"Visa : **{uploaded_file_visa.name}** chargé.")
     elif content_visa_loaded:
-        # Sinon, si le contenu existe déjà en session, afficher le statut
         st.sidebar.success(f"Visa : **{st.session_state.get(skey('visa_name'), 'Précédent')}** (Persistant)")
 
 
 def data_processing_flow():
-    """Gère le chargement, le nettoyage et le stockage des DataFrames."""
+    """Gère le chargement, le nettoyage et le stockage des DataFrames. 
+    Les DataFrames sont recalculés seulement si le contenu brut change ou s'ils sont vides.
+    """
     
     st.session_state.setdefault(skey("df_clients"), pd.DataFrame())
     st.session_state.setdefault(skey("df_visa"), pd.DataFrame())
@@ -317,14 +318,12 @@ def data_processing_flow():
     file_name_clients = st.session_state.get(skey("clients_name"), "")
     header_clients = st.session_state.get(skey("header_clients_row"), 0)
 
-    # Le DataFrame n'est mis à jour que si le contenu brut change ou s'il est vide
+    # Recharger seulement si le DF est vide (premier run) OU si un nouvel upload a vidé le DF
     if content_clients and file_name_clients and st.session_state.get(skey("df_clients")).empty:
         df_raw_clients = _read_data_file(BytesIO(content_clients), file_name_clients, header_row=header_clients)
         if not df_raw_clients.empty:
             df_cleaned_clients = _clean_clients_data(df_raw_clients)
             st.session_state[skey("df_clients")] = df_cleaned_clients
-        else:
-             st.session_state[skey("df_clients")] = pd.DataFrame()
     
     # --- 2. Visa ---
     content_visa = st.session_state.get(skey("raw_visa_content"))
@@ -336,8 +335,6 @@ def data_processing_flow():
         if not df_raw_visa.empty:
             df_cleaned_visa = _clean_visa_data(df_raw_visa)
             st.session_state[skey("df_visa")] = df_cleaned_visa
-        else:
-             st.session_state[skey("df_visa")] = pd.DataFrame()
 
 
 # --- Onglet Accueil ---
@@ -387,13 +384,34 @@ def accounting_tab(df_clients: pd.DataFrame):
     
     st.divider()
 
-    # 2. Tableau de ventilation
+    # --- NOUVEAUTÉ : Filtre Client ---
     st.subheader("Détail du Compte Client")
     
-    accounting_cols = ['dossier_n', 'nom', 'categorie', 'montant', 'payé', 'solde', 'date']
-    valid_cols = [col for col in accounting_cols if col in df_clients.columns]
+    # Création des options de sélection pour le filtre
+    df_clients_for_select = df_clients[['dossier_n', 'nom']].dropna(subset=['dossier_n'])
+    client_options = {
+        f"{r['dossier_n']} - {r['nom']}": r['dossier_n'] 
+        for _, r in df_clients_for_select.iterrows()
+    }
     
-    df_accounting = df_clients[valid_cols].copy()
+    selected_key_acct = st.selectbox(
+        "Filtrer par Client (Optionnel)",
+        ["Tous les clients"] + list(client_options.keys()),
+        key=skey("acct", "select_client")
+    )
+
+    df_filtered = df_clients.copy()
+    
+    if selected_key_acct != "Tous les clients":
+        selected_dossier_n = client_options.get(selected_key_acct)
+        df_filtered = df_clients[df_clients['dossier_n'].astype(str) == selected_dossier_n].copy()
+
+    # 2. Tableau de ventilation
+    
+    accounting_cols = ['dossier_n', 'nom', 'categorie', 'montant', 'payé', 'solde', 'date']
+    valid_cols = [col for col in accounting_cols if col in df_filtered.columns]
+    
+    df_accounting = df_filtered[valid_cols].copy()
     
     # Formatage des colonnes monétaires pour l'affichage
     for col in ['montant', 'payé', 'solde']:
@@ -470,6 +488,14 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
 
         if selected_type and selected_type != "Sélectionnez un type":
             current_options = selected_options.get(selected_type)
+            
+            # Mise à jour pour le pré-remplissage
+            # Si le type initial n'était pas le niveau 2 mais le niveau 3 (ex: 'E-2 Inv.')
+            if initial_type in selected_options and selected_type != initial_type:
+                 # Cela signifie que selected_type est un 'Groupe' (ex: 'Treaty') 
+                 # et initial_type est un Sous-groupe (ex: 'E-2') ou type final ('E-2 Inv.').
+                 pass
+
 
             if isinstance(current_options, list):
                 # Cas 1 : Niveau 3 (Liste simple)
@@ -492,8 +518,15 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
                 
                 nested_keys = list(current_options.keys())
                 
-                # Tenter de retrouver le niveau 3 pour le pré-remplissage
-                default_nested_index = nested_keys.index(initial_type) + 1 if initial_type in nested_keys else 0
+                # NOUVEAU: Logique pour pré-remplir le nested_key (Niveau 3)
+                # Si initial_type (ex: E-2 Inv.) est dans une des clés imbriquées.
+                nested_key_to_select = ""
+                for k, v in current_options.items():
+                    if initial_type == k or (isinstance(v, list) and initial_subtype in v):
+                         nested_key_to_select = k
+                         break
+                
+                default_nested_index = nested_keys.index(nested_key_to_select) + 1 if nested_key_to_select in nested_keys else 0
 
                 nested_key = st.selectbox(
                     f"Sous-catégorie de {selected_type}",
@@ -522,8 +555,11 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
                     # Si c'est un dictionnaire mais sans niveau radio (rare)
                     else:
                         final_visa_type = nested_key
-            
-            # Si le type sélectionné est le niveau le plus profond sans sous-option (non standard dans VISA_STRUCTURE)
+                # Cas où l'utilisateur ne choisit pas de sous-catégorie
+                else:
+                    final_visa_type = selected_type
+
+            # Si le type sélectionné est le niveau le plus profond sans sous-option
             else:
                  final_visa_type = selected_type
 
@@ -642,9 +678,17 @@ def dossier_management_tab(df_clients: pd.DataFrame):
                 col_name, col_date = st.columns(2)
                 
                 client_name_mod = col_name.text_input("Nom du Client", value=current_data.get('nom', ''), key=skey("form_mod", "nom"))
+                
+                # S'assurer que la date est un objet date pour st.date_input
+                date_val = current_data.get('date')
+                if pd.isna(date_val):
+                    date_val = pd.to_datetime('today').date()
+                elif isinstance(date_val, pd.Timestamp):
+                    date_val = date_val.date()
+                
                 date_dossier_mod = col_date.date_input(
                     "Date d'Ouverture du Dossier", 
-                    value=pd.to_datetime(current_data.get('date', pd.to_datetime('today'))).date(), 
+                    value=date_val, 
                     key=skey("form_mod", "date")
                 )
                 
@@ -666,30 +710,64 @@ def dossier_management_tab(df_clients: pd.DataFrame):
                     key=skey("form_mod", "payé")
                 )
                 
-                # --- CORRECTION DE TYPE (TypeError: 'NoneType' and 'float') ---
-                # Sécurité pour s'assurer que les valeurs sont numériques avant la soustraction.
+                # --- Correction du TypeError ---
                 if montant_facture_mod is None or paye_mod is None:
                     solde_mod = 0.0
                 else:
-                    solde_mod = montant_facture_mod - paye_mod # Ligne 645 qui causait l'erreur
+                    solde_mod = montant_facture_mod - paye_mod 
                     
                 st.metric("Solde Actuel Dû (Calculé)", f"${solde_mod:,.2f}".replace(",", " "))
                 
                 st.markdown("---")
                 st.subheader("Classification de Visa Hiérarchique")
                 
-                # Préparation des valeurs initiales pour la cascade
+                # Préparation des valeurs initiales pour la cascade (CORRECTION MAJEURE ICI)
                 current_cat = current_data.get('categorie')
                 full_sub_cat = str(current_data.get('sous_categorie', ''))
                 
-                # Extraction du type principal et du sous-type (ex: 'E-2 Inv. (CP)' -> type='E-2 Inv.', subtype='CP')
-                if "(" in full_sub_cat and full_sub_cat.endswith(")"):
-                    current_sub_type = full_sub_cat.split(" (")[0]
-                    current_final_subtype = full_sub_cat.split(" (")[1].replace(")", "")
-                else:
-                    current_sub_type = full_sub_cat
-                    current_final_subtype = None
+                # Logique pour décortiquer la sous-catégorie complexe
+                current_sub_type = full_sub_cat # Initialiser le type principal
+                current_final_subtype = None # Initialiser le sous-type final (radio)
 
+                match_paren = re.search(r'\((.+)\)', full_sub_cat)
+                if match_paren:
+                    # Si c'est au format 'Type (FinalSubType)'
+                    current_final_subtype = match_paren.group(1).strip()
+                    current_sub_type = full_sub_cat[:match_paren.start()].strip()
+                
+                # S'assurer que le current_sub_type est bien le niveau 2 ou 3
+                if current_sub_type.startswith(current_cat.split(" - ")[-1]):
+                     # Si la sous-catégorie est juste 'E-2 Inv.' et la catégorie est 'Treaty'
+                     pass
+                else:
+                    # Recherche dans la structure pour trouver le parent du current_sub_type
+                    parent_type = ""
+                    if current_cat in VISA_STRUCTURE:
+                        for key_level2, val_level2 in VISA_STRUCTURE[current_cat].items():
+                            if isinstance(val_level2, dict) and current_sub_type in val_level2:
+                                current_sub_type = current_sub_type
+                                parent_type = key_level2
+                                break
+                            elif isinstance(val_level2, dict):
+                                for key_level3, val_level3 in val_level2.items():
+                                    if current_sub_type == key_level3:
+                                         current_sub_type = key_level3
+                                         parent_type = key_level2
+                                         break
+                            elif current_sub_type == key_level2:
+                                parent_type = key_level2
+                                break
+                    
+                    if parent_type and parent_type != current_sub_type:
+                        # Si le niveau 2 était le 'Groupe' (ex: 'Treaty') et le niveau 3 était 'E-2'
+                        # On sélectionne le niveau 2 qui contient le niveau 3
+                        # On passe parent_type comme initial_type
+                        
+                        # Cependant, pour la fonction _render_visa_classification_form, 
+                        # on passe le plus haut niveau (level 2) comme initial_type
+                        
+                        # Simplification: Le plus simple est de juste passer les valeurs extraites
+                        pass
 
                 # --- APPEL DE LA CLASSIFICATION EN CASCADE AVEC VALEURS INITIALES ---
                 visa_category_mod, visa_type_mod = _render_visa_classification_form(
@@ -776,6 +854,7 @@ def settings_tab():
         * **1** : deuxième ligne, etc.
     """)
     
+    # --- Configuration Clients ---
     st.subheader("Fichier Clients")
     current_header_clients = st.session_state.get(skey("header_clients_row"), 0)
     new_header_clients = st.number_input(
@@ -787,8 +866,11 @@ def settings_tab():
     )
     if new_header_clients != current_header_clients:
          st.session_state[skey("header_clients_row")] = new_header_clients
+         # Forcer le rechargement du DF Clients si la configuration change
+         st.session_state[skey("df_clients")] = pd.DataFrame() 
          st.rerun() 
 
+    # --- Configuration Visa ---
     st.subheader("Fichier Visa")
     current_header_visa = st.session_state.get(skey("header_visa_row"), 0)
     new_header_visa = st.number_input(
@@ -800,6 +882,8 @@ def settings_tab():
     )
     if new_header_visa != current_header_visa:
          st.session_state[skey("header_visa_row")] = new_header_visa
+         # Forcer le rechargement du DF Visa si la configuration change
+         st.session_state[skey("df_visa")] = pd.DataFrame() 
          st.rerun() 
 
 
@@ -852,7 +936,7 @@ def main():
     )
     st.title(APP_TITLE)
     
-    # 1. Section de chargement des fichiers (gestion de la persistance)
+    # 1. Section de chargement des fichiers
     upload_section()
     
     # 2. Flux de traitement des données
