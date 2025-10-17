@@ -263,8 +263,13 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
 # =========================
 
 def upload_section():
-    """Section de chargement des fichiers (Barre latérale)."""
+    """Section de chargement des fichiers (Barre latérale).
+    La persistance des données chargées est gérée via st.session_state.
+    """
     st.sidebar.header("📁 Chargement des Fichiers")
+    
+    # ------------------- Fichier Clients -------------------
+    content_clients_loaded = st.session_state.get(skey("raw_clients_content"))
     
     uploaded_file_clients = st.sidebar.file_uploader(
         "Clients/Dossiers (.csv, .xlsx)",
@@ -272,19 +277,34 @@ def upload_section():
         key=skey("upload", "clients"),
     )
     
+    if uploaded_file_clients is not None:
+        # Si un fichier est activement uploadé, écraser le contenu en session
+        st.session_state[skey("raw_clients_content")] = uploaded_file_clients.read()
+        st.session_state[skey("clients_name")] = uploaded_file_clients.name
+        st.sidebar.success(f"Clients : **{uploaded_file_clients.name}** chargé.")
+    elif content_clients_loaded:
+        # Sinon, si le contenu existe déjà en session, afficher le statut
+        st.sidebar.success(f"Clients : **{st.session_state.get(skey('clients_name'), 'Précédent')}** (Persistant)")
+
+
+    # ------------------- Fichier Visa -------------------
+    content_visa_loaded = st.session_state.get(skey("raw_visa_content"))
+    
     uploaded_file_visa = st.sidebar.file_uploader(
         "Table de Référence Visa (.csv, .xlsx)",
         type=['csv', 'xlsx'],
         key=skey("upload", "visa"),
     )
 
-    if uploaded_file_clients:
-        st.session_state[skey("raw_clients_content")] = uploaded_file_clients.read()
-        st.session_state[skey("clients_name")] = uploaded_file_clients.name
-        
-    if uploaded_file_visa:
+    if uploaded_file_visa is not None:
+        # Si un fichier est activement uploadé, écraser le contenu en session
         st.session_state[skey("raw_visa_content")] = uploaded_file_visa.read()
         st.session_state[skey("visa_name")] = uploaded_file_visa.name
+        st.sidebar.success(f"Visa : **{uploaded_file_visa.name}** chargé.")
+    elif content_visa_loaded:
+        # Sinon, si le contenu existe déjà en session, afficher le statut
+        st.sidebar.success(f"Visa : **{st.session_state.get(skey('visa_name'), 'Précédent')}** (Persistant)")
+
 
 def data_processing_flow():
     """Gère le chargement, le nettoyage et le stockage des DataFrames."""
@@ -297,7 +317,8 @@ def data_processing_flow():
     file_name_clients = st.session_state.get(skey("clients_name"), "")
     header_clients = st.session_state.get(skey("header_clients_row"), 0)
 
-    if content_clients and file_name_clients:
+    # Le DataFrame n'est mis à jour que si le contenu brut change ou s'il est vide
+    if content_clients and file_name_clients and st.session_state.get(skey("df_clients")).empty:
         df_raw_clients = _read_data_file(BytesIO(content_clients), file_name_clients, header_row=header_clients)
         if not df_raw_clients.empty:
             df_cleaned_clients = _clean_clients_data(df_raw_clients)
@@ -310,13 +331,14 @@ def data_processing_flow():
     file_name_visa = st.session_state.get(skey("visa_name"), "")
     header_visa = st.session_state.get(skey("header_visa_row"), 0)
 
-    if content_visa and file_name_visa:
+    if content_visa and file_name_visa and st.session_state.get(skey("df_visa")).empty:
         df_raw_visa = _read_data_file(BytesIO(content_visa), file_name_visa, header_row=header_visa)
         if not df_raw_visa.empty:
             df_cleaned_visa = _clean_visa_data(df_raw_visa)
             st.session_state[skey("df_visa")] = df_cleaned_visa
         else:
              st.session_state[skey("df_visa")] = pd.DataFrame()
+
 
 # --- Onglet Accueil ---
 def home_tab(df_clients: pd.DataFrame):
@@ -542,12 +564,15 @@ def dossier_management_tab(df_clients: pd.DataFrame):
             st.markdown("---")
             
             col_montant, col_paye = st.columns(2)
-            # st.number_input retourne déjà un float, pas besoin de float()
             montant_facture = col_montant.number_input("Total Facturé (Montant)", min_value=0.0, step=100.0, key=skey("form_add", "montant"))
             paye_initial = col_paye.number_input("Paiement Initial Reçu (Payé)", min_value=0.0, step=100.0, key=skey("form_add", "payé"))
             
-            # --- CORRECTION: On enlève les float() explicites ici ---
-            solde_calcule = montant_facture - paye_initial
+            # Correction de sécurité contre les valeurs None lors de l'initialisation Streamlit
+            if montant_facture is None or paye_initial is None:
+                solde_calcule = 0.0
+            else:
+                solde_calcule = montant_facture - paye_initial
+            
             st.metric("Solde Initial Dû (Calculé)", f"${solde_calcule:,.2f}".replace(",", " "))
             
             st.markdown("---")
@@ -641,8 +666,13 @@ def dossier_management_tab(df_clients: pd.DataFrame):
                     key=skey("form_mod", "payé")
                 )
                 
-                # --- CORRECTION: On enlève les float() explicites ici ---
-                solde_mod = montant_facture_mod - paye_mod
+                # --- CORRECTION DE TYPE (TypeError: 'NoneType' and 'float') ---
+                # Sécurité pour s'assurer que les valeurs sont numériques avant la soustraction.
+                if montant_facture_mod is None or paye_mod is None:
+                    solde_mod = 0.0
+                else:
+                    solde_mod = montant_facture_mod - paye_mod # Ligne 645 qui causait l'erreur
+                    
                 st.metric("Solde Actuel Dû (Calculé)", f"${solde_mod:,.2f}".replace(",", " "))
                 
                 st.markdown("---")
@@ -822,7 +852,7 @@ def main():
     )
     st.title(APP_TITLE)
     
-    # 1. Section de chargement des fichiers
+    # 1. Section de chargement des fichiers (gestion de la persistance)
     upload_section()
     
     # 2. Flux de traitement des données
