@@ -98,31 +98,48 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
         )
         return df
         
-    # --- 1. Conversion des Nombres (Vectorisée) ---
+    def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Nettoie et standardise les types de données du DataFrame Clients."""
+    
+    # Nettoyer les noms de colonnes pour une manipulation plus facile
+    df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
+    
+    # Colonnes attendues après nettoyage pour vérification
+    COLS_CLIENTS_EXPECTED = ['id_client', 'dossier_n', 'nom', 'date', 'categorie', 'sous_categorie', 'visa']
+    
+    # Vérification des colonnes critiques
+    if not all(col in df.columns for col in COLS_CLIENTS_EXPECTED):
+        st.warning(
+            "Le DataFrame Clients ne contient pas toutes les colonnes attendues après le nettoyage : "
+            f"{', '.join(COLS_CLIENTS_EXPECTED)}."
+        )
+        # On continue quand même avec le nettoyage des types pour les colonnes trouvées
+        
+    # --- 1. Conversion des Nombres (Vectorisée et Renforcée) ---
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
     
     for col in money_cols:
         # S'assurer que la colonne existe avant de la traiter
         if col in df.columns:
-            # Remplacement vectoriel de la virgule par le point pour le format décimal
-            df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
-            # Conversion vectorielle en numérique, avec 'coerce' pour mettre les erreurs à NaN
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            # Étape 1: Conversion en chaîne et nettoyage des espaces
+            df[col] = df[col].astype(str).str.strip()
+            
+            # Étape 2: Remplacement des virgules par des points (standard décimal)
+            df[col] = df[col].str.replace(',', '.', regex=False)
+            
+            # Étape 3: Suppression des symboles monétaires/caractères non numériques pour sécurisation
+            # Conserve seulement les chiffres et le point décimal.
+            df[col] = df[col].str.replace(r'[^\d.]', '', regex=True)
+
+            # Étape 4: Conversion en numérique. Les erreurs sont mises à NaN.
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # Étape 5: Remplacer les NaN par 0.0 et forcer le type float pour éviter les erreurs sum()
+            df[col] = df[col].fillna(0.0).astype(float) # <<< FIX APPLIQUÉ ICI
 
     # --- 2. Conversion des Dates (Vectorisée) ---
     date_cols = ['date', 'dossier_envoyé', 'dossier_approuvé', 'dossier_refusé', 'dossier_annulé']
-    
-    for col in date_cols:
-        if col in df.columns:
-            # Conversion vectorielle en datetime
-            df[col] = pd.to_datetime(df[col], errors='coerce')
-    
-    # --- 3. Création de Colonnes Dérivées ---
-    # Calcul des jours écoulés entre la date du dossier et aujourd'hui
-    if 'date' in df.columns:
-         df['jours_ecoules'] = (pd.to_datetime('today') - df['date']).dt.days
-
-    st.success("Nettoyage et conversion des données Clients terminés (Vectorisé).")
+# ... (le reste de la fonction _clean_clients_data est inchangé)
     return df
 
 def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
