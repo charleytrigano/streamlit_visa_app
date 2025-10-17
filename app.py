@@ -15,7 +15,8 @@ APP_TITLE = "🛂 Visa Manager - Gestion Complète"
 SID = "vmgr_v6"
 
 # Le dictionnaire codé en dur est vide, il sera rempli par la fonction _build_visa_structure
-VISA_STRUCTURE = {} 
+# Ligne 18 :
+VISA_STRUCTURE = {}
 
 
 # =========================
