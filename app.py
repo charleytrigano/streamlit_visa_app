@@ -26,20 +26,36 @@ def skey(*args) -> str:
 
 @st.cache_data(show_spinner="Lecture du fichier...")
 def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) -> pd.DataFrame:
-    """Lit les données d'un fichier téléchargé (CSV ou Excel)."""
+    """
+    Lit les données d'un fichier téléchargé (CSV ou Excel).
     
-    if file_name.endswith(('.xls', '.xlsx')):
+    CORRECTION MAJEURE: Détection du format plus tolérante, y compris 
+    les fichiers .xlsx renommés en .csv.
+    """
+    
+    # 1. Détection du format (plus tolérante)
+    # On vérifie l'extension standard OU la présence de 'xlsx'/'xls' dans le nom du fichier
+    is_excel = file_name.endswith(('.xls', '.xlsx')) or 'xlsx' in file_name.lower() or 'xls' in file_name.lower()
+    
+    # Assurez-vous que le pointeur est au début du fichier
+    file_content.seek(0) 
+
+    if is_excel:
         try:
-            # Assurez-vous de lire la première feuille s'il n'y a pas d'index explicite
+            # Tenter la lecture Excel pour les formats xls/xlsx
             df = pd.read_excel(file_content, header=header_row, engine='openpyxl', dtype=str)
         except Exception as e:
             st.error(f"Erreur de lecture Excel : {e}")
             return pd.DataFrame()
-    else: # Supposer CSV
+    else: 
+        # Tenter la lecture CSV
         try:
+            # Tente de détecter automatiquement le séparateur (sep=None)
             df = pd.read_csv(file_content, header=header_row, sep=None, engine='python', encoding='utf-8', on_bad_lines='skip', dtype=str)
         except UnicodeDecodeError:
             try:
+                # Tente l'encodage Latin1
+                file_content.seek(0) # Reset du pointeur après échec UTF-8
                 df = pd.read_csv(file_content, header=header_row, sep=None, engine='python', encoding='latin1', on_bad_lines='skip', dtype=str)
             except Exception as e:
                 st.error(f"Erreur de lecture CSV (Latin1) : {e}")
@@ -48,6 +64,7 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
             st.error(f"Erreur de lecture CSV : {e}")
             return pd.DataFrame()
     
+    # Nettoyage standard
     df = df.dropna(axis=1, how='all')
     df.columns = df.columns.str.strip().fillna('')
     df = df.dropna(axis=0, how='all')
@@ -115,12 +132,13 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     
     # Renommer les 4 premières colonnes pour la hiérarchie (si elles existent)
     df_temp = df_visa.copy()
-    col_map = {
-        cols[0]: 'N1_Categorie', 
-        cols[1]: 'N2_Type', 
-        cols[2]: 'N3_SousCategorie', 
-        cols[3]: 'N4_Option'
-    }
+    col_map = {}
+    if len(cols) > 0: col_map[cols[0]] = 'N1_Categorie'
+    if len(cols) > 1: col_map[cols[1]] = 'N2_Type'
+    if len(cols) > 2: col_map[cols[2]] = 'N3_SousCategorie'
+    if len(cols] > 3: col_map[cols[3]] = 'N4_Option'
+
+    # S'assurer que les colonnes sont présentes et renommées
     df_temp.rename(columns=col_map, inplace=True)
     
     if len(cols) < 4:
@@ -131,37 +149,37 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     indicator_col = next((col for col in df_temp.columns[4:] if df_temp[col].astype(str).str.contains('1', na=False).any()), None)
     
     if not indicator_col:
-        st.error("Impossible de trouver la colonne indicatrice de type ('1'). Veuillez vérifier votre fichier Visa.")
-        return {}
-
-    # Filtrer uniquement les lignes valides (où l'indicateur est '1')
-    df_valid = df_temp[df_temp[indicator_col].astype(str).str.strip() == '1'].copy()
+        # Fallback: S'il n'y a pas d'indicateur '1', on suppose que toutes les lignes sont valides
+        st.warning("Impossible de trouver la colonne indicatrice de type ('1'). Utilisant toutes les lignes.")
+        df_valid = df_temp.copy()
+    else:
+        # Filtrer uniquement les lignes valides (où l'indicateur est '1')
+        df_valid = df_temp[df_temp[indicator_col].astype(str).str.strip() == '1'].copy()
     
     # Convertir en dictionnaire hiérarchique
     structure = {}
     
     for _, row in df_valid.iterrows():
-        n1_cat = row['N1_Categorie'].strip()
-        n2_type = row['N2_Type'].strip()
-        n3_subcat = row['N3_SousCategorie'].strip()
-        n4_option = row['N4_Option'].strip()
+        # Utiliser .get pour les colonnes renommées, en cas de structure incomplète
+        n1_cat = row.get('N1_Categorie', '').strip()
+        n2_type = row.get('N2_Type', '').strip()
+        n3_subcat = row.get('N3_SousCategorie', '').strip()
+        n4_option = row.get('N4_Option', '').strip()
         
         if not n1_cat or not n2_type: continue
 
         if n1_cat not in structure:
             structure[n1_cat] = {}
             
-        if not n3_subcat: # Cas 2- ou 3-Niveaux (N2 est le type final ou presque)
+        if not n3_subcat: # Cas N3 manquant (Structure 3-Niveaux ou moins)
              if n2_type not in structure[n1_cat]:
+                 # Si N4 est la seule sous-option, on crée une liste
                  structure[n1_cat][n2_type] = []
                  
-             if n4_option: # Si N4 est présent, on l'ajoute comme option N3
-                  if n4_option not in structure[n1_cat][n2_type]:
-                       structure[n1_cat][n2_type].append(n4_option)
-             else: # Si N4 est vide, on garde une liste vide (N2 est la fin de la chaîne)
-                 pass
+             if n4_option and n4_option not in structure[n1_cat][n2_type]: 
+                  structure[n1_cat][n2_type].append(n4_option)
 
-        else: # Cas 4-Niveaux (Utilisation de N3 comme clé intermédiaire)
+        else: # Cas N3 présent (Structure 4-Niveaux ou plus)
             if n2_type not in structure[n1_cat]:
                 structure[n1_cat][n2_type] = {}
             
@@ -170,9 +188,6 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
                 
             if n4_option and n4_option not in structure[n1_cat][n2_type][n3_subcat]:
                 structure[n1_cat][n2_type][n3_subcat].append(n4_option)
-
-    # Nettoyage final : s'assurer que si une liste à N2/N3 est vide, on ne la garde pas comme une clé intermédiaire.
-    # (Le code ci-dessus est déjà optimisé pour la structure d'entrée)
 
     st.success("Structure de classification Visa construite dynamiquement.")
     return structure
@@ -203,7 +218,7 @@ def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict)
     
     # Chercher le Niveau 2 parent
     for key_level2, val_level2 in level2_options.items():
-        # Cas 1: N3_Key (avant la parenthèse) correspond directement au N2 Key
+        # Cas 1: N3_Key (avant la parenthèse) correspond directement au N2 Key (fusion N2/N3)
         if key_level2 == level3_key: 
             level2_type = key_level2
             return level2_type, None, level4_option # N3 est null car N2 et N3 sont fusionnés
@@ -241,7 +256,6 @@ def _render_visa_classification_form(
     la structure dynamique.
     """
     
-    # Correction CRUCIALE : st.columns DOIT être à l'intérieur de cette fonction
     col_cat, col_type = st.columns(2) 
     
     main_keys = list(visa_structure.keys())
@@ -528,7 +542,7 @@ def data_processing_flow():
                 st.session_state[skey("df_clients")] = df_cleaned
                 st.success("Données Clients traitées avec succès.")
             else:
-                 st.error("Échec du traitement des données Clients. Vérifiez le format.")
+                 st.error("Échec du traitement des données Clients. Vérifiez le format/l'en-tête.")
         except Exception as e:
             st.error(f"Erreur fatale lors du traitement des données Clients: {e}")
             st.session_state[skey("raw_clients_content")] = None 
@@ -548,7 +562,7 @@ def data_processing_flow():
                 st.session_state[skey("df_visa")] = df_cleaned_visa
                 st.success("Données Visa traitées avec succès.")
             else:
-                st.error("Échec du traitement des données Visa. Vérifiez le format.")
+                st.error("Échec du traitement des données Visa. Vérifiez le format/l'en-tête.")
         except Exception as e:
             st.error(f"Erreur fatale lors du traitement des données Visa: {e}")
             st.session_state[skey("raw_visa_content")] = None
@@ -657,7 +671,7 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
     st.header("📝 Gestion des Dossiers Clients (CRUD)")
     
     if not visa_structure:
-        st.warning("Veuillez charger votre fichier Visa (Visa.xlsx) pour activer la classification de visa.")
+        st.warning("Veuillez charger votre fichier Visa (Table de Référence) pour activer la classification de visa.")
         return
 
     tab_add, tab_modify, tab_delete = st.tabs(["➕ Ajouter un Dossier", "✍️ Modifier un Dossier", "🗑️ Supprimer un Dossier"])
