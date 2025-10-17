@@ -12,13 +12,12 @@ import streamlit as st
 APP_TITLE = "🛂 Visa Manager - Gestion Complète"
 SID = "vmgr_v6"
 
-# Le dictionnaire codé en dur est MAINTENANT vide, il sera rempli par la fonction
+# Le dictionnaire codé en dur est vide, il sera rempli par la fonction _build_visa_structure
 VISA_STRUCTURE = {} 
 
 
 # =========================
 # Fonctions utilitaires de DataFrames
-# (Ces fonctions restent majoritairement inchangées, sauf l'ajout de la fonction de construction)
 # =========================
 
 def skey(*args) -> str:
@@ -60,7 +59,7 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
     
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
     
-    # 1. Standardiser et convertir les nombres financiers (logique omise pour la concision)
+    # 1. Standardiser et convertir les nombres financiers 
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
     for col in money_cols:
         if col in df.columns:
@@ -86,6 +85,10 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = pd.NA
 
+    # Convertir dossier_n en string pour les opérations de matching
+    if 'dossier_n' in df.columns:
+        df['dossier_n'] = df['dossier_n'].astype(str).str.strip()
+        
     st.success("Nettoyage et conversion des données Clients terminés (Robuste).")
     return df
 
@@ -96,30 +99,36 @@ def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = df[col].astype(str).str.strip()
     return df
 
-# --- NOUVELLE FONCTION CLÉ : CONSTRUIRE LA STRUCTURE DYNAMIQUE ---
+# --- FONCTION CLÉ : CONSTRUIRE LA STRUCTURE DYNAMIQUE ---
 @st.cache_data(show_spinner="Construction de la structure Visa...")
 def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     """
     Construit la structure de classification VISA à partir du DataFrame Visa.xlsx.
     Suppose que les colonnes sont dans l'ordre hiérarchique : 
-    [Catégorie (N1), Sous-Catégorie (N2), Type (N3), Option Finale (N4), ...]
+    [N1_Categorie, N2_Type, N3_SousCategorie, N4_Option, ...]
     et qu'une colonne contient '1' pour indiquer une classification valide.
     """
     if df_visa.empty:
         return {}
 
-    # Renommer les 4 premières colonnes pour la hiérarchie (si elles existent)
     cols = df_visa.columns.tolist()
+    
+    # Renommer les 4 premières colonnes pour la hiérarchie (si elles existent)
+    df_temp = df_visa.copy()
+    col_map = {
+        cols[0]: 'N1_Categorie', 
+        cols[1]: 'N2_Type', 
+        cols[2]: 'N3_SousCategorie', 
+        cols[3]: 'N4_Option'
+    }
+    df_temp.rename(columns=col_map, inplace=True)
     
     if len(cols) < 4:
          st.warning("Le fichier Visa ne contient pas assez de colonnes pour une classification à 4 niveaux.")
          return {}
          
-    df_temp = df_visa.copy()
-    df_temp.columns = ['N1_Categorie', 'N2_Type', 'N3_SousCategorie', 'N4_Option'] + cols[4:]
-    
-    # Trouver la colonne d'indicateur (la première qui contient '1' ou qui semble être un indicateur booléen/numérique)
-    indicator_col = next((col for col in df_temp.columns if df_temp[col].astype(str).str.contains('1', na=False).any()), None)
+    # Trouver la colonne d'indicateur ('1') - à partir de la 5e colonne
+    indicator_col = next((col for col in df_temp.columns[4:] if df_temp[col].astype(str).str.contains('1', na=False).any()), None)
     
     if not indicator_col:
         st.error("Impossible de trouver la colonne indicatrice de type ('1'). Veuillez vérifier votre fichier Visa.")
@@ -132,27 +141,27 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     structure = {}
     
     for _, row in df_valid.iterrows():
-        n1_cat = row['N1_Categorie']
-        n2_type = row['N2_Type']
-        n3_subcat = row['N3_SousCategorie']
-        n4_option = row['N4_Option']
+        n1_cat = row['N1_Categorie'].strip()
+        n2_type = row['N2_Type'].strip()
+        n3_subcat = row['N3_SousCategorie'].strip()
+        n4_option = row['N4_Option'].strip()
         
         if not n1_cat or not n2_type: continue
 
         if n1_cat not in structure:
             structure[n1_cat] = {}
             
-        if not n3_subcat: # Cas 2-Niveaux ou 3-Niveaux simples
+        if not n3_subcat: # Cas 2- ou 3-Niveaux (N2 est le type final ou presque)
              if n2_type not in structure[n1_cat]:
                  structure[n1_cat][n2_type] = []
-             if n4_option and n4_option not in structure[n1_cat][n2_type]:
-                  structure[n1_cat][n2_type].append(n4_option)
-             # Si N4 est vide, on garde le N2_Type comme type final simple
-             if not structure[n1_cat][n2_type]:
-                 structure[n1_cat][n2_type] = []
+                 
+             if n4_option: # Si N4 est présent, on l'ajoute comme option N3
+                  if n4_option not in structure[n1_cat][n2_type]:
+                       structure[n1_cat][n2_type].append(n4_option)
+             else: # Si N4 est vide, on garde une liste vide (N2 est la fin de la chaîne)
+                 pass
 
-
-        else: # Cas 4-Niveaux
+        else: # Cas 4-Niveaux (Utilisation de N3 comme clé intermédiaire)
             if n2_type not in structure[n1_cat]:
                 structure[n1_cat][n2_type] = {}
             
@@ -162,18 +171,219 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
             if n4_option and n4_option not in structure[n1_cat][n2_type][n3_subcat]:
                 structure[n1_cat][n2_type][n3_subcat].append(n4_option)
 
-    # Nettoyage final : s'assurer que si une liste à N3 est vide, on remonte le N2 comme option unique
-    for n1 in structure:
-        for n2 in list(structure[n1].keys()):
-            options = structure[n1][n2]
-            if isinstance(options, list) and not options:
-                # Si N2 n'a pas d'options N3/N4, on le simplifie
-                structure[n1][n2] = [n2] # Mettre le N2 comme option par défaut s'il n'y a pas de N4
+    # Nettoyage final : s'assurer que si une liste à N2/N3 est vide, on ne la garde pas comme une clé intermédiaire.
+    # (Le code ci-dessus est déjà optimisé pour la structure d'entrée)
 
     st.success("Structure de classification Visa construite dynamiquement.")
     return structure
 
-# ... (Fonctions de résumé et d'update client restent inchangées) ...
+# --- FONCTION DE RÉSOLUTION DES NIVEAUX HIERARCHIQUES ---
+def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Résout les niveaux de classification à partir des données stockées (categorie, sous_categorie) 
+    en utilisant la structure VISA dynamique.
+    
+    Retourne (Niveau 2 Type, Niveau 3 Key, Niveau 4 Option).
+    """
+    level2_type = None 
+    level3_key = full_sub_cat.strip()
+    level4_option = None 
+
+    if not category or category not in visa_structure:
+        return None, None, None
+
+    # 1. Extraction de l'Option Niveau 4 (entre parenthèses) et du Niveau 3 Key
+    match_paren = re.search(r'\((.+)\)', level3_key)
+    if match_paren:
+        level4_option = match_paren.group(1).strip()
+        level3_key = level3_key[:match_paren.start()].strip() # Ceci est la partie avant la parenthèse
+
+    # 2. Détermination du Niveau 2 parent (Type)
+    level2_options = visa_structure.get(category, {})
+    
+    # Chercher le Niveau 2 parent
+    for key_level2, val_level2 in level2_options.items():
+        # Cas 1: N3_Key (avant la parenthèse) correspond directement au N2 Key
+        if key_level2 == level3_key: 
+            level2_type = key_level2
+            return level2_type, None, level4_option # N3 est null car N2 et N3 sont fusionnés
+        
+        # Cas 2: N3_Key correspond à une clé dans le dictionnaire N2 (Structure 4-niveaux)
+        elif isinstance(val_level2, dict) and level3_key in val_level2: 
+            level2_type = key_level2
+            return level2_type, level3_key, level4_option
+            
+        # Cas 3: N4_Option est en réalité l'option finale dans une liste simple N2
+        elif isinstance(val_level2, list) and level4_option in val_level2:
+             level2_type = key_level2
+             return level2_type, None, level4_option
+             
+        # Cas 4: Le full_sub_cat (sans parenthèse) est un élément N4 dans une liste N3 (cas où N4 = N3)
+        elif isinstance(val_level2, list) and level3_key in val_level2:
+             level2_type = key_level2
+             return level2_type, None, level3_key # Ici, N3_key est l'option N4
+
+    # Fallback: Si rien n'a été trouvé, on retourne l'état non résolu
+    return None, None, None
+
+
+# --- FONCTION POUR LA CLASSIFICATION EN CASCADE (MISE À JOUR) ---
+def _render_visa_classification_form(
+    key_suffix: str, 
+    visa_structure: Dict, # Prend la structure en argument
+    initial_category: Optional[str] = None, 
+    initial_type: Optional[str] = None, 
+    initial_level3_key: Optional[str] = None, 
+    initial_level4_option: Optional[str] = None
+) -> Tuple[str, str]:
+    """
+    Affiche les selectbox en cascade pour la classification des visas, en utilisant 
+    la structure dynamique.
+    """
+    
+    # Correction CRUCIALE : st.columns DOIT être à l'intérieur de cette fonction
+    col_cat, col_type = st.columns(2) 
+    
+    main_keys = list(visa_structure.keys())
+    default_cat_index = main_keys.index(initial_category) + 1 if initial_category in main_keys else 0
+    
+    visa_category = initial_category if initial_category in main_keys else "Sélectionnez un groupe"
+    final_visa_type = ""
+    selected_type = ""
+    
+    # 1. Sélection de la Catégorie (Niveau 1)
+    with col_cat:
+        visa_category = st.selectbox(
+            "1. Catégorie de Visa (Grand Groupe)",
+            ["Sélectionnez un groupe"] + main_keys,
+            index=default_cat_index,
+            key=skey("form", key_suffix, "cat_main"),
+        )
+        
+    if visa_category != "Sélectionnez un groupe":
+        
+        selected_options = visa_structure.get(visa_category, {})
+        visa_types_list = list(selected_options.keys())
+        
+        default_type_index = visa_types_list.index(initial_type) + 1 if initial_type in visa_types_list else 0
+        
+        # 2. Sélection du Type de Visa (Niveau 2)
+        with col_type:
+            selected_type = st.selectbox(
+                f"2. Type de Visa ({visa_category})",
+                ["Sélectionnez un type"] + visa_types_list,
+                index=default_type_index,
+                key=skey("form", key_suffix, "cat_type"),
+            )
+
+        if selected_type and selected_type != "Sélectionnez un type":
+            current_options = selected_options.get(selected_type)
+
+            if isinstance(current_options, list):
+                # Cas 1 : Niveau 3 (Liste simple) - Structure 3 Niveaux
+                
+                options_list = [opt for opt in current_options if opt] # Filtrer les chaînes vides
+                
+                if not options_list:
+                    # Si la liste est vide, c'est que le N2 est le type final
+                    final_visa_type = selected_type
+                else:
+                    st.subheader(f"3. Option pour **{selected_type}**")
+                    
+                    default_sub_index = options_list.index(initial_level4_option) if initial_level4_option in options_list else 0
+                    
+                    final_selection = st.radio(
+                        "Choisissez l'option finale",
+                        options_list,
+                        index=default_sub_index,
+                        key=skey("form", key_suffix, "sub1"),
+                        horizontal=True
+                    )
+                    final_visa_type = f"{selected_type} ({final_selection})"
+                
+            elif isinstance(current_options, dict):
+                # Cas 2 : Niveau 3 (Dictionnaire/Sous-catégories) - Structure 4 Niveaux
+                st.subheader(f"3. Sous-catégorie pour **{selected_type}**")
+                
+                nested_keys = list(current_options.keys())
+                nested_key_to_select = initial_level3_key if initial_level3_key in nested_keys else ""
+                
+                default_nested_index = nested_keys.index(nested_key_to_select) + 1 if nested_key_to_select in nested_keys else 0
+
+                # --- Niveau 3 (Sous-catégorie) ---
+                nested_key = st.selectbox(
+                    f"Sous-catégorie de {selected_type}",
+                    ["Sélectionnez la sous-catégorie"] + nested_keys,
+                    index=default_nested_index,
+                    key=skey("form", key_suffix, "nested_key"),
+                )
+                
+                if nested_key and nested_key != "Sélectionnez la sous-catégorie":
+                    # Niveau 4 : Options finales
+                    nested_options = current_options.get(nested_key)
+                    
+                    if nested_options and isinstance(nested_options, list):
+                        options_list_nested = [opt for opt in nested_options if opt] # Filtrer les chaînes vides
+                        
+                        if options_list_nested:
+                            st.subheader(f"4. Option finale pour **{nested_key}**")
+                            
+                            default_sub_index = options_list_nested.index(initial_level4_option) if initial_level4_option in options_list_nested else 0
+                            
+                            # --- Niveau 4 (Option finale) ---
+                            final_selection = st.radio(
+                                "Choisissez l'option finale",
+                                options_list_nested,
+                                index=default_sub_index,
+                                key=skey("form", key_suffix, "sub2"),
+                                horizontal=True
+                            )
+                            final_visa_type = f"{nested_key} ({final_selection})"
+                        
+                        else:
+                            # Cas où le Niveau 3 est la valeur finale
+                            final_visa_type = nested_key
+                    else:
+                         final_visa_type = nested_key
+                else:
+                    final_visa_type = selected_type
+            
+            else:
+                 final_visa_type = selected_type
+
+    # Retourne la Catégorie (Niveau 1) et la Sous-Catégorie (Niveau final détaillé)
+    return visa_category, final_visa_type
+
+# --- Fonctions de Résumé et CRUD ---
+
+def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
+    """Calcule les métriques clés pour l'affichage."""
+    if df.empty:
+        return {
+            "total_clients": 0, "clients_actifs": 0, "clients_payés": 0,
+            "total_honoraires": 0.0, "total_payé": 0.0, "solde_du": 0.0
+        }
+    
+    # Assurer les types float pour le calcul
+    df['montant'] = pd.to_numeric(df['montant'], errors='coerce').fillna(0.0)
+    df['payé'] = pd.to_numeric(df['payé'], errors='coerce').fillna(0.0)
+    df['solde'] = pd.to_numeric(df['solde'], errors='coerce').fillna(0.0)
+    
+    total_honoraires = df['montant'].sum()
+    total_payé = df['payé'].sum()
+    solde_du = df['solde'].sum()
+    
+    clients_actifs = len(df) # Simplification: tous les clients sont actifs
+    clients_payés = (df['solde'] <= 0).sum()
+    
+    return {
+        "total_clients": len(df),
+        "clients_actifs": clients_actifs,
+        "clients_payés": clients_payés,
+        "total_honoraires": total_honoraires,
+        "total_payé": total_payé,
+        "solde_du": solde_du
+    }
 
 def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str) -> pd.DataFrame:
     """Ajoute, Modifie ou Supprime un client. Centralisation des actions CRUD."""
@@ -184,8 +394,7 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
         st.error("Le Numéro de Dossier ne peut pas être vide.")
         return df
 
-    # --- Actions DELETE, MODIFY, ADD (logique omise pour la concision) ---
-    
+    # --- Actions DELETE ---
     if action == "DELETE":
         if 'dossier_n' not in df.columns: return df
             
@@ -225,6 +434,7 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
                 if col in df.columns:
                     df.loc[idx_to_modify, col] = new_df_row[col].iloc[0]
                 else:
+                    # Ajouter la colonne manquante si elle n'existe pas dans df
                     df[col] = pd.NA
                     df.loc[idx_to_modify, col] = new_df_row[col].iloc[0]
             
@@ -241,6 +451,7 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
              st.error(f"Le Dossier N° {dossier_n} existe déjà. Utilisez l'onglet 'Modifier'.")
              return df
         
+        # S'assurer que les colonnes de la nouvelle ligne existent dans df
         for col in new_df_row.columns:
             if col not in df.columns:
                 df[col] = pd.NA
@@ -252,59 +463,13 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
         
     return df
 
-
-# --- FONCTION DE RÉSOLUTION DES NIVEAUX HIERARCHIQUES (MISE À JOUR) ---
-def _resolve_visa_levels(category: str, sub_category: str, visa_structure: Dict) -> Tuple[Optional[str], str, Optional[str]]:
-    """
-    Résout les niveaux de classification à partir des données stockées en utilisant 
-    la structure VISA dynamique.
-    Retourne (Niveau 2 Key, Niveau 3 Key, Niveau 4 Option).
-    """
-    level2_type = None 
-    level3_key = sub_category.strip()
-    level4_option = None 
-
-    if not category or category not in visa_structure:
-        return None, level3_key, None
-
-    # 1. Extraction de l'Option Niveau 4 et du Niveau 3 Key
-    match_paren = re.search(r'\((.+)\)', level3_key)
-    if match_paren:
-        level4_option = match_paren.group(1).strip()
-        level3_key = level3_key[:match_paren.start()].strip()
-
-    # 2. Détermination du Niveau 2 parent (Type)
-    level2_options = visa_structure[category]
-    
-    # Chercher le Niveau 2 parent
-    for key_level2, val_level2 in level2_options.items():
-        if key_level2 == level3_key: # Cas simple (H-1B, F-1)
-            level2_type = key_level2
-            return level2_type, level3_key, level4_option
-        
-        elif isinstance(val_level2, dict) and level3_key in val_level2: # Cas complexe 4-niveaux (Employment)
-            level2_type = key_level2
-            return level2_type, level3_key, level4_option
-            
-        elif isinstance(val_level2, list) and level3_key in val_level2: # Cas où N3/N4 est en réalité un élément de la liste N2 (simplification)
-             level2_type = key_level2
-             return level2_type, level3_key, level4_option
-             
-    # Fallback
-    if level2_type is None:
-        level2_type = level3_key
-
-    return level2_type, level3_key, level4_option
-
-
-# app.py (à partir de la ligne 298 environ)
+# --- Fonctions de l'Application ---
 
 def upload_section():
     """Section de chargement des fichiers (Barre latérale)."""
     st.sidebar.header("📁 Chargement des Fichiers")
     
     # ------------------- Fichier Clients -------------------
-    # Utilisation du .get() pour plus de sécurité, bien que setdefault dans main aide
     content_clients_loaded = st.session_state.get(skey("raw_clients_content")) 
     
     uploaded_file_clients = st.sidebar.file_uploader(
@@ -317,7 +482,6 @@ def upload_section():
         # Stockage des données binaires
         st.session_state[skey("raw_clients_content")] = uploaded_file_clients.read()
         st.session_state[skey("clients_name")] = uploaded_file_clients.name
-        # On vide le DF pour forcer le recalcul par data_processing_flow
         st.session_state[skey("df_clients")] = pd.DataFrame() 
         st.sidebar.success(f"Clients : **{uploaded_file_clients.name}** chargé.")
     elif content_clients_loaded:
@@ -337,102 +501,58 @@ def upload_section():
         # Stockage des données binaires
         st.session_state[skey("raw_visa_content")] = uploaded_file_visa.read()
         st.session_state[skey("visa_name")] = uploaded_file_visa.name
-        # On vide le DF pour forcer le recalcul par data_processing_flow
         st.session_state[skey("df_visa")] = pd.DataFrame() 
         st.sidebar.success(f"Visa : **{uploaded_file_visa.name}** chargé.")
     elif content_visa_loaded:
         st.sidebar.success(f"Visa : **{st.session_state.get(skey('visa_name'), 'Précédent')}** (Persistant)")
+
+
+def data_processing_flow():
+    """Gère le chargement, le nettoyage et le stockage des DataFrames."""
     
-    # 1. Sélection de la Catégorie (Niveau 1)
-    with col_cat:
-        visa_category = st.selectbox(
-            "1. Catégorie de Visa (Grand Groupe)",
-            ["Sélectionnez un groupe"] + main_keys,
-            index=default_cat_index,
-            key=skey("form", key_suffix, "cat_main"),
-        )
-        
-    if visa_category != "Sélectionnez un groupe":
-        
-        selected_options = visa_structure.get(visa_category, {})
-        visa_types_list = list(selected_options.keys())
-        
-        default_type_index = visa_types_list.index(initial_type) + 1 if initial_type in visa_types_list else 0
-        
-        # 2. Sélection du Type de Visa (Niveau 2)
-        with col_type:
-            selected_type = st.selectbox(
-                f"2. Type de Visa ({visa_category})",
-                ["Sélectionnez un type"] + visa_types_list,
-                index=default_type_index,
-                key=skey("form", key_suffix, "cat_type"),
-            )
+    header_clients = st.session_state.get(skey("header_clients_row"), 0)
+    header_visa = st.session_state.get(skey("header_visa_row"), 0)
+    
+    # --- Clients ---
+    raw_clients_content = st.session_state.get(skey("raw_clients_content"))
+    df_clients_current = st.session_state.get(skey("df_clients"))
 
-        if selected_type and selected_type != "Sélectionnez un type":
-            current_options = selected_options.get(selected_type)
+    if raw_clients_content is not None and df_clients_current.empty:
+        try:
+            # Lire le contenu brut
+            df_raw = _read_data_file(BytesIO(raw_clients_content), st.session_state[skey("clients_name")], header_clients)
+            # Nettoyer les données
+            df_cleaned = _clean_clients_data(df_raw)
+            # Stocker le DataFrame nettoyé (seulement si le nettoyage a réussi)
+            if not df_cleaned.empty:
+                st.session_state[skey("df_clients")] = df_cleaned
+                st.success("Données Clients traitées avec succès.")
+            else:
+                 st.error("Échec du traitement des données Clients. Vérifiez le format.")
+        except Exception as e:
+            st.error(f"Erreur fatale lors du traitement des données Clients: {e}")
+            st.session_state[skey("raw_clients_content")] = None 
 
-            if isinstance(current_options, list):
-                # Cas 1 : Niveau 3 (Liste simple) - Structure 3 Niveaux (Ex: H-1B, F-1)
-                st.subheader(f"3. Option pour **{selected_type}**")
-                
-                options_list = current_options
-                default_sub_index = options_list.index(initial_level4_option) if initial_level4_option in options_list else 0
-                
-                final_selection = st.radio(
-                    "Choisissez l'option finale",
-                    options_list,
-                    index=default_sub_index,
-                    key=skey("form", key_suffix, "sub1"),
-                    horizontal=True
-                )
-                final_visa_type = f"{selected_type} ({final_selection})"
-                
-            elif isinstance(current_options, dict):
-                # Cas 2 : Niveau 3 (Dictionnaire/Sous-catégories) - Structure 4 Niveaux (Ex: Employment)
-                st.subheader(f"3. Sous-catégorie pour **{selected_type}**")
-                
-                nested_keys = list(current_options.keys())
-                nested_key_to_select = initial_level3_key if initial_level3_key in nested_keys else ""
-                
-                default_nested_index = nested_keys.index(nested_key_to_select) + 1 if nested_key_to_select in nested_keys else 0
+    # --- Visa ---
+    raw_visa_content = st.session_state.get(skey("raw_visa_content"))
+    df_visa_current = st.session_state.get(skey("df_visa"))
 
-                # --- Niveau 3 (Sous-catégorie) ---
-                nested_key = st.selectbox(
-                    f"Sous-catégorie de {selected_type}",
-                    ["Sélectionnez la sous-catégorie"] + nested_keys,
-                    index=default_nested_index,
-                    key=skey("form", key_suffix, "nested_key"),
-                )
-                
-                if nested_key and nested_key != "Sélectionnez la sous-catégorie":
-                    # Niveau 4 : Options finales
-                    nested_options = current_options.get(nested_key)
-                    if nested_options and isinstance(nested_options, list):
-                        st.subheader(f"4. Option finale pour **{nested_key}**")
-                        
-                        options_list_nested = nested_options
-                        default_sub_index = options_list_nested.index(initial_level4_option) if initial_level4_option in options_list_nested else 0
-                        
-                        # --- Niveau 4 (Option finale) ---
-                        final_selection = st.radio(
-                            "Choisissez l'option finale",
-                            options_list_nested,
-                            index=default_sub_index,
-                            key=skey("form", key_suffix, "sub2"),
-                            horizontal=True
-                        )
-                        final_visa_type = f"{nested_key} ({final_selection})"
-                    
-                    else:
-                        # Cas où le Niveau 3 est la valeur finale
-                        final_visa_type = nested_key
-                else:
-                    final_visa_type = selected_type
+    if raw_visa_content is not None and df_visa_current.empty:
+        try:
+            # Lire le contenu brut
+            df_raw_visa = _read_data_file(BytesIO(raw_visa_content), st.session_state[skey("visa_name")], header_visa)
+            # Nettoyer les données (surtout conversion en string)
+            df_cleaned_visa = _clean_visa_data(df_raw_visa)
+            # Stocker le DataFrame nettoyé
+            if not df_cleaned_visa.empty:
+                st.session_state[skey("df_visa")] = df_cleaned_visa
+                st.success("Données Visa traitées avec succès.")
+            else:
+                st.error("Échec du traitement des données Visa. Vérifiez le format.")
+        except Exception as e:
+            st.error(f"Erreur fatale lors du traitement des données Visa: {e}")
+            st.session_state[skey("raw_visa_content")] = None
 
-    # Retourne la Catégorie (Niveau 1) et la Sous-Catégorie (Niveau final détaillé)
-    return visa_category, final_visa_type
-
-# ... (Fonctions home_tab, accounting_tab restent inchangées) ...
 
 def home_tab(df_clients: pd.DataFrame):
     """Contenu de l'onglet Accueil/Statistiques."""
@@ -510,6 +630,8 @@ def accounting_tab(df_clients: pd.DataFrame):
     # Formatage des colonnes monétaires pour l'affichage
     for col in ['montant', 'payé', 'solde']:
         if col in df_accounting.columns:
+            # S'assurer que les valeurs sont numériques avant le formatage
+            df_accounting[col] = pd.to_numeric(df_accounting[col], errors='coerce').fillna(0.0)
             df_accounting[col] = df_accounting[col].apply(lambda x: f"${x:,.2f}".replace(",", " "))
             
     df_accounting.rename(columns={
@@ -544,12 +666,12 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
     # LOGIQUE D'AJOUT (ADD)
     # =========================================================================
     with tab_add:
-        # ... (Logique de détermination du prochain ID/Numéro omise pour la concision) ...
         next_dossier_n = 13000
         if not df_clients.empty and 'dossier_n' in df_clients.columns:
             try:
+                # Extraire le numéro de dossier maximum pour trouver le suivant
                 max_n = df_clients['dossier_n'].astype(str).str.extract(r'(\d+)').astype(float).max()
-                next_dossier_n = int(max_n + 1) if not pd.isna(max_n) else 13000
+                next_dossier_n = int(max_n + 1) if not pd.isna(max_n) and max_n > 12999 else 13000
             except:
                  next_dossier_n = 13000
         
@@ -607,7 +729,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
             st.info("Aucun dossier client chargé ou créé.")
             return
 
-        # ... (Logique de sélection de client omise pour la concision) ...
         client_options = {f"{r['dossier_n']} - {r['nom']}": r['dossier_n'] for _, r in df_clients[['dossier_n', 'nom']].iterrows() if pd.notna(r['dossier_n'])}
         selected_key = st.selectbox(
             "Sélectionner le Dossier à Modifier",
@@ -697,7 +818,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
             st.info("Aucun dossier client chargé ou créé.")
             return
 
-        # ... (Logique de sélection et suppression omise pour la concision) ...
         client_options = {f"{r['dossier_n']} - {r['nom']}": r['dossier_n'] for _, r in df_clients[['dossier_n', 'nom']].iterrows() if pd.notna(r['dossier_n'])}
              
         with st.form("delete_client_form"):
@@ -724,7 +844,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
                 st.session_state[skey("df_clients")] = updated_df_clients
                 st.rerun()
 
-# ... (Fonctions settings_tab et export_tab restent inchangées) ...
 
 def settings_tab():
     """Contenu de l'onglet Configuration."""
@@ -808,10 +927,6 @@ def export_tab(df_clients: pd.DataFrame, df_visa: pd.DataFrame):
 # Application principale
 # =========================
 
-# app.py (à partir de la ligne 788 environ)
-
-# ... (autres fonctions) ...
-
 def main():
     """Fonction principale de l'application Streamlit."""
     st.set_page_config(
@@ -821,7 +936,7 @@ def main():
     )
     st.title(APP_TITLE)
     
-    # --- AJOUTER CETTE BLOC D'INITIALISATION ---
+    # --- CORRECTION CRUCIALE : Initialisation garantie de la Session d'État ---
     st.session_state.setdefault(skey("raw_clients_content"), None)
     st.session_state.setdefault(skey("clients_name"), "")
     st.session_state.setdefault(skey("df_clients"), pd.DataFrame())
@@ -832,20 +947,7 @@ def main():
     
     st.session_state.setdefault(skey("header_clients_row"), 0)
     st.session_state.setdefault(skey("header_visa_row"), 0)
-    # -------------------------------------------
-    
-    # 1. Section de chargement des fichiers
-    upload_section() # L'erreur devrait être corrigée ici
-    
-# ... (reste de la fonction main) ...
-def main():
-    """Fonction principale de l'application Streamlit."""
-    st.set_page_config(
-        page_title=APP_TITLE,
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    st.title(APP_TITLE)
+    # --------------------------------------------------------------------------
     
     # 1. Section de chargement des fichiers
     upload_section()
@@ -861,7 +963,12 @@ def main():
     # Si le fichier visa est chargé, on génère le dictionnaire dynamique
     visa_structure = VISA_STRUCTURE 
     if not df_visa.empty:
-        visa_structure = _build_visa_structure(df_visa)
+        # Tenter de générer la structure, sinon utiliser un dict vide
+        try:
+             visa_structure = _build_visa_structure(df_visa)
+        except Exception as e:
+            st.error(f"Erreur de construction de la structure Visa: {e}")
+            visa_structure = {}
     
     # 3. Affichage des onglets
     tab_home, tab_accounting, tab_management, tab_config, tab_clients_view, tab_visa_view, tab_export = st.tabs([
