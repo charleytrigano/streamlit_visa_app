@@ -754,15 +754,106 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
             key=skey("modify", "select_client")
         )
 
+        # =========================================================================
+    # LOGIQUE DE MODIFICATION (MODIFY)
+    # =========================================================================
+    with tab_modify:
+        st.subheader("Modifier un Dossier Existant")
+        
+        if df_clients.empty or 'dossier_n' not in df_clients.columns:
+            st.info("Aucun dossier client chargé ou créé.")
+            return
+
+        client_options = {f"{r['dossier_n']} - {r['nom']}": r['dossier_n'] for _, r in df_clients[['dossier_n', 'nom']].iterrows() if pd.notna(r['dossier_n'])}
+        selected_key = st.selectbox(
+            "Sélectionner le Dossier à Modifier",
+            [""] + list(client_options.keys()),
+            key=skey("modify", "select_client")
+        )
+
         selected_dossier_n = client_options.get(selected_key)
         
+        # --- DÉBUT DE LA LOGIQUE CORRIGÉE ---
         if selected_dossier_n:
-            current_data = df_clients[df_clients['dossier_n'].astype(str) == selected_dossier_n].iloc[0].to_dict()
-            
-            st.markdown(f"---")
-            st.info(f"Modification du Dossier N°: **{selected_dossier_n}**")
+            # S'assurer que le dossier N° existe dans le DataFrame après filtrage
+            matching_rows = df_clients[df_clients['dossier_n'].astype(str) == selected_dossier_n]
 
-            with st.form("modify_client_form"):
+            if not matching_rows.empty:
+                current_data = matching_rows.iloc[0].to_dict()
+                
+                st.markdown(f"---")
+                st.info(f"Modification du Dossier N°: **{selected_dossier_n}**")
+
+                with st.form("modify_client_form"):
+                    
+                    # --- Remplissage des champs (nom, date, financier) ---
+                    col_name, col_date = st.columns(2)
+                    # ... (Le reste du formulaire ci-dessous reste inchangé) ...
+                    
+                    # Collez le reste du code du formulaire ici, en partant de l'intérieur de 'with st.form'
+                    # ...
+                    
+                    client_name_mod = col_name.text_input("Nom du Client", value=current_data.get('nom', ''), key=skey("form_mod", "nom"))
+                    date_val = current_data.get('date')
+                    if pd.isna(date_val): date_val = pd.to_datetime('today').date()
+                    elif isinstance(date_val, pd.Timestamp): date_val = date_val.date()
+                    date_dossier_mod = col_date.date_input("Date d'Ouverture du Dossier", value=date_val, key=skey("form_mod", "date"))
+                    
+                    st.markdown("---")
+                    col_montant, col_paye = st.columns(2)
+                    montant_facture_mod = col_montant.number_input("Total Facturé (Montant)", min_value=0.0, step=100.0, value=current_data.get('montant', 0.0), key=skey("form_mod", "montant"))
+                    paye_mod = col_paye.number_input("Total Paiements Reçus (Payé)", min_value=0.0, step=100.0, value=current_data.get('payé', 0.0), key=skey("form_mod", "payé"))
+                    
+                    solde_mod = (montant_facture_mod if montant_facture_mod is not None else 0.0) - (paye_mod if paye_mod is not None else 0.0)
+                    st.metric("Solde Actuel Dû (Calculé)", f"${solde_mod:,.2f}".replace(",", " "))
+                    
+                    st.markdown("---")
+                    st.subheader("Classification de Visa Hiérarchique")
+                    
+                    # Préparation des valeurs initiales pour la cascade
+                    current_cat = str(current_data.get('categorie', ''))
+                    full_sub_cat = str(current_data.get('sous_categorie', ''))
+                    
+                    # --- APPEL DE LA FONCTION DE RÉSOLUTION DYNAMIQUE ---
+                    level2_type, level3_key, level4_option = _resolve_visa_levels(current_cat, full_sub_cat, visa_structure)
+
+                    # --- APPEL DE LA CLASSIFICATION EN CASCADE AVEC VALEURS INITIALES ET STRUCTURE DYNAMIQUE ---
+                    visa_category_mod, visa_type_mod = _render_visa_classification_form(
+                        key_suffix="mod",
+                        visa_structure=visa_structure, # Passation de la structure dynamique
+                        initial_category=current_cat, 
+                        initial_type=level2_type, 
+                        initial_level3_key=level3_key, 
+                        initial_level4_option=level4_option, 
+                    )
+                    
+                    commentaires_mod = st.text_area(
+                        "Notes / Commentaires sur le Dossier", 
+                        value=current_data.get('commentaires', ''),
+                        key=skey("form_mod", "commentaires")
+                    )
+                    
+                    # Bouton de soumission
+                    submitted_mod = st.form_submit_button("💾 Enregistrer les Modifications")
+                    
+                    if submitted_mod:
+                        updated_entry = {
+                            "dossier_n": selected_dossier_n,
+                            "nom": client_name_mod,
+                            "date": date_dossier_mod.strftime('%Y-%m-%d'),
+                            "categorie": visa_category_mod if visa_category_mod != "Sélectionnez un groupe" else "",
+                            "sous_categorie": visa_type_mod,
+                            "montant": montant_facture_mod, 
+                            "payé": paye_mod,
+                            "commentaires": commentaires_mod,
+                        }
+                        
+                        updated_df_clients = _update_client_data(df_clients, updated_entry, "MODIFY")
+                        st.session_state[skey("df_clients")] = updated_df_clients
+                        st.rerun() 
+            else:
+                 st.error(f"Erreur : Dossier N° **{selected_dossier_n}** introuvable dans la base de données actuelle.")
+        # --- FIN DE LA LOGIQUE CORRIGÉE ---
                 
                 # --- Remplissage des champs (nom, date, financier) ---
                 col_name, col_date = st.columns(2)
