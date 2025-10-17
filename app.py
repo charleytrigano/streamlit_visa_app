@@ -130,16 +130,20 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
 
     cols = df_visa.columns.tolist()
     
+   # app.py (autour de la ligne 139)
+
     # Renommer les 4 premières colonnes pour la hiérarchie (si elles existent)
     df_temp = df_visa.copy()
     col_map = {}
     if len(cols) > 0: col_map[cols[0]] = 'N1_Categorie'
     if len(cols) > 1: col_map[cols[1]] = 'N2_Type'
     if len(cols) > 2: col_map[cols[2]] = 'N3_SousCategorie'
-    if len(cols] > 3: col_map[cols[3]] = 'N4_Option'
+    # Ligne corrigée : Utilisation de ')' au lieu de ']'
+    if len(cols) > 3: col_map[cols[3]] = 'N4_Option'
 
     # S'assurer que les colonnes sont présentes et renommées
-    df_temp.rename(columns=col_map, inplace=True)
+    df_temp.rename(columns=col_map, inplace=True) 
+    # ... (le reste du code)
     
     if len(cols) < 4:
          st.warning("Le fichier Visa ne contient pas assez de colonnes pour une classification à 4 niveaux.")
