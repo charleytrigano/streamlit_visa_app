@@ -542,13 +542,11 @@ def dossier_management_tab(df_clients: pd.DataFrame):
             st.markdown("---")
             
             col_montant, col_paye = st.columns(2)
+            # st.number_input retourne déjà un float, pas besoin de float()
             montant_facture = col_montant.number_input("Total Facturé (Montant)", min_value=0.0, step=100.0, key=skey("form_add", "montant"))
             paye_initial = col_paye.number_input("Paiement Initial Reçu (Payé)", min_value=0.0, step=100.0, key=skey("form_add", "payé"))
             
-            # --- CORRECTION DU TYPE ERROR ---
-            montant_facture = float(montant_facture)
-            paye_initial = float(paye_initial)
-            
+            # --- CORRECTION: On enlève les float() explicites ici ---
             solde_calcule = montant_facture - paye_initial
             st.metric("Solde Initial Dû (Calculé)", f"${solde_calcule:,.2f}".replace(",", " "))
             
@@ -643,10 +641,7 @@ def dossier_management_tab(df_clients: pd.DataFrame):
                     key=skey("form_mod", "payé")
                 )
                 
-                # --- CORRECTION DU TYPE ERROR (ligne 643 dans le précédent code) ---
-                montant_facture_mod = float(montant_facture_mod)
-                paye_mod = float(paye_mod)
-                
+                # --- CORRECTION: On enlève les float() explicites ici ---
                 solde_mod = montant_facture_mod - paye_mod
                 st.metric("Solde Actuel Dû (Calculé)", f"${solde_mod:,.2f}".replace(",", " "))
                 
