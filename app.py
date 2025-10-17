@@ -96,26 +96,10 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
             "Le DataFrame Clients ne contient pas toutes les colonnes attendues après le nettoyage : "
             f"{', '.join(COLS_CLIENTS_EXPECTED)}."
         )
-        return df
-        
-    def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoie et standardise les types de données du DataFrame Clients."""
-    
-    # Nettoyer les noms de colonnes pour une manipulation plus facile
-    df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
-    
-    # Colonnes attendues après nettoyage pour vérification
-    COLS_CLIENTS_EXPECTED = ['id_client', 'dossier_n', 'nom', 'date', 'categorie', 'sous_categorie', 'visa']
-    
-    # Vérification des colonnes critiques
-    if not all(col in df.columns for col in COLS_CLIENTS_EXPECTED):
-        st.warning(
-            "Le DataFrame Clients ne contient pas toutes les colonnes attendues après le nettoyage : "
-            f"{', '.join(COLS_CLIENTS_EXPECTED)}."
-        )
         # On continue quand même avec le nettoyage des types pour les colonnes trouvées
         
     # --- 1. Conversion des Nombres (Vectorisée et Renforcée) ---
+    # Cette liste de colonnes doit correspondre aux données réelles de votre fichier
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
     
     for col in money_cols:
@@ -135,11 +119,22 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors='coerce')
             
             # Étape 5: Remplacer les NaN par 0.0 et forcer le type float pour éviter les erreurs sum()
-            df[col] = df[col].fillna(0.0).astype(float) # <<< FIX APPLIQUÉ ICI
+            df[col] = df[col].fillna(0.0).astype(float) # <<< CORRECTION FINALE
 
     # --- 2. Conversion des Dates (Vectorisée) ---
     date_cols = ['date', 'dossier_envoyé', 'dossier_approuvé', 'dossier_refusé', 'dossier_annulé']
-# ... (le reste de la fonction _clean_clients_data est inchangé)
+    
+    for col in date_cols:
+        if col in df.columns:
+            # Conversion vectorielle en datetime
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+    
+    # --- 3. Création de Colonnes Dérivées ---
+    # Calcul des jours écoulés entre la date du dossier et aujourd'hui
+    if 'date' in df.columns:
+         df['jours_ecoules'] = (pd.to_datetime('today') - df['date']).dt.days
+
+    st.success("Nettoyage et conversion des données Clients terminés (Vectorisé).")
     return df
 
 def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
@@ -162,7 +157,7 @@ def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
     if df.empty:
         return {"total_clients": 0, "total_honoraires": 0.0, "solde_du": 0.0}
 
-    # Utiliser les noms de colonnes nettoyés (minuscules, underscores)
+    # Les colonnes sont maintenant garanties d'être des floats grâce au nettoyage renforcé
     total_honoraires = df['montant'].sum() if 'montant' in df.columns else 0.0
     total_payé = df['payé'].sum() if 'payé' in df.columns else 0.0
     solde_du = df['solde'].sum() if 'solde' in df.columns else 0.0
@@ -197,8 +192,9 @@ def upload_section():
         key=skey("upload", "visa"),
     )
 
+    # Note: L'utilisation de uploaded_file.read() est mise dans la session
+    # pour permettre à @st.cache_data d'être efficace même si le fichier est le même.
     if uploaded_file_clients:
-        # Stocker le contenu du fichier dans la session pour l'utiliser avec @st.cache_data
         st.session_state[skey("raw_clients_content")] = uploaded_file_clients.read()
         st.session_state[skey("clients_name")] = uploaded_file_clients.name
         
@@ -256,6 +252,7 @@ def home_tab(df_clients: pd.DataFrame):
 
     col1, col2, col3, col4 = st.columns(4)
 
+    # Affichage des métriques
     col1.metric("Clients Totaux", f"{summary['total_clients']:,}".replace(",", " "))
     col2.metric("Honoraires Totaux", f"${summary['total_honoraires']:,.2f}".replace(",", " "))
     col3.metric("Solde Total Dû", f"${summary['solde_du']:,.2f}".replace(",", " "))
@@ -280,8 +277,10 @@ def settings_tab():
         Étant donné que votre fichier d'origine semble avoir des en-têtes sur plusieurs lignes, 
         vous pouvez spécifier l'index de la ligne contenant les noms de colonnes réels.
         
-        * `0` (par défaut) : première ligne (index 0).
-        * `1` : deuxième ligne (index 1), etc.
+        * **0** (par défaut) : première ligne (index 0).
+        * **1** : deuxième ligne (index 1), etc.
+        
+        **Attention** : Changer ces valeurs nécessitera un rechargement des fichiers pour appliquer le nouvel en-tête.
     """)
     
     # Paramètre d'en-tête pour Clients
@@ -328,7 +327,7 @@ def export_tab(df_clients: pd.DataFrame, df_visa: pd.DataFrame):
         else:
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as w:
-                # Exporter le DataFrame nettoyé, pas le 'df_all' non défini dans le code original
+                # Exporter le DataFrame nettoyé
                 df_clients.to_excel(w, index=False, sheet_name="Clients_Nettoyes")
             st.download_button(
                 "⬇️ Exporter Clients_Nettoyes.xlsx",
@@ -398,6 +397,7 @@ def main():
         if df_clients.empty:
             st.info("Aucun fichier Clients chargé ou données non valides.")
         else:
+            # Affichage de l'aperçu du DataFrame nettoyé
             st.dataframe(df_clients, use_container_width=True)
 
     with tab_visa_view:
@@ -405,6 +405,7 @@ def main():
         if df_visa.empty:
             st.info("Aucun fichier Visa chargé ou données non valides.")
         else:
+            # Affichage de l'aperçu du DataFrame nettoyé
             st.dataframe(df_visa, use_container_width=True)
 
     with tab_export:
@@ -412,5 +413,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # st.session_state sera initialisé ici
     main()
