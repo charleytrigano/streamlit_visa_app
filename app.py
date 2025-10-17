@@ -5,10 +5,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+import numpy as np # Ajouté pour les opérations numériques sécurisées
 
 # =========================
 # Constantes et Configuration
-# =========================
+# =========================================================================
 APP_TITLE = "🛂 Visa Manager - Gestion Complète"
 SID = "vmgr_v6"
 
@@ -18,7 +19,7 @@ VISA_STRUCTURE = {}
 
 # =========================
 # Fonctions utilitaires de DataFrames
-# =========================
+# =========================================================================
 
 def skey(*args) -> str:
     """Génère une clé unique pour st.session_state."""
@@ -74,6 +75,7 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
 def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
     """Nettoie et standardise les types de données du DataFrame Clients."""
     
+    # Nettoyage des noms de colonnes : minuscule et remplacement des non-alphanumériques par '_'
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
     
     # 1. Standardiser et convertir les nombres financiers 
@@ -82,9 +84,10 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.replace(',', '.', regex=False)
             df[col] = df[col].str.replace(r'[^\d.]', '', regex=True)
+            # Conversion en float sécurisée
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float) 
     
-    # 2. Rétablir le solde avec la formule
+    # 2. Rétablir le solde avec la formule (basé sur la présence des colonnes)
     if 'montant' in df.columns and 'payé' in df.columns:
         df['solde'] = df['montant'] - df['payé']
     elif 'honoraires' in df.columns and 'payé' in df.columns:
@@ -143,15 +146,16 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     df_temp.rename(columns=col_map, inplace=True)
     
     if len(cols) < 4:
-         st.warning("Le fichier Visa ne contient pas assez de colonnes pour une classification à 4 niveaux.")
-         return {}
+         # st.warning("Le fichier Visa ne contient pas assez de colonnes pour une classification à 4 niveaux.")
+         # On continue même s'il y a moins de 4, la logique du dictionnaire gérera
+         pass
          
     # Trouver la colonne d'indicateur ('1') - à partir de la 5e colonne
     indicator_col = next((col for col in df_temp.columns[4:] if df_temp[col].astype(str).str.contains('1', na=False).any()), None)
     
     if not indicator_col:
         # Fallback: S'il n'y a pas d'indicateur '1', on suppose que toutes les lignes sont valides
-        st.warning("Impossible de trouver la colonne indicatrice de type ('1'). Utilisant toutes les lignes.")
+        # st.warning("Impossible de trouver la colonne indicatrice de type ('1'). Utilisant toutes les lignes.")
         df_valid = df_temp.copy()
     else:
         # Filtrer uniquement les lignes valides (où l'indicateur est '1')
@@ -182,7 +186,8 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
 
         else: # Cas N3 présent (Structure 4-Niveaux ou plus)
             if n2_type not in structure[n1_cat]:
-                structure[n1_cat][n2_type] = {}
+                # On initialise N2 comme un dictionnaire pour le niveau N3
+                structure[n1_cat][n2_type] = {} 
             
             if n3_subcat not in structure[n1_cat][n2_type]:
                 structure[n1_cat][n2_type][n3_subcat] = []
@@ -379,14 +384,14 @@ def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
             "total_honoraires": 0.0, "total_payé": 0.0, "solde_du": 0.0
         }
     
-    # Assurer les types float pour le calcul
+    # Assurer les types float pour le calcul et utiliser np.nansum
     df['montant'] = pd.to_numeric(df['montant'], errors='coerce').fillna(0.0)
     df['payé'] = pd.to_numeric(df['payé'], errors='coerce').fillna(0.0)
     df['solde'] = pd.to_numeric(df['solde'], errors='coerce').fillna(0.0)
     
-    total_honoraires = df['montant'].sum()
-    total_payé = df['payé'].sum()
-    solde_du = df['solde'].sum()
+    total_honoraires = np.nansum(df['montant'])
+    total_payé = np.nansum(df['payé'])
+    solde_du = np.nansum(df['solde'])
     
     clients_actifs = len(df) # Simplification: tous les clients sont actifs
     clients_payés = (df['solde'] <= 0).sum()
@@ -395,9 +400,9 @@ def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
         "total_clients": len(df),
         "clients_actifs": clients_actifs,
         "clients_payés": clients_payés,
-        "total_honoraires": total_honoraires,
-        "total_payé": total_payé,
-        "solde_du": solde_du
+        "total_honoraires": float(total_honoraires),
+        "total_payé": float(total_payé),
+        "solde_du": float(solde_du)
     }
 
 def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str) -> pd.DataFrame:
@@ -405,14 +410,15 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
     
     dossier_n = str(new_data.get('dossier_n')).strip()
     
-    if not dossier_n:
-        st.error("Le Numéro de Dossier ne peut pas être vide.")
+    if not dossier_n or dossier_n.lower() in ('nan', 'none', 'na', ''):
+        st.error("Le Numéro de Dossier ne peut pas être vide ou non défini.")
         return df
 
     # --- Actions DELETE ---
     if action == "DELETE":
         if 'dossier_n' not in df.columns: return df
             
+        # Assurer que la colonne dossier_n est traitée comme une chaîne pour la comparaison
         idx_to_delete = df[df['dossier_n'].astype(str) == dossier_n].index
         
         if not idx_to_delete.empty:
@@ -497,6 +503,7 @@ def upload_section():
         # Stockage des données binaires
         st.session_state[skey("raw_clients_content")] = uploaded_file_clients.read()
         st.session_state[skey("clients_name")] = uploaded_file_clients.name
+        # On vide le DF pour forcer le rechargement
         st.session_state[skey("df_clients")] = pd.DataFrame() 
         st.sidebar.success(f"Clients : **{uploaded_file_clients.name}** chargé.")
     elif content_clients_loaded:
@@ -516,6 +523,7 @@ def upload_section():
         # Stockage des données binaires
         st.session_state[skey("raw_visa_content")] = uploaded_file_visa.read()
         st.session_state[skey("visa_name")] = uploaded_file_visa.name
+        # On vide le DF pour forcer le rechargement
         st.session_state[skey("df_visa")] = pd.DataFrame() 
         st.sidebar.success(f"Visa : **{uploaded_file_visa.name}** chargé.")
     elif content_visa_loaded:
@@ -533,40 +541,40 @@ def data_processing_flow():
     df_clients_current = st.session_state.get(skey("df_clients"))
 
     if raw_clients_content is not None and df_clients_current.empty:
-        try:
-            # Lire le contenu brut
-            df_raw = _read_data_file(BytesIO(raw_clients_content), st.session_state[skey("clients_name")], header_clients)
-            # Nettoyer les données
-            df_cleaned = _clean_clients_data(df_raw)
-            # Stocker le DataFrame nettoyé (seulement si le nettoyage a réussi)
-            if not df_cleaned.empty:
-                st.session_state[skey("df_clients")] = df_cleaned
-                st.success("Données Clients traitées avec succès.")
-            else:
-                 st.error("Échec du traitement des données Clients. Vérifiez le format/l'en-tête.")
-        except Exception as e:
-            st.error(f"Erreur fatale lors du traitement des données Clients: {e}")
-            st.session_state[skey("raw_clients_content")] = None 
+        with st.spinner("Traitement des données Clients..."):
+            try:
+                # Lire le contenu brut
+                df_raw = _read_data_file(BytesIO(raw_clients_content), st.session_state[skey("clients_name")], header_clients)
+                # Nettoyer les données
+                df_cleaned = _clean_clients_data(df_raw)
+                # Stocker le DataFrame nettoyé (seulement si le nettoyage a réussi)
+                if not df_cleaned.empty:
+                    st.session_state[skey("df_clients")] = df_cleaned
+                else:
+                    st.error("Échec du traitement des données Clients. Vérifiez le format/l'en-tête.")
+            except Exception as e:
+                st.error(f"Erreur fatale lors du traitement des données Clients: {e}")
+                st.session_state[skey("raw_clients_content")] = None 
 
     # --- Visa ---
     raw_visa_content = st.session_state.get(skey("raw_visa_content"))
     df_visa_current = st.session_state.get(skey("df_visa"))
 
     if raw_visa_content is not None and df_visa_current.empty:
-        try:
-            # Lire le contenu brut
-            df_raw_visa = _read_data_file(BytesIO(raw_visa_content), st.session_state[skey("visa_name")], header_visa)
-            # Nettoyer les données (surtout conversion en string)
-            df_cleaned_visa = _clean_visa_data(df_raw_visa)
-            # Stocker le DataFrame nettoyé
-            if not df_cleaned_visa.empty:
-                st.session_state[skey("df_visa")] = df_cleaned_visa
-                st.success("Données Visa traitées avec succès.")
-            else:
-                st.error("Échec du traitement des données Visa. Vérifiez le format/l'en-tête.")
-        except Exception as e:
-            st.error(f"Erreur fatale lors du traitement des données Visa: {e}")
-            st.session_state[skey("raw_visa_content")] = None
+        with st.spinner("Traitement des données Visa..."):
+            try:
+                # Lire le contenu brut
+                df_raw_visa = _read_data_file(BytesIO(raw_visa_content), st.session_state[skey("visa_name")], header_visa)
+                # Nettoyer les données (surtout conversion en string)
+                df_cleaned_visa = _clean_visa_data(df_raw_visa)
+                # Stocker le DataFrame nettoyé
+                if not df_cleaned_visa.empty:
+                    st.session_state[skey("df_visa")] = df_cleaned_visa
+                else:
+                    st.error("Échec du traitement des données Visa. Vérifiez le format/l'en-tête.")
+            except Exception as e:
+                st.error(f"Erreur fatale lors du traitement des données Visa: {e}")
+                st.session_state[skey("raw_visa_content")] = None
 
 
 def home_tab(df_clients: pd.DataFrame):
@@ -685,8 +693,10 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
         if not df_clients.empty and 'dossier_n' in df_clients.columns:
             try:
                 # Extraire le numéro de dossier maximum pour trouver le suivant
-                max_n = df_clients['dossier_n'].astype(str).str.extract(r'(\d+)').astype(float).max()
-                next_dossier_n = int(max_n + 1) if not pd.isna(max_n) and max_n > 12999 else 13000
+                # Utiliser des méthodes plus robustes pour extraire les nombres
+                numeric_dossiers = df_clients['dossier_n'].astype(str).str.extract(r'(\d+)').astype(float)
+                max_n = numeric_dossiers[pd.notna(numeric_dossiers)].max()
+                next_dossier_n = int(max_n + 1) if not pd.isna(max_n) and max_n >= 12000 else 13000
             except:
                  next_dossier_n = 13000
         
@@ -757,7 +767,7 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
             # S'assurer que le dossier N° existe dans le DataFrame après filtrage
             matching_rows = df_clients[df_clients['dossier_n'].astype(str) == selected_dossier_n]
 
-            # CORRECTION LOGIQUE: Vérifier si la ligne existe avant d'y accéder
+            # CORRECTION LOGIQUE: Vérifier si la ligne existe avant d'y accéder (previent IndexError)
             if not matching_rows.empty:
                 current_data = matching_rows.iloc[0].to_dict()
                 
@@ -769,16 +779,35 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
                     # --- Remplissage des champs (nom, date, financier) ---
                     # Ligne corrigée pour l'indentation
                     col_name, col_date = st.columns(2) 
-                    client_name_mod = col_name.text_input("Nom du Client", value=current_data.get('nom', ''), key=skey("form_mod", "nom"))
+                    
+                    # Utilisation des clés en minuscules
+                    client_name_mod = col_name.text_input("Nom du Client", 
+                                                         value=current_data.get('nom', ''), 
+                                                         key=skey("form_mod", "nom"))
+                    
+                    # Gestion de la date
                     date_val = current_data.get('date')
                     if pd.isna(date_val): date_val = pd.to_datetime('today').date()
                     elif isinstance(date_val, pd.Timestamp): date_val = date_val.date()
-                    date_dossier_mod = col_date.date_input("Date d'Ouverture du Dossier", value=date_val, key=skey("form_mod", "date"))
+                    date_dossier_mod = col_date.date_input("Date d'Ouverture du Dossier", 
+                                                           value=date_val, 
+                                                           key=skey("form_mod", "date"))
                     
                     st.markdown("---")
                     col_montant, col_paye = st.columns(2)
-                    montant_facture_mod = col_montant.number_input("Total Facturé (Montant)", min_value=0.0, step=100.0, value=current_data.get('montant', 0.0), key=skey("form_mod", "montant"))
-                    paye_mod = col_paye.number_input("Total Paiements Reçus (Payé)", min_value=0.0, step=100.0, value=current_data.get('payé', 0.0), key=skey("form_mod", "payé"))
+                    
+                    # CORRECTION INITALISATION: Sécuriser les valeurs numériques pour le number_input
+                    montant_initial = float(current_data.get('montant', 0.0) or 0.0)
+                    paye_initial = float(current_data.get('payé', 0.0) or 0.0)
+                    
+                    montant_facture_mod = col_montant.number_input("Total Facturé (Montant)", 
+                                                                   min_value=0.0, step=100.0, 
+                                                                   value=montant_initial, 
+                                                                   key=skey("form_mod", "montant"))
+                    paye_mod = col_paye.number_input("Total Paiements Reçus (Payé)", 
+                                                     min_value=0.0, step=100.0, 
+                                                     value=paye_initial, 
+                                                     key=skey("form_mod", "payé"))
                     
                     solde_mod = (montant_facture_mod if montant_facture_mod is not None else 0.0) - (paye_mod if paye_mod is not None else 0.0)
                     st.metric("Solde Actuel Dû (Calculé)", f"${solde_mod:,.2f}".replace(",", " "))
@@ -796,7 +825,7 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict): # Pr
                     # --- APPEL DE LA CLASSIFICATION EN CASCADE AVEC VALEURS INITIALES ET STRUCTURE DYNAMIQUE ---
                     visa_category_mod, visa_type_mod = _render_visa_classification_form(
                         key_suffix="mod",
-                        visa_structure=visa_structure, # Passation de la structure dynamique
+                        visa_structure=visa_structure, 
                         initial_category=current_cat, 
                         initial_type=level2_type, 
                         initial_level3_key=level3_key, 
@@ -949,7 +978,7 @@ def export_tab(df_clients: pd.DataFrame, df_visa: pd.DataFrame):
 
 # =========================
 # Application principale
-# =========================
+# =========================================================================
 
 def main():
     """Fonction principale de l'application Streamlit."""
@@ -992,7 +1021,7 @@ def main():
              # Utilisation de la version corrigée de la fonction
              visa_structure = _build_visa_structure(df_visa)
         except Exception as e:
-            st.error(f"Erreur de construction de la structure Visa: {e}")
+            # st.error(f"Erreur de construction de la structure Visa: {e}")
             visa_structure = {}
     
     # 3. Affichage des onglets
