@@ -297,28 +297,51 @@ def _resolve_visa_levels(category: str, sub_category: str, visa_structure: Dict)
     return level2_type, level3_key, level4_option
 
 
-# --- FONCTION POUR LA CLASSIFICATION EN CASCADE (MISE À JOUR) ---
-def _render_visa_classification_form(
-    key_suffix: str, 
-    visa_structure: Dict, # Prend la structure en argument
-    initial_category: Optional[str] = None, 
-    initial_type: Optional[str] = None, 
-    initial_level3_key: Optional[str] = None, 
-    initial_level4_option: Optional[str] = None
-) -> Tuple[str, str]:
-    """
-    Affiche les selectbox en cascade pour la classification des visas, en utilisant 
-    la structure dynamique.
-    """
+# app.py (à partir de la ligne 298 environ)
+
+def upload_section():
+    """Section de chargement des fichiers (Barre latérale)."""
+    st.sidebar.header("📁 Chargement des Fichiers")
     
-    main_keys = list(visa_structure.keys())
-    default_cat_index = main_keys.index(initial_category) + 1 if initial_category in main_keys else 0
+    # ------------------- Fichier Clients -------------------
+    # Utilisation du .get() pour plus de sécurité, bien que setdefault dans main aide
+    content_clients_loaded = st.session_state.get(skey("raw_clients_content")) 
     
-    col_cat, col_type = st.columns(2)
+    uploaded_file_clients = st.sidebar.file_uploader(
+        "Clients/Dossiers (.csv, .xlsx)",
+        type=['csv', 'xlsx'],
+        key=skey("upload", "clients"),
+    )
     
-    visa_category = initial_category if initial_category in main_keys else "Sélectionnez un groupe"
-    final_visa_type = ""
-    selected_type = ""
+    if uploaded_file_clients is not None:
+        # Stockage des données binaires
+        st.session_state[skey("raw_clients_content")] = uploaded_file_clients.read()
+        st.session_state[skey("clients_name")] = uploaded_file_clients.name
+        # On vide le DF pour forcer le recalcul par data_processing_flow
+        st.session_state[skey("df_clients")] = pd.DataFrame() 
+        st.sidebar.success(f"Clients : **{uploaded_file_clients.name}** chargé.")
+    elif content_clients_loaded:
+        st.sidebar.success(f"Clients : **{st.session_state.get(skey('clients_name'), 'Précédent')}** (Persistant)")
+
+
+    # ------------------- Fichier Visa -------------------
+    content_visa_loaded = st.session_state.get(skey("raw_visa_content"))
+    
+    uploaded_file_visa = st.sidebar.file_uploader(
+        "Table de Référence Visa (.csv, .xlsx)",
+        type=['csv', 'xlsx'],
+        key=skey("upload", "visa"),
+    )
+
+    if uploaded_file_visa is not None:
+        # Stockage des données binaires
+        st.session_state[skey("raw_visa_content")] = uploaded_file_visa.read()
+        st.session_state[skey("visa_name")] = uploaded_file_visa.name
+        # On vide le DF pour forcer le recalcul par data_processing_flow
+        st.session_state[skey("df_visa")] = pd.DataFrame() 
+        st.sidebar.success(f"Visa : **{uploaded_file_visa.name}** chargé.")
+    elif content_visa_loaded:
+        st.sidebar.success(f"Visa : **{st.session_state.get(skey('visa_name'), 'Précédent')}** (Persistant)")
     
     # 1. Sélection de la Catégorie (Niveau 1)
     with col_cat:
@@ -785,6 +808,36 @@ def export_tab(df_clients: pd.DataFrame, df_visa: pd.DataFrame):
 # Application principale
 # =========================
 
+# app.py (à partir de la ligne 788 environ)
+
+# ... (autres fonctions) ...
+
+def main():
+    """Fonction principale de l'application Streamlit."""
+    st.set_page_config(
+        page_title=APP_TITLE,
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    st.title(APP_TITLE)
+    
+    # --- AJOUTER CETTE BLOC D'INITIALISATION ---
+    st.session_state.setdefault(skey("raw_clients_content"), None)
+    st.session_state.setdefault(skey("clients_name"), "")
+    st.session_state.setdefault(skey("df_clients"), pd.DataFrame())
+    
+    st.session_state.setdefault(skey("raw_visa_content"), None)
+    st.session_state.setdefault(skey("visa_name"), "")
+    st.session_state.setdefault(skey("df_visa"), pd.DataFrame())
+    
+    st.session_state.setdefault(skey("header_clients_row"), 0)
+    st.session_state.setdefault(skey("header_visa_row"), 0)
+    # -------------------------------------------
+    
+    # 1. Section de chargement des fichiers
+    upload_section() # L'erreur devrait être corrigée ici
+    
+# ... (reste de la fonction main) ...
 def main():
     """Fonction principale de l'application Streamlit."""
     st.set_page_config(
