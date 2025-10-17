@@ -65,6 +65,7 @@ VISA_STRUCTURE = {
 
 # =========================
 # Fonctions utilitaires de DataFrames
+# (Non modifiées - Omisses pour la concision)
 # =========================
 
 def skey(*args) -> str:
@@ -439,6 +440,8 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
     Affiche les selectbox en cascade pour la classification des visas.
     Utilise des widgets différents selon les niveaux.
     Retourne la catégorie (niveau 1) et la sous-catégorie (niveau le plus profond)
+    
+    initial_subtype peut être soit la clé de Niveau 3 (Ex: 'EB-2/EB-3') soit l'option de Niveau 4 (Ex: 'CP').
     """
     
     main_keys = list(VISA_STRUCTURE.keys())
@@ -499,6 +502,7 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
                 
                 # --- Utilisation de st.radio (Boutons Bascule) ---
                 options_list = current_options
+                # initial_subtype est l'option finale (Ex: CP ou EOS)
                 default_sub_index = options_list.index(initial_subtype) if initial_subtype in options_list else 0
                 
                 final_selection = st.radio(
@@ -515,15 +519,17 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
                 st.subheader(f"3. Sous-catégorie pour **{selected_type}**")
                 
                 nested_keys = list(current_options.keys())
+                nested_key_to_select = ""
+
+                # 1. Vérifie si initial_subtype est l'une des clés de Niveau 3 (Ex: EB-2/EB-3 ou E-2 Inv.)
+                if initial_subtype in nested_keys:
+                    nested_key_to_select = initial_subtype
                 
-                # NOUVEAU: Logique pour pré-remplir le nested_key (Niveau 3)
-                nested_key_to_select = initial_type if initial_type in nested_keys else ""
-                
-                # Si le niveau 3 n'était pas le initial_type, il faut le chercher
-                if not nested_key_to_select and initial_subtype:
+                # 2. Sinon, si initial_subtype est l'option de Niveau 4 (Ex: CP), on cherche la clé Niveau 3 parente
+                elif initial_subtype:
                     for k, v in current_options.items():
                          if isinstance(v, list) and initial_subtype in v:
-                             nested_key_to_select = k
+                             nested_key_to_select = k # k est la clé Niveau 3 (Ex: 'E-2 Inv.')
                              break
                 
                 default_nested_index = nested_keys.index(nested_key_to_select) + 1 if nested_key_to_select in nested_keys else 0
@@ -544,6 +550,7 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
                         
                         # --- Utilisation de st.radio (Boutons Bascule) ---
                         options_list_nested = nested_options
+                        # initial_subtype est l'option finale (CP, USCIS, etc.)
                         default_sub_index = options_list_nested.index(initial_subtype) if initial_subtype in options_list_nested else 0
                         
                         final_selection = st.radio(
@@ -559,9 +566,6 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
                         final_visa_type = nested_key
                 else:
                     final_visa_type = selected_type
-            
-            else:
-                 final_visa_type = selected_type
 
     # Retourne la Catégorie (Niveau 1) et la Sous-Catégorie (Niveau final détaillé)
     return visa_category, final_visa_type
@@ -575,6 +579,7 @@ def dossier_management_tab(df_clients: pd.DataFrame):
 
     # =========================================================================
     # LOGIQUE D'AJOUT (ADD)
+    # (Non modifiée - Omisses pour la concision)
     # =========================================================================
     with tab_add:
         st.subheader("Ajouter un Nouveau Dossier")
@@ -641,7 +646,7 @@ def dossier_management_tab(df_clients: pd.DataFrame):
                     updated_df_clients = _update_client_data(df_clients, new_entry, "ADD")
                     st.session_state[skey("df_clients")] = updated_df_clients
                     st.rerun()
-    
+
     # =========================================================================
     # LOGIQUE DE MODIFICATION (MODIFY)
     # =========================================================================
@@ -732,13 +737,11 @@ def dossier_management_tab(df_clients: pd.DataFrame):
                 # Extraction du sous-type final s'il est entre parenthèses
                 match_paren = re.search(r'\((.+)\)', full_sub_cat)
                 if match_paren:
-                    current_final_subtype = match_paren.group(1).strip()
-                    current_sub_type = full_sub_cat[:match_paren.start()].strip()
+                    current_final_subtype = match_paren.group(1).strip() # Level 4 Option (Ex: CP)
+                    current_sub_type = full_sub_cat[:match_paren.start()].strip() # Level 3 Key (Ex: E-2 Inv.)
                 
-                # Pour les structures imbriquées (ex: E-2), on cherche si 'current_sub_type' est une clé de niveau 3
-                # Si 'current_sub_type' est 'E-2 Inv.' et la 'current_cat' est 'Treaty'
-                # Le parent direct dans la cascade est 'E-2' (le type de niveau 2)
-                level2_type = current_sub_type
+                # Le niveau 2 est le parent direct dans la structure VISA_STRUCTURE
+                level2_type = current_sub_type # Par défaut, le Niveau 3 key ou le Niveau 2 key (si non imbriqué)
                 if current_cat in VISA_STRUCTURE:
                     level2_options = VISA_STRUCTURE[current_cat]
                     for key_level2, val_level2 in level2_options.items():
@@ -748,13 +751,19 @@ def dossier_management_tab(df_clients: pd.DataFrame):
                         elif key_level2 == current_sub_type:
                             level2_type = key_level2
                             break
+                
+                # NOUVEAU: Détermination de l'argument à passer pour initial_subtype (3ème argument)
+                initial_level_3_or_4 = current_final_subtype # Par défaut: Level 4 option (Ex: CP)
+                if initial_level_3_or_4 is None:
+                    # Si Level 4 est absent, le Level 3 key est le type final (Ex: E-2 Inv. ou EB-2/EB-3)
+                    initial_level_3_or_4 = current_sub_type 
 
                 # --- APPEL DE LA CLASSIFICATION EN CASCADE AVEC VALEURS INITIALES ---
                 visa_category_mod, visa_type_mod = _render_visa_classification_form(
                     key_suffix="mod",
-                    initial_category=current_cat,
-                    initial_type=level2_type, # On passe le type de niveau 2 pour pré-remplir la 2e selectbox
-                    initial_subtype=current_final_subtype # On passe l'option finale (CP, USCIS, etc.)
+                    initial_category=current_cat, # Niveau 1
+                    initial_type=level2_type, # Niveau 2
+                    initial_subtype=initial_level_3_or_4, # Niveau 3 OU Niveau 4
                 )
                 
                 commentaires_mod = st.text_area(
@@ -784,6 +793,7 @@ def dossier_management_tab(df_clients: pd.DataFrame):
     
     # =========================================================================
     # LOGIQUE DE SUPPRESSION (DELETE)
+    # (Non modifiée - Omisses pour la concision)
     # =========================================================================
     with tab_delete:
         st.subheader("Supprimer un Dossier Définitivement")
