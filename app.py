@@ -384,10 +384,9 @@ def accounting_tab(df_clients: pd.DataFrame):
     
     st.divider()
 
-    # --- NOUVEAUTÉ : Filtre Client ---
+    # --- Filtre Client ---
     st.subheader("Détail du Compte Client")
     
-    # Création des options de sélection pour le filtre
     df_clients_for_select = df_clients[['dossier_n', 'nom']].dropna(subset=['dossier_n'])
     client_options = {
         f"{r['dossier_n']} - {r['nom']}": r['dossier_n'] 
@@ -434,26 +433,25 @@ def accounting_tab(df_clients: pd.DataFrame):
     )
     st.caption("Le solde dû est calculé par `Montant Facturé - Total Payé`.")
 
-# --- FONCTION POUR LA CLASSIFICATION EN CASCADE ---
+# --- FONCTION POUR LA CLASSIFICATION EN CASCADE (MISE À JOUR) ---
 def _render_visa_classification_form(key_suffix: str, initial_category: Optional[str] = None, initial_type: Optional[str] = None, initial_subtype: Optional[str] = None) -> Tuple[str, str]:
     """
     Affiche les selectbox en cascade pour la classification des visas.
+    Utilise des widgets différents selon les niveaux.
     Retourne la catégorie (niveau 1) et la sous-catégorie (niveau le plus profond)
     """
     
     main_keys = list(VISA_STRUCTURE.keys())
-    # Assurer que l'index initial est valide (sinon 0 pour "Sélectionnez un groupe")
     default_cat_index = main_keys.index(initial_category) + 1 if initial_category in main_keys else 0
     
     col_cat, col_type = st.columns(2)
     
-    # Initialisation des résultats
     visa_category = initial_category if initial_category in main_keys else "Sélectionnez un groupe"
     final_visa_type = ""
     selected_type = ""
     
+    # 1. Sélection de la Catégorie (Niveau 1)
     with col_cat:
-        # 1. Sélection de la Catégorie (Niveau 1)
         visa_category = st.selectbox(
             "1. Catégorie de Visa (Grand Groupe)",
             ["Sélectionnez un groupe"] + main_keys,
@@ -466,19 +464,25 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
         selected_options = VISA_STRUCTURE.get(visa_category, {})
         visa_types_list = list(selected_options.keys())
         
-        # Tenter de trouver l'index initial pour le type de visa (Niveau 2 ou 3)
+        # Logique de pré-remplissage pour Niveau 2 (Type de Visa)
         default_type_index = visa_types_list.index(initial_type) + 1 if initial_type in visa_types_list else 0
         
-        # Logique pour les cas où le type initial est une clé d'un niveau plus profond (ex: E-2 Inv.)
+        # Recherche si initial_type est un niveau 3 (ex: 'E-2 Inv.') et non un niveau 2 (ex: 'E-2')
         if default_type_index == 0 and initial_type:
-            # Recherche de la clé dans les niveaux imbriqués (pour le pré-remplissage)
             for key, value in selected_options.items():
-                if isinstance(value, dict) and initial_type in value:
-                     default_type_index = visa_types_list.index(key) + 1
-                     break
-        
+                if isinstance(value, dict):
+                    if initial_type in value: # Cas où initial_type est le niveau 3 (ex: 'E-2 Inv.')
+                         default_type_index = visa_types_list.index(key) + 1 # key est le niveau 2 (ex: 'E-2')
+                         break
+                    elif initial_type == key: # Cas où initial_type est un niveau 2 lui-même (non structuré en dictionnaire)
+                         default_type_index = visa_types_list.index(key) + 1
+                         break
+                elif initial_type == key:
+                    default_type_index = visa_types_list.index(key) + 1
+                    break
+
+        # 2. Sélection du Type de Visa (Niveau 2) - Dropdown classique
         with col_type:
-            # 2. Sélection du Type de Visa (Niveau 2)
             selected_type = st.selectbox(
                 f"2. Type de Visa ({visa_category})",
                 ["Sélectionnez un type"] + visa_types_list,
@@ -488,24 +492,18 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
 
         if selected_type and selected_type != "Sélectionnez un type":
             current_options = selected_options.get(selected_type)
-            
-            # Mise à jour pour le pré-remplissage
-            # Si le type initial n'était pas le niveau 2 mais le niveau 3 (ex: 'E-2 Inv.')
-            if initial_type in selected_options and selected_type != initial_type:
-                 # Cela signifie que selected_type est un 'Groupe' (ex: 'Treaty') 
-                 # et initial_type est un Sous-groupe (ex: 'E-2') ou type final ('E-2 Inv.').
-                 pass
-
 
             if isinstance(current_options, list):
                 # Cas 1 : Niveau 3 (Liste simple)
-                st.subheader(f"3. Option pour {selected_type}")
+                st.subheader(f"3. Option pour **{selected_type}**")
                 
-                default_sub_index = current_options.index(initial_subtype) if initial_subtype in current_options else 0
+                # --- Utilisation de st.radio (Boutons Bascule) ---
+                options_list = current_options
+                default_sub_index = options_list.index(initial_subtype) if initial_subtype in options_list else 0
                 
                 final_selection = st.radio(
                     "Choisissez l'option finale",
-                    current_options,
+                    options_list,
                     index=default_sub_index,
                     key=skey("form", key_suffix, "sub1"),
                     horizontal=True
@@ -514,20 +512,23 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
                 
             elif isinstance(current_options, dict):
                 # Cas 2 : Niveau 3 (Dictionnaire/Sous-catégories)
-                st.subheader(f"3. Sous-catégorie pour {selected_type}")
+                st.subheader(f"3. Sous-catégorie pour **{selected_type}**")
                 
                 nested_keys = list(current_options.keys())
                 
                 # NOUVEAU: Logique pour pré-remplir le nested_key (Niveau 3)
-                # Si initial_type (ex: E-2 Inv.) est dans une des clés imbriquées.
-                nested_key_to_select = ""
-                for k, v in current_options.items():
-                    if initial_type == k or (isinstance(v, list) and initial_subtype in v):
-                         nested_key_to_select = k
-                         break
+                nested_key_to_select = initial_type if initial_type in nested_keys else ""
+                
+                # Si le niveau 3 n'était pas le initial_type, il faut le chercher
+                if not nested_key_to_select and initial_subtype:
+                    for k, v in current_options.items():
+                         if isinstance(v, list) and initial_subtype in v:
+                             nested_key_to_select = k
+                             break
                 
                 default_nested_index = nested_keys.index(nested_key_to_select) + 1 if nested_key_to_select in nested_keys else 0
 
+                # --- Utilisation de st.selectbox pour le niveau 3 (Sous-catégorie) ---
                 nested_key = st.selectbox(
                     f"Sous-catégorie de {selected_type}",
                     ["Sélectionnez la sous-catégorie"] + nested_keys,
@@ -536,30 +537,29 @@ def _render_visa_classification_form(key_suffix: str, initial_category: Optional
                 )
                 
                 if nested_key and nested_key != "Sélectionnez la sous-catégorie":
-                    # Niveau 4 : Radio Buttons pour les options finales
+                    # Niveau 4 : Options finales
                     nested_options = current_options.get(nested_key)
                     if nested_options and isinstance(nested_options, list):
-                        st.subheader(f"4. Option finale pour {nested_key}")
+                        st.subheader(f"4. Option finale pour **{nested_key}**")
                         
-                        default_sub_index = nested_options.index(initial_subtype) if initial_subtype in nested_options else 0
+                        # --- Utilisation de st.radio (Boutons Bascule) ---
+                        options_list_nested = nested_options
+                        default_sub_index = options_list_nested.index(initial_subtype) if initial_subtype in options_list_nested else 0
                         
                         final_selection = st.radio(
                             "Choisissez l'option finale",
-                            nested_options,
+                            options_list_nested,
                             index=default_sub_index,
                             key=skey("form", key_suffix, "sub2"),
                             horizontal=True
                         )
                         final_visa_type = f"{nested_key} ({final_selection})"
                     
-                    # Si c'est un dictionnaire mais sans niveau radio (rare)
                     else:
                         final_visa_type = nested_key
-                # Cas où l'utilisateur ne choisit pas de sous-catégorie
                 else:
                     final_visa_type = selected_type
-
-            # Si le type sélectionné est le niveau le plus profond sans sous-option
+            
             else:
                  final_visa_type = selected_type
 
@@ -721,60 +721,40 @@ def dossier_management_tab(df_clients: pd.DataFrame):
                 st.markdown("---")
                 st.subheader("Classification de Visa Hiérarchique")
                 
-                # Préparation des valeurs initiales pour la cascade (CORRECTION MAJEURE ICI)
-                current_cat = current_data.get('categorie')
+                # Préparation des valeurs initiales pour la cascade
+                current_cat = str(current_data.get('categorie', ''))
                 full_sub_cat = str(current_data.get('sous_categorie', ''))
                 
                 # Logique pour décortiquer la sous-catégorie complexe
-                current_sub_type = full_sub_cat # Initialiser le type principal
-                current_final_subtype = None # Initialiser le sous-type final (radio)
+                current_sub_type = full_sub_cat 
+                current_final_subtype = None 
 
+                # Extraction du sous-type final s'il est entre parenthèses
                 match_paren = re.search(r'\((.+)\)', full_sub_cat)
                 if match_paren:
-                    # Si c'est au format 'Type (FinalSubType)'
                     current_final_subtype = match_paren.group(1).strip()
                     current_sub_type = full_sub_cat[:match_paren.start()].strip()
                 
-                # S'assurer que le current_sub_type est bien le niveau 2 ou 3
-                if current_sub_type.startswith(current_cat.split(" - ")[-1]):
-                     # Si la sous-catégorie est juste 'E-2 Inv.' et la catégorie est 'Treaty'
-                     pass
-                else:
-                    # Recherche dans la structure pour trouver le parent du current_sub_type
-                    parent_type = ""
-                    if current_cat in VISA_STRUCTURE:
-                        for key_level2, val_level2 in VISA_STRUCTURE[current_cat].items():
-                            if isinstance(val_level2, dict) and current_sub_type in val_level2:
-                                current_sub_type = current_sub_type
-                                parent_type = key_level2
-                                break
-                            elif isinstance(val_level2, dict):
-                                for key_level3, val_level3 in val_level2.items():
-                                    if current_sub_type == key_level3:
-                                         current_sub_type = key_level3
-                                         parent_type = key_level2
-                                         break
-                            elif current_sub_type == key_level2:
-                                parent_type = key_level2
-                                break
-                    
-                    if parent_type and parent_type != current_sub_type:
-                        # Si le niveau 2 était le 'Groupe' (ex: 'Treaty') et le niveau 3 était 'E-2'
-                        # On sélectionne le niveau 2 qui contient le niveau 3
-                        # On passe parent_type comme initial_type
-                        
-                        # Cependant, pour la fonction _render_visa_classification_form, 
-                        # on passe le plus haut niveau (level 2) comme initial_type
-                        
-                        # Simplification: Le plus simple est de juste passer les valeurs extraites
-                        pass
+                # Pour les structures imbriquées (ex: E-2), on cherche si 'current_sub_type' est une clé de niveau 3
+                # Si 'current_sub_type' est 'E-2 Inv.' et la 'current_cat' est 'Treaty'
+                # Le parent direct dans la cascade est 'E-2' (le type de niveau 2)
+                level2_type = current_sub_type
+                if current_cat in VISA_STRUCTURE:
+                    level2_options = VISA_STRUCTURE[current_cat]
+                    for key_level2, val_level2 in level2_options.items():
+                        if isinstance(val_level2, dict) and current_sub_type in val_level2:
+                            level2_type = key_level2 # Ex: 'E-2'
+                            break
+                        elif key_level2 == current_sub_type:
+                            level2_type = key_level2
+                            break
 
                 # --- APPEL DE LA CLASSIFICATION EN CASCADE AVEC VALEURS INITIALES ---
                 visa_category_mod, visa_type_mod = _render_visa_classification_form(
                     key_suffix="mod",
                     initial_category=current_cat,
-                    initial_type=current_sub_type,
-                    initial_subtype=current_final_subtype
+                    initial_type=level2_type, # On passe le type de niveau 2 pour pré-remplir la 2e selectbox
+                    initial_subtype=current_final_subtype # On passe l'option finale (CP, USCIS, etc.)
                 )
                 
                 commentaires_mod = st.text_area(
