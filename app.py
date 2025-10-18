@@ -39,15 +39,20 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
     # Assurez-vous que le pointeur est au début du fichier
     # Ligne 40 (Assurez-vous qu'il n'y a pas d'espace non imprimable à la fin)
     file_content.seek(0) 
+# 1. Détection du format (plus tolérante)
+    is_excel = file_name.endswith(('.xls', '.xlsx')) or 'xlsx' in file_name.lower() or 'xls' in file_name.lower()
+    
+    # Assurez-vous que le pointeur est au début du fichier
+    file_content.seek(0)
 
-# Ligne 44 (Assurez-vous qu'il n'y a pas d'espace non imprimable à la fin)
-           try:
-        # Tenter la lecture Excel pour les formats xls/xlsx
-        df = pd.read_excel(file_content, header=header_row, engine='openpyxl', dtype=str)
-    except Exception as e:
+    if is_excel:
+        try:
+            # Tenter la lecture Excel pour les formats xls/xlsx
+            df = pd.read_excel(file_content, header=header_row, engine='openpyxl', dtype=str)
+        except Exception as e:
             st.error(f"Erreur de lecture Excel : {e}")
             return pd.DataFrame()
-    else: 
+    else:
         # Tenter la lecture CSV
         try:
             # Tente de détecter automatiquement le séparateur (sep=None)
@@ -64,6 +69,8 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
             st.error(f"Erreur de lecture CSV : {e}")
             return pd.DataFrame()
             
+    # Nettoyage standard
+    df = df.dropna(axis=1, how='all')   
     # Nettoyage standard
     df = df.dropna(axis=1, how='all')
     df.columns = df.columns.str.strip().fillna('')
