@@ -2,11 +2,11 @@ import io
 import re
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
 import numpy as np 
-from datetime import date 
 
 # =========================
 # Constantes et Configuration
@@ -15,8 +15,7 @@ APP_TITLE = "🛂 Visa Manager - Gestion Complète"
 SID = "vmgr_v6"
 
 # Le dictionnaire codé en dur est vide, il sera rempli par la fonction _build_visa_structure
-VISA_STRUCTURE = {}
-
+VISA_STRUCTURE = {} 
 
 
 # =========================
@@ -69,41 +68,31 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
 def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
     """Nettoie et standardise les types de données du DataFrame Clients."""
     
-    # Nettoyage des noms de colonnes : minuscule et remplacement des non-alphanumériques par '_'
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
     
-    # 1. Standardiser et convertir les nombres financiers 
-    # Ajusté pour inclure la colonne 'honoraires' si 'montant' est manquant dans l'input
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
     for col in money_cols:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.replace(',', '.', regex=False)
             df[col] = df[col].str.replace(r'[^\d.]', '', regex=True)
-            # Conversion en float sécurisée
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float) 
     
-    # 2. Rétablir le solde avec la formule (basé sur la présence des colonnes)
     if 'montant' in df.columns and 'payé' in df.columns:
         df['solde'] = df['montant'] - df['payé']
     elif 'honoraires' in df.columns and 'payé' in df.columns:
-        # Si 'montant' n'existe pas mais 'honoraires' existe, on utilise 'honoraires'
         df['montant'] = df['honoraires'] 
         df['solde'] = df['honoraires'] - df['payé']
-    # Cas où 'montant' et 'payé' sont déjà présents, la formule au-dessus s'applique.
 
-    # 3. Conversion des Dates
     date_cols = ['date', 'dossier_envoyé', 'dossier_approuvé', 'dossier_refusé', 'dossier_annulé']
     for col in date_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
     
-    # 4. Assurer la présence des colonnes clés pour le CRUD
     required_cols = ['dossier_n', 'nom', 'categorie', 'sous_categorie', 'montant', 'payé', 'solde', 'date', 'commentaires']
     for col in required_cols:
         if col not in df.columns:
             df[col] = pd.NA
 
-    # Convertir dossier_n en string pour les opérations de matching
     if 'dossier_n' in df.columns:
         df['dossier_n'] = df['dossier_n'].astype(str).str.strip()
         
@@ -145,17 +134,13 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     
     # 2. Filtrage des lignes valides
     if not option_columns:
-        # Si pas de colonnes d'options, toutes les lignes avec N1/N2 non vides sont valides
         df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
     else:
-        # Trouve les lignes qui ont au moins un '1' dans l'une des colonnes d'options
-        # La colonne '1' est recherchée dans les valeurs converties en string de toutes les options
         df_options = df_temp[option_columns].astype(str).fillna('').replace('nan', '')
         has_indicator = df_options.apply(lambda row: '1' in row.values, axis=1)
         df_valid = df_temp[has_indicator].copy()
     
     if df_valid.empty:
-        # Fallback si le filtrage strict ne fonctionne pas
         df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
         
     # 3. Conversion en dictionnaire hiérarchique N1 -> N2 -> [N4 options]
