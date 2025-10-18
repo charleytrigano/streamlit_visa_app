@@ -156,7 +156,6 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
         # On garde toutes les lignes qui ont soit un indicateur, soit Catégorie/Type remplis
         df_valid = df_temp[has_indicator | df_temp[['N1_Categorie', 'N2_Type']].notna().all(axis=1)].copy()
 
-
     if df_valid.empty:
         df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
 
