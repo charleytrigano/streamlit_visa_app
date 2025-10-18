@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 import numpy as np 
-from datetime import date # Ajout pour les dates dans le formulaire
+from datetime import date 
 
 # =========================
 # Constantes et Configuration
@@ -15,8 +15,7 @@ APP_TITLE = "🛂 Visa Manager - Gestion Complète"
 SID = "vmgr_v6"
 
 # Le dictionnaire codé en dur est vide, il sera rempli par la fonction _build_visa_structure
-# Ligne 18 :
-VISA_STRUCTURE = {}
+VISA_STRUCTURE = {} 
 
 
 # =========================
@@ -31,15 +30,9 @@ def skey(*args) -> str:
 def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) -> pd.DataFrame:
     """
     Lit les données d'un fichier téléchargé (CSV ou Excel).
+    (Code compacté et aligné pour éviter les erreurs U+00A0 et IndentationError)
     """
     
-    # 1. Détection du format (plus tolérante)
-    is_excel = file_name.endswith(('.xls', '.xlsx')) or 'xlsx' in file_name.lower() or 'xls' in file_name.lower()
-    
-    # Assurez-vous que le pointeur est au début du fichier
-    # Ligne 40 (Assurez-vous qu'il n'y a pas d'espace non imprimable à la fin)
-    file_content.seek(0) 
-# 1. Détection du format (plus tolérante)
     is_excel = file_name.endswith(('.xls', '.xlsx')) or 'xlsx' in file_name.lower() or 'xls' in file_name.lower()
     
     # Assurez-vous que le pointeur est au début du fichier
@@ -47,20 +40,16 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
 
     if is_excel:
         try:
-            # Tenter la lecture Excel pour les formats xls/xlsx
             df = pd.read_excel(file_content, header=header_row, engine='openpyxl', dtype=str)
         except Exception as e:
             st.error(f"Erreur de lecture Excel : {e}")
             return pd.DataFrame()
     else:
-        # Tenter la lecture CSV
         try:
-            # Tente de détecter automatiquement le séparateur (sep=None)
             df = pd.read_csv(file_content, header=header_row, sep=None, engine='python', encoding='utf-8', on_bad_lines='skip', dtype=str)
         except UnicodeDecodeError:
             try:
-                # Tente l'encodage Latin1
-                file_content.seek(0) # Reset du pointeur après échec UTF-8
+                file_content.seek(0)
                 df = pd.read_csv(file_content, header=header_row, sep=None, engine='python', encoding='latin1', on_bad_lines='skip', dtype=str)
             except Exception as e:
                 st.error(f"Erreur de lecture CSV (Latin1) : {e}")
@@ -69,8 +58,6 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
             st.error(f"Erreur de lecture CSV : {e}")
             return pd.DataFrame()
             
-    # Nettoyage standard
-    df = df.dropna(axis=1, how='all')   
     # Nettoyage standard
     df = df.dropna(axis=1, how='all')
     df.columns = df.columns.str.strip().fillna('')
@@ -123,7 +110,7 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoie et standardise les types de données du DataFrame Visa."""
+    """Nettoyage simple du DataFrame Visa."""
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
@@ -134,8 +121,7 @@ def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
 def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     """
     Construit la structure de classification VISA à partir du DataFrame Visa.xlsx.
-    (CORRIGÉ pour la structure matricielle du fichier Visa de l'utilisateur :
-     N1=Catégorie, N2=Sous-Catégorie, N4=Noms de colonnes matricielles.)
+    (CORRIGÉ pour la structure matricielle de la feuille Visa.)
     """
     if df_visa.empty:
         return {}
@@ -144,7 +130,7 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     
     cols = df_temp.columns.tolist()
     
-    # Vérification et renommage des deux premières colonnes (N1 et N2)
+    # 1. Vérification et renommage des deux premières colonnes (N1 et N2)
     if len(cols) < 2: 
         st.error("Le fichier Visa doit contenir au moins les colonnes Catégorie et Sous_categories.")
         return {}
@@ -162,18 +148,19 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
         df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
     else:
         # Trouve les lignes qui ont au moins un '1' dans l'une des colonnes d'options
-        has_indicator = df_temp[option_columns].astype(str).apply(lambda row: '1' in row.values, axis=1)
+        # La colonne '1' est recherchée dans les valeurs converties en string de toutes les options
+        df_options = df_temp[option_columns].astype(str).fillna('').replace('nan', '')
+        has_indicator = df_options.apply(lambda row: '1' in row.values, axis=1)
         df_valid = df_temp[has_indicator].copy()
     
     if df_valid.empty:
-        # Fallback si le filtrage strict ne fonctionne pas (peu de chance après l'étape précédente)
+        # Fallback si le filtrage strict ne fonctionne pas
         df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
         
     # 3. Conversion en dictionnaire hiérarchique N1 -> N2 -> [N4 options]
     structure = {}
     
     for _, row in df_valid.iterrows():
-        # Utiliser .get pour la sécurité, mais 'N1_Categorie' et 'N2_Type' devraient exister
         n1_cat = row.get('N1_Categorie', '').strip()
         n2_type = row.get('N2_Type', '').strip()
         
@@ -184,13 +171,12 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
         
         if n2_type not in structure[n1_cat]:
             # N2 est initialisé comme une liste pour stocker les options N4
-            # On utilise une liste car N3 (sous-sous-catégorie) est absent
             structure[n1_cat][n2_type] = [] 
             
         # Parcourir les colonnes d'options (N4) pour cette ligne
         for col_name in option_columns:
             # Si la valeur dans la cellule est '1', le NOM de la colonne est l'option N4
-            if row.get(col_name) == '1': 
+            if str(row.get(col_name)).strip() == '1': 
                 option = col_name.strip()
                 if option and option not in structure[n1_cat][n2_type]:
                     structure[n1_cat][n2_type].append(option)
@@ -202,13 +188,11 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
 # --- FONCTION DE RÉSOLUTION DES NIVEAUX HIERARCHIQUES (ADAPTÉE) ---
 def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Résout les niveaux de classification à partir des données stockées (categorie, sous_categorie) 
-    en utilisant la structure VISA dynamique. (ADAPTÉ à la structure simplifiée N1 -> N2 -> [N4])
-    
-    Retourne (Niveau 2 Type, Niveau 3 Key=None, Niveau 4 Option).
+    Résout les niveaux de classification à partir des données stockées.
+    (ADAPTÉ à la structure simplifiée N1 -> N2 -> [N4])
     """
     level2_type = None 
-    level3_key = None # Toujours None car la structure est N1 -> N2 -> [N4]
+    level3_key = None # Toujours None
     level4_option = None 
 
     if not category or category not in visa_structure:
@@ -217,19 +201,16 @@ def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict)
     sub_cat_stripped = full_sub_cat.strip()
     
     # 1. Extraction de l'Option Niveau 4 (entre parenthèses) et du Niveau 2 Type
-    # Cherche le format "N2_Type (N4_Option)"
     match_paren = re.search(r'\((.+)\)', sub_cat_stripped)
     if match_paren:
         level4_option = match_paren.group(1).strip()
         level2_type_search = sub_cat_stripped[:match_paren.start()].strip()
     else:
-        # Si pas de parenthèse, N2 Type est le full_sub_cat
         level2_type_search = sub_cat_stripped
 
     # 2. Détermination du Niveau 2 parent (Type)
     level2_options = visa_structure.get(category, {})
     
-    # Chercher si le N2_Type_Search est une clé de Niveau 2
     if level2_type_search in level2_options:
          level2_type = level2_type_search
          
@@ -239,25 +220,23 @@ def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict)
          
          # Si level2_type_search est le type final sans option N4
          if not level4_option or not level2_options[level2_type]:
-             return level2_type, None, None # N2 est le type final
+             return level2_type, None, None 
              
     # Fallback: le cas où l'option N4 est le seul élément sauvegardé
     for key_level2, val_level2 in level2_options.items():
         if isinstance(val_level2, list) and level2_type_search in val_level2:
-            # Cela signifie que full_sub_cat est en fait l'option N4, et le N2 est le parent.
             return key_level2, None, level2_type_search 
     
-    # Si rien n'a été trouvé, on retourne l'état non résolu
     return None, None, None
 
 
 # --- FONCTION POUR LA CLASSIFICATION EN CASCADE ---
 def _render_visa_classification_form(
     key_suffix: str, 
-    visa_structure: Dict, # Prend la structure en argument
+    visa_structure: Dict, 
     initial_category: Optional[str] = None, 
     initial_type: Optional[str] = None, 
-    initial_level3_key: Optional[str] = None, # Sera ignoré car N3 est absent
+    initial_level3_key: Optional[str] = None, 
     initial_level4_option: Optional[str] = None
 ) -> Tuple[str, str]:
     """
@@ -304,19 +283,20 @@ def _render_visa_classification_form(
 
             # Dans la nouvelle structure, current_options sera toujours une LISTE (Liste N4)
             if isinstance(current_options, list): 
-                # Cas 1 : Niveau 3 (Liste simple) - Structure 3 Niveaux (N1 -> N2 -> [N4])
                 
-                options_list = [opt for opt in current_options if opt] # Filtrer les chaînes vides
+                options_list = [opt for opt in current_options if opt] 
                 
                 if not options_list:
                     # Si la liste est vide, c'est que le N2 est le type final
                     final_visa_type = selected_type
                 else:
-                    st.subheader(f"3. Option finale pour **{selected_type}** (Niveau 4)")
+                    st.subheader(f"3. Option finale pour **{selected_type}**")
                     
-                    # On utilise initial_level4_option qui contient l'option finale
-                    default_sub_index = options_list.index(initial_level4_option) if initial_level4_option in options_list else 0
-                    
+                    default_sub_index = 0
+                    if initial_level4_option in options_list:
+                        default_sub_index = options_list.index(initial_level4_option)
+
+                    # Le radio button ne permet pas d'avoir "Sélectionner une option" si on veut que l'index 0 soit par défaut.
                     final_selection = st.radio(
                         "Choisissez l'option finale",
                         options_list,
@@ -326,9 +306,6 @@ def _render_visa_classification_form(
                     )
                     # Sauvegarde au format "N2_Type (N4_Option)"
                     final_visa_type = f"{selected_type} ({final_selection})"
-            
-            # La logique pour `elif isinstance(current_options, dict)` (4 niveaux) est désactivée 
-            # par la correction de _build_visa_structure, ce qui simplifie le processus.
             
             else:
                  final_visa_type = selected_type
@@ -662,6 +639,7 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
         next_dossier_n = 13000
         if not df_clients.empty and 'dossier_n' in df_clients.columns:
             try:
+                # Extrait les nombres des numéros de dossier et prend le maximum pour incrémenter
                 numeric_dossiers = df_clients['dossier_n'].astype(str).str.extract(r'(\d+)').astype(float)
                 max_n = numeric_dossiers[pd.notna(numeric_dossiers)].max()
                 next_dossier_n = int(max_n + 1) if not pd.isna(max_n) and max_n >= 12000 else 13000
@@ -840,7 +818,6 @@ def main():
     df_visa = st.session_state.get(skey("df_visa"), pd.DataFrame())
 
     # 4. Construction de la structure VISA si elle n'a pas été faite dans le flow
-    # Ceci gère le cas où l'utilisateur ne recharge pas le fichier VISA mais le DF persiste
     global VISA_STRUCTURE
     if not df_visa.empty and not VISA_STRUCTURE:
         VISA_STRUCTURE = _build_visa_structure(df_visa)
