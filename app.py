@@ -18,7 +18,6 @@ SID = "vmgr_v7"
 VISA_STRUCTURE = {}
 
 # Mappage statique des options de Niveau 4 (colonnes) vers leur Groupe de Niveau 3 (N3)
-# Ce mappage est la clé pour structurer les 4 niveaux.
 N4_TO_N3_MAP = {
     # Statut/Modalité
     '1-COS': 'Statut de Processus',
@@ -26,7 +25,7 @@ N4_TO_N3_MAP = {
     '1-Inv.': 'Statut de Processus',
     '2-CP': 'Statut de Processus',
     '3-USCIS': 'Statut de Processus',
-    '1-CP': 'Statut de Processus',  # Peut être ambigu, mais utilisé pour les chemins généraux
+    '1-CP': 'Statut de Processus',
     '2-USCIS': 'Statut de Processus',
 
     # Cycle de Vie
@@ -45,16 +44,16 @@ N4_TO_N3_MAP = {
 
     # Résidence Permanente (Investissement)
     '1-I-526': 'Voie EB-5 (Investissement)',
-    '2-AOS': 'Voie EB-5 (Investissement)', # Duplicat mais spécifique à EB-5 ici
+    '2-AOS': 'Voie EB-5 (Investissement)',
     '3-I527 & AOS': 'Voie EB-5 (Investissement)',
-    '4-CP': 'Voie EB-5 (Investissement)', # Duplicat mais spécifique à EB-5 ici
+    '4-CP': 'Voie EB-5 (Investissement)',
     '1--829': 'Voie EB-5 (Investissement)',
 
     # Résidence Permanente (Famille)
     '2-I-130': 'Voie Familiale',
-    '3-AOS': 'Voie Familiale', # Duplicat mais spécifique à Famille ici
+    '3-AOS': 'Voie Familiale',
     '4-I-130 & AOS': 'Voie Familiale',
-    '5-CP': 'Voie Familiale', # Duplicat mais spécifique à Famille ici
+    '5-CP': 'Voie Familiale',
 
     # Nature de la Demande
     'Traditional': 'Nature de la Demande',
@@ -71,8 +70,8 @@ N4_TO_N3_MAP = {
 
     # Consultation
     'Consultation': 'Consultation',
-    'Analysis': 'Consultation',
-    'Referal': 'Consultation',
+    'Analysis': 'Analysis',
+    'Referal': 'Referal',
     
     # Assurer une catégorie pour les options oubliées
     'Autre Option N4': 'Divers'
@@ -90,10 +89,7 @@ def skey(*args) -> str:
 
 @st.cache_data(show_spinner="Lecture du fichier...")
 def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) -> pd.DataFrame:
-    """
-    Lit les données d'un fichier téléchargé (CSV ou Excel).
-    (Code de la fonction _read_data_file inchangé)
-    """
+    """Lit les données d'un fichier téléchargé (CSV ou Excel)."""
     is_excel = file_name.endswith(('.xls', '.xlsx')) or 'xlsx' in file_name.lower() or 'xls' in file_name.lower()
 
     file_content.seek(0)
@@ -142,9 +138,7 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
 
 
 def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoie et standardise les types de données du DataFrame Clients.
-    (Code de la fonction _clean_clients_data inchangé)
-    """
+    """Nettoie et standardise les types de données du DataFrame Clients."""
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
 
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
@@ -178,9 +172,7 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoyage simple du DataFrame Visa.
-    (Code de la fonction _clean_visa_data inchangé)
-    """
+    """Nettoyage simple du DataFrame Visa."""
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
@@ -256,7 +248,6 @@ def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict)
     sub_cat_stripped = str(full_sub_cat).strip()
 
     # Pattern pour extraire: Type (Groupe N3 - Option N4)
-    # Ex: 'E-2 (Statut de Processus - 1-COS)'
     match = re.search(r'^(.*)\s\((.*?)\s-\s(.+?)\)$', sub_cat_stripped)
 
     if match:
@@ -273,14 +264,12 @@ def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict)
     # Fallback au cas où l'ancien format 'Type (Option N4)' ou juste 'Type' était sauvegardé
     match_old_format = re.search(r'^(.*)\s\((.+?)\)$', sub_cat_stripped)
     if match_old_format:
-        # Tente de résoudre l'ancienne N4 option
         level4_option_search = match_old_format.group(2).strip()
         level2_type_search = match_old_format.group(1).strip()
         
         if level2_type_search in visa_structure.get(category, {}):
             for n3_group, n4_list in visa_structure[category][level2_type_search].items():
                 if level4_option_search in n4_list:
-                    # On a trouvé la N4, on déduit la N3
                     return level2_type_search, n3_group, level4_option_search
     
     # Si seul le N2 Type est stocké
@@ -301,9 +290,7 @@ def _render_visa_classification_form(
 ) -> Tuple[str, str]:
     """
     Affiche les selectbox en cascade pour la classification des visas (N1 > N2 > N3 > N4) et renvoie
-    (categorie_n1, sous_categorie_finale) où sous_categorie_finale a le format:
-    - "Type" si pas d'option N3/N4
-    - "Type (N3 Groupe - N4 Option)" si option finale choisie (ex: 'E-2 (Statut de Processus - 1-COS)')
+    (categorie_n1, sous_categorie_finale).
     """
     col_cat, col_type = st.columns(2)
 
@@ -340,7 +327,6 @@ def _render_visa_classification_form(
             options_n3 = selected_options_n2.get(selected_type)
 
             if not options_n3:
-                 # Pas d'options N3/N4 définies, le N2 est la classification finale.
                  final_visa_type_saved = selected_type
             else:
                 st.markdown("---")
@@ -367,7 +353,6 @@ def _render_visa_classification_form(
                             st.subheader(f"4. Option Finale (N4)")
                             st.caption("Boutons Bascules (COS, EOS, etc.)")
                         
-                            # Définir l'index initial pour les boutons radio
                             default_n4_index = 0
                             if initial_level4_option in options_n4_list:
                                 default_n4_index = options_n4_list.index(initial_level4_option)
@@ -382,13 +367,10 @@ def _render_visa_classification_form(
                             # Format de sauvegarde N2 (N3 - N4) -> Ex: "E-2 (Statut de Processus - 1-COS)"
                             final_visa_type_saved = f"{selected_type} ({selected_group_n3} - {final_selection_n4})"
                     else:
-                        # N3 sélectionné mais pas d'options N4 définies (ne devrait pas arriver avec la logique _build)
                         final_visa_type_saved = selected_type
                 else:
-                    # N2 sélectionné mais pas de N3 sélectionné
                     final_visa_type_saved = selected_type
         
-    # Si rien n'est sélectionné au-delà de N1
     if not final_visa_type_saved and selected_type and selected_type != "Sélectionnez un type":
         final_visa_type_saved = selected_type
     if not final_visa_type_saved:
@@ -398,9 +380,7 @@ def _render_visa_classification_form(
 
 
 def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calcule les métriques clés pour l'affichage.
-    (Code de la fonction _summarize_data inchangé)
-    """
+    """Calcule les métriques clés pour l'affichage."""
     if df.empty:
         return {
             "total_clients": 0, "clients_actifs": 0, "clients_payés": 0,
@@ -429,9 +409,7 @@ def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
 
 
 def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str) -> pd.DataFrame:
-    """Ajoute, Modifie ou Supprime un client. Centralisation des actions CRUD.
-    (Code de la fonction _update_client_data inchangé)
-    """
+    """Ajoute, Modifie ou Supprime un client. Centralisation des actions CRUD."""
     dossier_n = str(new_data.get('dossier_n')).strip()
 
     if not dossier_n or dossier_n.lower() in ('nan', 'none', 'na', ''):
@@ -513,9 +491,7 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
 
 
 def upload_section():
-    """Section de chargement des fichiers (Barre latérale).
-    (Code de la fonction upload_section inchangé)
-    """
+    """Section de chargement des fichiers (Barre latérale)."""
     st.sidebar.header("📁 Chargement des Fichiers")
 
     header_clients = st.sidebar.number_input(
@@ -567,9 +543,7 @@ def upload_section():
 
 
 def data_processing_flow():
-    """Gère le chargement, le nettoyage et le stockage des DataFrames.
-    (Code de la fonction data_processing_flow inchangé)
-    """
+    """Gère le chargement, le nettoyage et le stockage des DataFrames."""
     header_clients = st.session_state.get(skey("header_clients_row"), 0)
     header_visa = st.session_state.get(skey("header_visa_row"), 0)
 
@@ -611,9 +585,7 @@ def data_processing_flow():
 
 
 def home_tab(df_clients: pd.DataFrame):
-    """Contenu de l'onglet Accueil/Statistiques.
-    (Code de la fonction home_tab inchangé)
-    """
+    """Contenu de l'onglet Accueil/Statistiques."""
     st.header("📊 Statistiques Clés")
 
     if df_clients.empty:
@@ -640,9 +612,7 @@ def home_tab(df_clients: pd.DataFrame):
 
 
 def accounting_tab(df_clients: pd.DataFrame):
-    """Contenu de l'onglet Comptabilité (Suivi financier).
-    (Code de la fonction accounting_tab inchangé)
-    """
+    """Contenu de l'onglet Comptabilité (Suivi financier)."""
     st.header("📈 Suivi Financier (Comptabilité Client)")
 
     if df_clients.empty:
@@ -708,9 +678,7 @@ def accounting_tab(df_clients: pd.DataFrame):
 
 
 def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
-    """Contenu de l'onglet Saisie/Modification/Suppression de Dossiers.
-    (Seules les parties concernant l'affichage de la classification N1 > N2 > N3 > N4 ont été modifiées)
-    """
+    """Contenu de l'onglet Saisie/Modification/Suppression de Dossiers."""
     st.header("📝 Gestion des Dossiers Clients (CRUD)")
 
     if not visa_structure:
@@ -786,16 +754,24 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                     key=skey("form_add", "dossier_n_sub"), 
                     disabled=True 
                 )
+                # Le numéro de dossier final est le calculé
+                dossier_n = dossier_n_value
                 
             else:
-                dossier_n_value = str(next_dossier_n)
+                dossier_n_suggered = str(next_dossier_n)
+                
+                # CORRECTION DU BUG DE RÉINITIALISATION :
+                # On récupère la valeur entrée par l'utilisateur lors du re-run, sinon on prend la suggestion.
+                initial_main_dossier = st.session_state.get(skey("form_add", "dossier_n_main"), dossier_n_suggered)
+                
                 col_parent.text_input(
                     "Numéro de Dossier Principal (Suggéré)", 
-                    value=dossier_n_value, 
+                    value=initial_main_dossier, 
                     key=skey("form_add", "dossier_n_main")
                 )
-            
-            dossier_n = st.session_state.get(skey("form_add", "dossier_n_sub"), st.session_state.get(skey("form_add", "dossier_n_main"), dossier_n_value))
+                # Le numéro de dossier final est la valeur actuelle du champ (stockée dans session_state)
+                dossier_n = st.session_state.get(skey("form_add", "dossier_n_main"), dossier_n_suggered)
+
 
             client_name = st.text_input("Nom du Client", value=client_name_value, key=skey("form_add", "nom"))
             
@@ -862,7 +838,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                 initial_cat = str(current_data.get('categorie', '')).strip()
                 initial_sub_cat = str(current_data.get('sous_categorie', '')).strip()
 
-                # Résolution de la structure 4 niveaux à partir des données sauvegardées
                 n2_type, n3_group, n4_option = _resolve_visa_levels(initial_cat, initial_sub_cat, visa_structure)
 
                 with st.form("modify_client_form"):
