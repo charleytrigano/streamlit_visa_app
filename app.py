@@ -59,6 +59,12 @@ def _fmt_money(v: float) -> str:
         return "$0.00"
 
 def _date_for_widget(val: Any) -> date:
+    """
+    Convertit différentes représentations en date pour st.date_input.
+    Si la valeur est None ou non convertible, retourne la date du jour.
+    (Nous utilisons une valeur par défaut solide pour éviter les erreurs
+    avec st.date_input qui peut ne pas accepter None selon la version.)
+    """
     if isinstance(val, date):
         return val
     if isinstance(val, datetime):
@@ -81,6 +87,7 @@ def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
                 out[c] = 0
             else:
                 out[c] = ""
+    # ensure column order
     return out[cols]
 
 def _normalize_clients_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -91,6 +98,7 @@ def _normalize_clients_numeric(df: pd.DataFrame) -> pd.DataFrame:
     if "Montant honoraires (US $)" in df.columns and "Autres frais (US $)" in df.columns:
         total = df["Montant honoraires (US $)"] + df["Autres frais (US $)"]
         paye = df["Payé"] if "Payé" in df.columns else 0.0
+        # compute solde but allow negative if needed (we keep clip to 0 to match previous behavior)
         df["Solde"] = (total - paye).clip(lower=0.0)
     return df
 
@@ -103,6 +111,13 @@ def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Normalise un DataFrame clients importé pour correspondre aux colonnes attendues.
+    - Rename des variantes de colonnes fréquentes
+    - Ensure presence of standard columns
+    - Normalisation des nombres et statut
+    - Ajout des colonnes temporelles (_Année_, _MoisNum_, Mois)
+    """
     if df is None or df.empty:
         return pd.DataFrame(columns=COLS_CLIENTS)
     df = df.copy()
@@ -134,7 +149,7 @@ def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df["Commentaires"] = df["Commentaires"].astype(str)
     try:
         dser = pd.to_datetime(df["Date"], errors="coerce")
-        # Standardize to use accented column name _Année_
+        # Standard column name with accent (consistent across app)
         df["_Année_"] = dser.dt.year.fillna(0).astype(int)
         df["_MoisNum_"] = dser.dt.month.fillna(0).astype(int)
         df["Mois"] = df["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if m and m == m else "")
@@ -145,15 +160,31 @@ def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     return df
 
 def read_any_table(src: Any, sheet: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """
+    Lit un fichier provenant d'un path, d'un UploadedFile ou d'un BytesIO.
+    Retourne None si la lecture échoue.
+    """
     if src is None:
         return None
     if hasattr(src, "read") and hasattr(src, "name"):
+        # streamlit uploaded file
         name = src.name.lower()
         data = src.read()
         bio = BytesIO(data)
         if name.endswith(".csv"):
-            return pd.read_csv(bio)
-        return pd.read_excel(bio, sheet_name=(sheet if sheet else 0))
+            try:
+                return pd.read_csv(bio)
+            except Exception:
+                bio.seek(0)
+                return pd.read_csv(bio, encoding="latin1", on_bad_lines="skip")
+        try:
+            return pd.read_excel(bio, sheet_name=(sheet if sheet else 0))
+        except Exception:
+            bio.seek(0)
+            try:
+                return pd.read_csv(bio)
+            except Exception:
+                return None
     if isinstance(src, (str, os.PathLike)):
         p = str(src)
         if not os.path.exists(p):
@@ -166,8 +197,11 @@ def read_any_table(src: Any, sheet: Optional[str] = None) -> Optional[pd.DataFra
             bio2 = BytesIO(src.getvalue())
             return pd.read_excel(bio2, sheet_name=(sheet if sheet else 0))
         except Exception:
-            src.seek(0)
-            return pd.read_csv(src)
+            try:
+                src.seek(0)
+                return pd.read_csv(src)
+            except Exception:
+                return None
     return None
 
 def read_sheet_from_path(path: str, sheet_name: str) -> Optional[pd.DataFrame]:
@@ -269,7 +303,7 @@ def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
             dd = pd.to_datetime(df["Date"], errors="coerce")
         except Exception:
             dd = pd.to_datetime(pd.Series([], dtype="datetime64[ns]"))
-        # Standardized accented column names for year
+        # Standardized accented column names for year/month used across the app
         df["_Année_"] = dd.dt.year
         df["_MoisNum_"] = dd.dt.month
         df["Mois"] = dd.dt.month.apply(lambda m: f"{int(m):02d}" if pd.notna(m) else "")
@@ -316,7 +350,7 @@ save_dir_in = st.sidebar.text_input("Dossier de sauvegarde", value=last_save_dir
 if st.sidebar.button("📥 Charger", key=skey("btn_load")):
     save_last_paths(clients_path_in, visa_path_in, save_dir_in)
     st.success("Chemins mémorisés. Re-lancement pour prise en compte.")
-    st.rerun()
+    st.experimental_rerun()
 
 # Lecture des fichiers
 clients_src = up_clients if up_clients is not None else (clients_path_in if clients_path_in else last_clients)
@@ -341,6 +375,7 @@ with st.expander("📄 Fichiers chargés", expanded=True):
 # Construction de la carte Visa
 visa_map = build_visa_map(df_visa_raw)
 
+# Normalisation et ajout des time features
 df_all = _ensure_time_features(df_clients_raw)
 
 # === Persist dataframe "live" across reruns ===
@@ -670,10 +705,11 @@ with tabs[5]:
             comm = st.text_area("Commentaires", "", key=skey("add", "com"))
 
             s1, s2 = st.columns(2)
-            sent_d = s1.date_input("Date denvoi", value=None, key=skey("add", "sentd"))
-            acc_d = s1.date_input("Date dacceptation", value=None, key=skey("add", "accd"))
-            ref_d = s2.date_input("Date de refus", value=None, key=skey("add", "refd"))
-            ann_d = s2.date_input("Date dannulation", value=None, key=skey("add", "annd"))
+            # Use _date_for_widget to provide a safe default (today) if user doesn't enter a date
+            sent_d = s1.date_input("Date denvoi", value=_date_for_widget(None), key=skey("add", "sentd"))
+            acc_d = s1.date_input("Date dacceptation", value=_date_for_widget(None), key=skey("add", "accd"))
+            ref_d = s2.date_input("Date de refus", value=_date_for_widget(None), key=skey("add", "refd"))
+            ann_d = s2.date_input("Date dannulation", value=_date_for_widget(None), key=skey("add", "annd"))
             rfe = st.checkbox("RFE", value=False, key=skey("add", "rfe"))
 
             if st.button("💾 Enregistrer", key=skey("add", "save")):
