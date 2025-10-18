@@ -642,6 +642,82 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
 
     tab_add, tab_modify, tab_delete = st.tabs(["➕ Ajouter un Dossier", "✍️ Modifier un Dossier", "🗑️ Supprimer un Dossier"])
 
+    paye_initial = col_paye.number_input(
+                    "Total Payé (Payé)",
+                    min_value=0.0,
+                    step=100.0,
+                    value=current_data.get('payé', 0.0), # Valeur pré-remplie
+                    key=skey("form_mod", "payé")
+                )
+
+                st.markdown("### Notes")
+                commentaires = st.text_area(
+                    "Commentaires",
+                    value=current_data.get('commentaires', ''), # Valeur pré-remplie
+                    key=skey("form_mod", "commentaires")
+                )
+
+                submitted_mod = st.form_submit_button("✍️ Modifier le Dossier")
+
+                if submitted_mod:
+                    new_data = {
+                        'dossier_n': selected_dossier_n,
+                        'nom': client_name,
+                        'date': date_dossier,
+                        'categorie': cat_n1,
+                        'sous_categorie': sub_cat_final,
+                        'montant': montant_facture,
+                        'payé': paye_initial,
+                        'commentaires': commentaires,
+                    }
+                    # Appel de la fonction CRUD avec action "MODIFY"
+                    st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "MODIFY")
+                    st.rerun() # Rafraîchir l'application pour montrer le succès
+
+            else:
+                st.info("Sélectionnez un dossier ci-dessus pour afficher ses détails.")
+
+    # =========================================================================
+    # LOGIQUE DE SUPPRESSION (DELETE)
+    # =========================================================================
+    with tab_delete:
+        st.subheader("Supprimer définitivement un dossier client")
+        if df_clients.empty:
+            st.info("Veuillez charger des dossiers clients pour pouvoir les supprimer.")
+            return
+
+        df_clients_for_select = df_clients[['dossier_n', 'nom']].dropna(subset=['dossier_n'])
+        client_options = {
+            f"{r['dossier_n']} - {r['nom']}": r['dossier_n']
+            for _, r in df_clients_for_select.iterrows()
+        }
+
+        selected_key_del = st.selectbox(
+            "Sélectionner le Dossier à Supprimer",
+            ["Sélectionnez un dossier"] + list(client_options.keys()),
+            key=skey("delete", "select_client")
+        )
+
+        selected_dossier_n_del = None
+        if selected_key_del != "Sélectionnez un dossier":
+            selected_dossier_n_del = client_options.get(selected_key_del)
+            client_name_del = selected_key_del.split(' - ')[1]
+
+            st.error(f"⚠️ Confirmation : Vous allez **SUPPRIMER DÉFINITIVEMENT** le dossier N° **{selected_dossier_n_del}** (Client : **{client_name_del}**).")
+            st.warning("Cette action est irréversible et supprime le dossier de la base de données actuelle.")
+
+            with st.form("delete_client_form"):
+                # Un champ caché pour passer l'ID au formulaire
+                st.text_input("Dossier à supprimer (Confirmation)", value=selected_dossier_n_del, disabled=True, label_visibility="collapsed", key=skey("form_del", "dossier_n"))
+                
+                submitted_del = st.form_submit_button("🗑️ Confirmer la Suppression Définitive", type="primary")
+
+                if submitted_del and selected_dossier_n_del:
+                    data_to_delete = {'dossier_n': selected_dossier_n_del}
+                    # Appel de la fonction CRUD avec action "DELETE"
+                    st.session_state[skey("df_clients")] = _update_client_data(df_clients, data_to_delete, "DELETE")
+                    st.rerun() # Rafraîchir l'application
+
     # =========================================================================
     # LOGIQUE D'AJOUT (ADD)
     # =========================================================================
