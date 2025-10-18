@@ -153,7 +153,9 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     else:
         df_options = df_temp[option_columns].astype(str).fillna('').replace('nan', '')
         has_indicator = df_options.apply(lambda row: '1' in row.values, axis=1)
-        df_valid = df_temp[has_indicator].copy()
+        # On garde toutes les lignes qui ont soit un indicateur, soit Catégorie/Type remplis
+        df_valid = df_temp[has_indicator | df_temp[['N1_Categorie', 'N2_Type']].notna().all(axis=1)].copy()
+
 
     if df_valid.empty:
         df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
@@ -173,6 +175,7 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
             structure[n1_cat][n2_type] = []
 
         for col_name in option_columns:
+            # Vérifie si la colonne d'option est activée ('1')
             if str(row.get(col_name)).strip() == '1':
                 option = str(col_name).strip()
                 if option and option not in structure[n1_cat][n2_type]:
@@ -192,7 +195,7 @@ def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict)
 
     sub_cat_stripped = str(full_sub_cat).strip()
 
-    # Si la sous-catégorie contient une option entre parenthèses, on la sépare
+    # Si la sous-catégorie contient une option entre parenthèses (format "Type (Option)"), on la sépare
     match_paren = re.search(r'\((.+)\)', sub_cat_stripped)
     if match_paren:
         level4_option = match_paren.group(1).strip()
@@ -230,7 +233,7 @@ def _render_visa_classification_form(
     Affiche les selectbox en cascade pour la classification des visas et renvoie
     (categorie_n1, sous_categorie_finale) où sous_categorie_finale a le format:
     - "Type" si pas d'option N4
-    - "Type (Option)" si option finale choisie
+    - "Type (Option)" si option finale choisie (ex: 'E-2 (1-COS)')
     """
     col_cat, col_type = st.columns(2)
 
@@ -266,13 +269,17 @@ def _render_visa_classification_form(
             current_options = selected_options.get(selected_type)
 
             if isinstance(current_options, list):
+                # Les options N4 sont les "boutons bascules" (COS, EOS, etc.)
                 options_list = [opt for opt in current_options if opt]
 
                 if not options_list:
-                    # N2 final
+                    # N2 final (pas d'options N4 définies dans la matrice)
                     final_visa_type = selected_type
                 else:
-                    st.subheader(f"3. Option finale pour **{selected_type}**")
+                    st.subheader(f"3. Option de Dépôt / Classification pour **{selected_type}**")
+                    st.caption("Ces options correspondent aux colonnes `1-COS`, `2-EOS`, etc. dans votre matrice Visa.")
+                    
+                    # Définir l'index initial pour les boutons radio
                     default_sub_index = 0
                     if initial_level4_option in options_list:
                         default_sub_index = options_list.index(initial_level4_option)
@@ -282,8 +289,9 @@ def _render_visa_classification_form(
                         options_list,
                         index=default_sub_index,
                         key=skey("form", key_suffix, "sub1"),
-                        horizontal=True
+                        horizontal=True # Affichage en ligne des boutons bascules
                     )
+                    # Format de sauvegarde : Type (Option) -> Ex: "E-2 (1-COS)"
                     final_visa_type = f"{selected_type} ({final_selection})"
             else:
                 final_visa_type = selected_type
@@ -349,6 +357,11 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
     new_df_row = pd.DataFrame([new_data])
     new_df_row.columns = new_df_row.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
 
+    # Remplir les colonnes manquantes du DF principal si elles existent dans la nouvelle ligne
+    for col in new_df_row.columns:
+        if col not in df.columns:
+            df[col] = pd.NA
+            
     money_cols = ['payé', 'montant']
     for col in money_cols:
         if col in new_df_row.columns:
@@ -357,6 +370,16 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
     montant = new_df_row['montant'].iloc[0] if 'montant' in new_df_row.columns else 0.0
     paye = new_df_row['payé'].iloc[0] if 'payé' in new_df_row.columns else 0.0
     new_df_row['solde'] = montant - paye
+
+    # Traitement des dates (pour l'ajout)
+    date_cols = ['date', 'dossier_envoyé', 'dossier_approuvé', 'dossier_refusé', 'dossier_annulé']
+    for col in date_cols:
+        if col in new_df_row.columns and new_df_row[col].iloc[0] is not None:
+             try:
+                 # Assure que la valeur est convertie en datetime pour correspondre au type du DF
+                 new_df_row[col] = pd.to_datetime(new_df_row[col])
+             except:
+                 new_df_row[col] = pd.NaT # Not a Time
 
     # MODIFY
     if action == "MODIFY":
@@ -368,8 +391,6 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
             idx_to_modify = matching_rows.index[0]
 
             for col in new_df_row.columns:
-                if col not in df.columns:
-                    df[col] = pd.NA
                 df.loc[idx_to_modify, col] = new_df_row[col].iloc[0]
 
             st.cache_data.clear()
@@ -384,10 +405,6 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
         if 'dossier_n' in df.columns and (df['dossier_n'].astype(str) == dossier_n).any():
             st.error(f"Le Dossier N° {dossier_n} existe déjà. Utilisez l'onglet 'Modifier'.")
             return df
-
-        for col in new_df_row.columns:
-            if col not in df.columns:
-                df[col] = pd.NA
 
         updated_df = pd.concat([df, new_df_row], ignore_index=True)
         st.cache_data.clear()
@@ -594,7 +611,7 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
 
     tab_add, tab_modify, tab_delete = st.tabs(["➕ Ajouter un Dossier", "✍️ Modifier un Dossier", "🗑️ Supprimer un Dossier"])
 
-    # Préparer les options clients pour les selectbox si df_clients non vide
+    # Préparer les options clients pour les selectbox
     client_options = {}
     if not df_clients.empty and 'dossier_n' in df_clients.columns:
         df_clients_for_select = df_clients[['dossier_n', 'nom']].dropna(subset=['dossier_n'])
@@ -606,10 +623,14 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
     # ADD
     with tab_add:
         st.subheader("Ajouter un nouveau dossier client")
+        
+        # 1. Calcul du prochain N° de Dossier Principal (Base Number)
         next_dossier_n = 13000
         if not df_clients.empty and 'dossier_n' in df_clients.columns:
             try:
-                numeric_dossiers = df_clients['dossier_n'].astype(str).str.extract(r'(\d+)').astype(float)
+                # Extraire les numéros de base (avant le premier '-') et trouver le max
+                base_dossiers = df_clients['dossier_n'].astype(str).str.split('-').str[0]
+                numeric_dossiers = base_dossiers.str.extract(r'(\d+)').astype(float)
                 max_n = numeric_dossiers[pd.notna(numeric_dossiers)].max()
                 next_dossier_n = int(max_n + 1) if not pd.isna(max_n) and max_n >= 12000 else 13000
             except:
@@ -617,24 +638,87 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
 
         with st.form("add_client_form"):
             st.markdown("---")
-            col_id, col_name, col_date = st.columns(3)
+            
+            # --- 1. Identification du Dossier (Inclus Sous-Dossier) ---
+            st.markdown("#### 1. Identification du Dossier")
+            col_parent, col_date = st.columns(2)
+            
+            # LOGIQUE SOUS-DOSSIER
+            parent_dossier_options = ["Nouveau Dossier Principal"] + list(client_options.keys())
+            selected_parent_key = col_parent.selectbox(
+                "Type de Dossier à Ajouter",
+                parent_dossier_options,
+                key=skey("form_add", "parent_select"),
+                help="Sélectionnez un dossier existant pour créer un sous-dossier (ex: XXX-01)."
+            )
+            
+            is_sub_dossier = selected_parent_key != "Nouveau Dossier Principal"
+            dossier_n_value = ""
+            client_name_value = ""
 
-            dossier_n = col_id.text_input("Numéro de Dossier", value=str(next_dossier_n), key=skey("form_add", "dossier_n"))
-            client_name = col_name.text_input("Nom du Client", key=skey("form_add", "nom"))
-            date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=date.today(), key=skey("form_add", "date"))
+            if is_sub_dossier:
+                base_dossier_n = client_options.get(selected_parent_key, "")
+                
+                # Calcule le prochain suffixe (-01, -02, etc.)
+                pattern = re.compile(f"^{re.escape(base_dossier_n)}(-\d+)?$")
+                sub_dossiers = df_clients['dossier_n'].astype(str).loc[df_clients['dossier_n'].astype(str).apply(lambda x: pattern.match(x) is not None)]
+                
+                max_suffix = 0
+                if not sub_dossiers.empty:
+                    suffixes = sub_dossiers.str.extract(r'-(\d+)$', expand=False).dropna().astype(int)
+                    if not suffixes.empty:
+                        max_suffix = suffixes.max()
 
-            st.markdown("### Classification Visa")
+                next_suffix = max_suffix + 1
+                dossier_n_value = f"{base_dossier_n}-{next_suffix:02d}"
+
+                parent_name = selected_parent_key.split(' - ', 1)[1] if ' - ' in selected_parent_key else ""
+                client_name_value = parent_name # Le nom du client est pré-rempli avec le nom du dossier parent
+                
+                col_parent.text_input(
+                    "Numéro de Dossier (Sous-Dossier Auto)", 
+                    value=dossier_n_value, 
+                    key=skey("form_add", "dossier_n_sub"), 
+                    disabled=True 
+                )
+                
+            else:
+                dossier_n_value = str(next_dossier_n)
+                col_parent.text_input(
+                    "Numéro de Dossier Principal (Suggéré)", 
+                    value=dossier_n_value, 
+                    key=skey("form_add", "dossier_n_main")
+                )
+            
+            # Utilise la valeur calculée/suggérée/saisie pour le dictionnaire final
+            dossier_n = st.session_state.get(skey("form_add", "dossier_n_sub"), st.session_state.get(skey("form_add", "dossier_n_main"), dossier_n_value))
+
+            client_name = st.text_input("Nom du Client", value=client_name_value, key=skey("form_add", "nom"))
+            
+            date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=date.today(), key=skey("form_add", "date"), format="DD/MM/YYYY")
+            # FIN LOGIQUE SOUS-DOSSIER
+
+            st.markdown("### 2. Classification Visa")
             cat_n1, sub_cat_final = _render_visa_classification_form(
                 key_suffix="add",
                 visa_structure=visa_structure,
             )
 
-            st.markdown("### Finance")
+            st.markdown("### 3. Finance")
             col_montant, col_paye = st.columns(2)
             montant_facture = col_montant.number_input("Total Facturé (Montant)", min_value=0.0, step=100.0, key=skey("form_add", "montant"))
             paye_initial = col_paye.number_input("Paiement Initial Reçu (Payé)", min_value=0.0, step=100.0, key=skey("form_add", "payé"))
 
-            st.markdown("### Notes")
+            st.markdown("### 4. État du Dossier (Dates Clés)")
+            # Nouveaux champs pour le suivi de l'état du dossier
+            col_sent, col_approved, col_refused, col_cancelled = st.columns(4)
+            date_envoye = col_sent.date_input("Dossier Envoyé", value=None, key=skey("form_add", "dossier_envoyé"), format="DD/MM/YYYY")
+            date_approuve = col_approved.date_input("Dossier Approuvé", value=None, key=skey("form_add", "dossier_approuvé"), format="DD/MM/YYYY")
+            date_refuse = col_refused.date_input("Dossier Refusé", value=None, key=skey("form_add", "dossier_refusé"), format="DD/MM/YYYY")
+            date_annule = col_cancelled.date_input("Dossier Annulé", value=None, key=skey("form_add", "dossier_annulé"), format="DD/MM/YYYY")
+
+
+            st.markdown("### 5. Notes")
             commentaires = st.text_area("Commentaires", key=skey("form_add", "commentaires"))
 
             submitted = st.form_submit_button("➕ Ajouter le Dossier")
@@ -648,6 +732,11 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                     'sous_categorie': sub_cat_final,
                     'montant': montant_facture,
                     'payé': paye_initial,
+                    # Ajout des nouvelles dates d'état
+                    'dossier_envoyé': date_envoye,
+                    'dossier_approuvé': date_approuve,
+                    'dossier_refusé': date_refuse,
+                    'dossier_annulé': date_annule,
                     'commentaires': commentaires,
                 }
                 st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "ADD")
@@ -681,16 +770,19 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                     col_id.text_input("Numéro de Dossier", value=selected_dossier_n, disabled=True)
                     client_name = col_name.text_input("Nom du Client", value=current_data.get('nom', ''), key=skey("form_mod", "nom"))
 
-                    current_date = current_data.get('date')
-                    if pd.isna(current_date):
-                        date_value = date.today()
-                    else:
+                    # Fonction utilitaire locale pour gérer la conversion des dates
+                    def _get_current_date(data, col_name):
+                        val = data.get(col_name)
+                        # Vérifie si la valeur est NaN, NaT, ou vide
+                        if pd.isna(val) or val is None:
+                            return None
                         try:
-                            date_value = pd.to_datetime(current_date).date()
+                            # Tente de convertir en date.date()
+                            return pd.to_datetime(val).date()
                         except:
-                            date_value = date.today()
+                            return None
 
-                    date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=date_value, key=skey("form_mod", "date"))
+                    date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=_get_current_date(current_data, 'date'), key=skey("form_mod", "date"), format="DD/MM/YYYY")
 
                     st.markdown("### Classification Visa")
                     cat_n1, sub_cat_final = _render_visa_classification_form(
@@ -718,6 +810,15 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                         key=skey("form_mod", "payé")
                     )
 
+                    st.markdown("### État du Dossier (Dates Clés)")
+                    # Affichage des dates d'état existantes pour modification
+                    col_sent, col_approved, col_refused, col_cancelled = st.columns(4)
+                    date_envoye = col_sent.date_input("Dossier Envoyé", value=_get_current_date(current_data, 'dossier_envoyé'), key=skey("form_mod", "dossier_envoyé"), format="DD/MM/YYYY")
+                    date_approuve = col_approved.date_input("Dossier Approuvé", value=_get_current_date(current_data, 'dossier_approuvé'), key=skey("form_mod", "dossier_approuvé"), format="DD/MM/YYYY")
+                    date_refuse = col_refused.date_input("Dossier Refusé", value=_get_current_date(current_data, 'dossier_refusé'), key=skey("form_mod", "dossier_refusé"), format="DD/MM/YYYY")
+                    date_annule = col_cancelled.date_input("Dossier Annulé", value=_get_current_date(current_data, 'dossier_annulé'), key=skey("form_mod", "dossier_annulé"), format="DD/MM/YYYY")
+
+
                     st.markdown("### Notes")
                     commentaires = st.text_area("Commentaires", value=current_data.get('commentaires', ''), key=skey("form_mod", "commentaires"))
 
@@ -732,6 +833,10 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                             'sous_categorie': sub_cat_final,
                             'montant': montant_facture,
                             'payé': paye_initial,
+                            'dossier_envoyé': date_envoye,
+                            'dossier_approuvé': date_approuve,
+                            'dossier_refusé': date_refuse,
+                            'dossier_annulé': date_annule,
                             'commentaires': commentaires,
                         }
                         st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "MODIFY")
@@ -770,26 +875,35 @@ def main():
     df_visa = st.session_state.get(skey("df_visa"), pd.DataFrame())
 
     global VISA_STRUCTURE
+    # Reconstruire la structure Visa si le DF est là mais la structure est vide (ex: après un st.rerun)
     if not df_visa.empty and not VISA_STRUCTURE:
         VISA_STRUCTURE = _build_visa_structure(df_visa)
-
+        
     if df_clients.empty and df_visa.empty:
-        st.info("Veuillez charger vos fichiers Clients et/ou Visa pour commencer.")
+        st.info("Bienvenue ! Veuillez commencer par charger vos fichiers Clients et Visa dans la barre latérale.")
+        return
 
-    tabs = st.tabs(["🏠 Accueil / Stats", "📈 Comptabilité", "📝 Gestion des Dossiers", "⚙️ Paramètres (Avancé - non implémenté)"])
+    # Tabs principaux
+    tab_home, tab_acct, tab_dossier, tab_visa = st.tabs([
+        "🏠 Accueil & Stats", "📈 Comptabilité", "📝 Gestion des Dossiers (CRUD)", "📑 Structure Visa"
+    ])
 
-    with tabs[0]:
+    with tab_home:
         home_tab(df_clients)
 
-    with tabs[1]:
+    with tab_acct:
         accounting_tab(df_clients)
 
-    with tabs[2]:
+    with tab_dossier:
         dossier_management_tab(df_clients, VISA_STRUCTURE)
 
-    with tabs[3]:
-        st.info("Cet onglet est réservé aux paramètres avancés et n'est pas encore implémenté.")
+    with tab_visa:
+        st.header("📑 Aperçu de la Structure Visa (N1 > N2 > N4)")
+        if VISA_STRUCTURE:
+            st.json(VISA_STRUCTURE)
+        else:
+            st.warning("Structure Visa non chargée ou vide. Veuillez vérifier votre fichier Visa.")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
