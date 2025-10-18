@@ -31,9 +31,7 @@ def skey(*args) -> str:
 def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) -> pd.DataFrame:
     """
     Lit les données d'un fichier téléchargé (CSV ou Excel).
-    (Code compacté et aligné pour éviter les erreurs U+00A0 et IndentationError)
     """
-
     is_excel = file_name.endswith(('.xls', '.xlsx')) or 'xlsx' in file_name.lower() or 'xls' in file_name.lower()
 
     # Assurez-vous que le pointeur est au début du fichier
@@ -85,7 +83,6 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
 
 def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
     """Nettoie et standardise les types de données du DataFrame Clients."""
-
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
 
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
@@ -126,33 +123,31 @@ def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# --- FONCTION CLÉ CORRIGÉE : CONSTRUIRE LA STRUCTURE DYNAMIQUE ---
 @st.cache_data(show_spinner="Construction de la structure Visa...")
 def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     """
     Construit la structure de classification VISA à partir du DataFrame Visa.xlsx.
-    (CORRIGÉ pour la structure matricielle de la feuille Visa.)
+    Structure attendue : les deux premières colonnes sont N1 (Catégorie) et N2 (Type),
+    les colonnes suivantes sont des options (marquées par '1' sur chaque ligne).
     """
     if df_visa.empty:
         return {}
 
     df_temp = df_visa.copy()
-
     cols = df_temp.columns.tolist()
 
-    # 1. Vérification et renommage des deux premières colonnes (N1 et N2)
     if len(cols) < 2:
         st.error("Le fichier Visa doit contenir au moins les colonnes Catégorie et Sous_categories.")
         return {}
 
-    # Renommage des deux premières colonnes (N1 et N2)
+    # Renommage des deux premières colonnes
     col_map = {cols[0]: 'N1_Categorie', cols[1]: 'N2_Type'}
     df_temp.rename(columns=col_map, inplace=True)
 
-    # Les colonnes d'options N4 sont toutes les colonnes à partir de l'index 2 (la 3ème colonne)
     option_columns = cols[2:]
 
-    # 2. Filtrage des lignes valides
+    # Filtrage : garder les lignes valides selon la présence d'indicateurs '1' dans les colonnes d'options,
+    # sinon garder les lignes ayant N1 et N2 remplis.
     if not option_columns:
         df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
     else:
@@ -163,7 +158,6 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     if df_valid.empty:
         df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
 
-    # 3. Conversion en dictionnaire hiérarchique N1 -> N2 -> [N4 options]
     structure: Dict[str, Dict[str, List[str]]] = {}
 
     for _, row in df_valid.iterrows():
@@ -175,14 +169,10 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
 
         if n1_cat not in structure:
             structure[n1_cat] = {}
-
         if n2_type not in structure[n1_cat]:
-            # N2 est initialisé comme une liste pour stocker les options N4
             structure[n1_cat][n2_type] = []
 
-        # Parcourir les colonnes d'options (N4) pour cette ligne
         for col_name in option_columns:
-            # Si la valeur dans la cellule est '1', le NOM de la colonne est l'option N4
             if str(row.get(col_name)).strip() == '1':
                 option = str(col_name).strip()
                 if option and option not in structure[n1_cat][n2_type]:
@@ -192,44 +182,35 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     return structure
 
 
-# --- FONCTION DE RÉSOLUTION DES NIVEAUX HIERARCHIQUES (ADAPTÉE) ---
 def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    Résout les niveaux de classification à partir des données stockées.
-    (ADAPTÉ à la structure simplifiée N1 -> N2 -> [N4])
+    Résout les niveaux de classification à partir des valeurs stockées dans les dossiers.
+    Retourne (niveau2_type, niveau3_key (toujours None ici), niveau4_option)
     """
-    level2_type = None
-    level3_key = None  # Toujours None
-    level4_option = None
-
     if not category or category not in visa_structure:
         return None, None, None
 
     sub_cat_stripped = str(full_sub_cat).strip()
 
-    # 1. Extraction de l'Option Niveau 4 (entre parenthèses) et du Niveau 2 Type
+    # Si la sous-catégorie contient une option entre parenthèses, on la sépare
     match_paren = re.search(r'\((.+)\)', sub_cat_stripped)
     if match_paren:
         level4_option = match_paren.group(1).strip()
         level2_type_search = sub_cat_stripped[:match_paren.start()].strip()
     else:
+        level4_option = None
         level2_type_search = sub_cat_stripped
 
-    # 2. Détermination du Niveau 2 parent (Type)
     level2_options = visa_structure.get(category, {})
 
     if level2_type_search in level2_options:
-        level2_type = level2_type_search
+        # cas où la valeur sauvegardée est le type N2
+        if level4_option and level4_option in level2_options[level2_type_search]:
+            return level2_type_search, None, level4_option
+        if not level4_option or not level2_options[level2_type_search]:
+            return level2_type_search, None, None
 
-        # Si N4 est une option valide dans la liste N2 (Liste des options N4)
-        if level4_option and level4_option in level2_options[level2_type]:
-            return level2_type, None, level4_option
-
-        # Si level2_type_search est le type final sans option N4
-        if not level4_option or not level2_options[level2_type]:
-            return level2_type, None, None
-
-    # Fallback: le cas où l'option N4 est le seul élément sauvegardé
+    # fallback : la valeur sauvegardée peut être seulement une option N4 (sans N2 extrait)
     for key_level2, val_level2 in level2_options.items():
         if isinstance(val_level2, list) and level2_type_search in val_level2:
             return key_level2, None, level2_type_search
@@ -237,7 +218,6 @@ def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict)
     return None, None, None
 
 
-# --- FONCTION POUR LA CLASSIFICATION EN CASCADE ---
 def _render_visa_classification_form(
     key_suffix: str,
     visa_structure: Dict,
@@ -247,10 +227,11 @@ def _render_visa_classification_form(
     initial_level4_option: Optional[str] = None
 ) -> Tuple[str, str]:
     """
-    Affiche les selectbox en cascade pour la classification des visas, en utilisant
-    la structure dynamique.
+    Affiche les selectbox en cascade pour la classification des visas et renvoie
+    (categorie_n1, sous_categorie_finale) où sous_categorie_finale a le format:
+    - "Type" si pas d'option N4
+    - "Type (Option)" si option finale choisie
     """
-
     col_cat, col_type = st.columns(2)
 
     main_keys = list(visa_structure.keys())
@@ -260,7 +241,6 @@ def _render_visa_classification_form(
     final_visa_type = ""
     selected_type = ""
 
-    # 1. Sélection de la Catégorie (Niveau 1)
     with col_cat:
         visa_category = st.selectbox(
             "1. Catégorie de Visa (Grand Groupe)",
@@ -270,13 +250,10 @@ def _render_visa_classification_form(
         )
 
     if visa_category != "Sélectionnez un groupe":
-
         selected_options = visa_structure.get(visa_category, {})
         visa_types_list = list(selected_options.keys())
-
         default_type_index = visa_types_list.index(initial_type) + 1 if initial_type in visa_types_list else 0
 
-        # 2. Sélection du Type de Visa (Niveau 2)
         with col_type:
             selected_type = st.selectbox(
                 f"2. Type de Visa ({visa_category})",
@@ -288,22 +265,18 @@ def _render_visa_classification_form(
         if selected_type and selected_type != "Sélectionnez un type":
             current_options = selected_options.get(selected_type)
 
-            # Dans la nouvelle structure, current_options sera toujours une LISTE (Liste N4)
             if isinstance(current_options, list):
-
                 options_list = [opt for opt in current_options if opt]
 
                 if not options_list:
-                    # Si la liste est vide, c'est que le N2 est le type final
+                    # N2 final
                     final_visa_type = selected_type
                 else:
                     st.subheader(f"3. Option finale pour **{selected_type}**")
-
                     default_sub_index = 0
                     if initial_level4_option in options_list:
                         default_sub_index = options_list.index(initial_level4_option)
 
-                    # Le radio button ne permet pas d'avoir "Sélectionner une option" si on veut que l'index 0 soit par défaut.
                     final_selection = st.radio(
                         "Choisissez l'option finale",
                         options_list,
@@ -311,17 +284,12 @@ def _render_visa_classification_form(
                         key=skey("form", key_suffix, "sub1"),
                         horizontal=True
                     )
-                    # Sauvegarde au format "N2_Type (N4_Option)"
                     final_visa_type = f"{selected_type} ({final_selection})"
-
             else:
                 final_visa_type = selected_type
 
-    # Retourne la Catégorie (Niveau 1) et la Sous-Catégorie (Niveau final détaillé)
     return visa_category, final_visa_type
 
-
-# --- Fonctions de Résumé et CRUD ---
 
 def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
     """Calcule les métriques clés pour l'affichage."""
@@ -355,14 +323,13 @@ def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
 
 def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str) -> pd.DataFrame:
     """Ajoute, Modifie ou Supprime un client. Centralisation des actions CRUD."""
-
     dossier_n = str(new_data.get('dossier_n')).strip()
 
     if not dossier_n or dossier_n.lower() in ('nan', 'none', 'na', ''):
         st.error("Le Numéro de Dossier ne peut pas être vide ou non défini.")
         return df
 
-    # --- Actions DELETE ---
+    # DELETE
     if action == "DELETE":
         if 'dossier_n' not in df.columns:
             return df
@@ -378,7 +345,7 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
             st.warning(f"Dossier N° {dossier_n} introuvable pour suppression.")
             return df
 
-    # --- Pré-traitement pour ADD/MODIFY ---
+    # Pré-traitement pour ADD/MODIFY
     new_df_row = pd.DataFrame([new_data])
     new_df_row.columns = new_df_row.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
 
@@ -391,7 +358,7 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
     paye = new_df_row['payé'].iloc[0] if 'payé' in new_df_row.columns else 0.0
     new_df_row['solde'] = montant - paye
 
-    # 2. Action MODIFY
+    # MODIFY
     if action == "MODIFY":
         if 'dossier_n' not in df.columns:
             return df
@@ -400,11 +367,9 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
         if not matching_rows.empty:
             idx_to_modify = matching_rows.index[0]
 
-            # S'assurer que le DF cible a toutes les colonnes de la nouvelle ligne
             for col in new_df_row.columns:
                 if col not in df.columns:
                     df[col] = pd.NA
-                # Mettre à jour la valeur dans le DF existant
                 df.loc[idx_to_modify, col] = new_df_row[col].iloc[0]
 
             st.cache_data.clear()
@@ -414,13 +379,12 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
             st.warning(f"Dossier N° {dossier_n} introuvable pour modification.")
             return df
 
-    # 3. Action ADD
+    # ADD
     if action == "ADD":
         if 'dossier_n' in df.columns and (df['dossier_n'].astype(str) == dossier_n).any():
             st.error(f"Le Dossier N° {dossier_n} existe déjà. Utilisez l'onglet 'Modifier'.")
             return df
 
-        # S'assurer que les colonnes de la nouvelle ligne existent dans df
         for col in new_df_row.columns:
             if col not in df.columns:
                 df[col] = pd.NA
@@ -433,13 +397,10 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
     return df
 
 
-# --- Fonctions de l'Application (UI/Logique de Flow) ---
-
 def upload_section():
     """Section de chargement des fichiers (Barre latérale)."""
     st.sidebar.header("📁 Chargement des Fichiers")
 
-    # Contrôle de l'index d'en-tête (pour aider à la relecture)
     header_clients = st.sidebar.number_input(
         "Ligne d'en-tête Clients (Index 0 = 1ère ligne)",
         min_value=0, value=0, key=skey("header_clients_row")
@@ -449,7 +410,7 @@ def upload_section():
         min_value=0, value=0, key=skey("header_visa_row")
     )
 
-    # ------------------- Fichier Clients -------------------
+    # Clients
     content_clients_loaded = st.session_state.get(skey("raw_clients_content"))
 
     uploaded_file_clients = st.sidebar.file_uploader(
@@ -467,7 +428,7 @@ def upload_section():
     elif content_clients_loaded:
         st.sidebar.success(f"Clients : **{st.session_state.get(skey('clients_name'), 'Précédent')}** (Persistant)")
 
-    # ------------------- Fichier Visa -------------------
+    # Visa
     content_visa_loaded = st.session_state.get(skey("raw_visa_content"))
 
     uploaded_file_visa = st.sidebar.file_uploader(
@@ -481,7 +442,6 @@ def upload_section():
         st.session_state[skey("raw_visa_content")] = uploaded_file_visa.read()
         st.session_state[skey("visa_name")] = uploaded_file_visa.name
         st.session_state[skey("df_visa")] = pd.DataFrame()
-        # Forcer la reconstruction de la structure
         global VISA_STRUCTURE
         VISA_STRUCTURE = {}
         st.sidebar.success(f"Visa : **{uploaded_file_visa.name}** chargé.")
@@ -491,12 +451,10 @@ def upload_section():
 
 def data_processing_flow():
     """Gère le chargement, le nettoyage et le stockage des DataFrames."""
-
-    # Récupération des index d'en-tête depuis la session state
     header_clients = st.session_state.get(skey("header_clients_row"), 0)
     header_visa = st.session_state.get(skey("header_visa_row"), 0)
 
-    # --- Clients ---
+    # Clients
     raw_clients_content = st.session_state.get(skey("raw_clients_content"))
     df_clients_current = st.session_state.get(skey("df_clients"), pd.DataFrame())
 
@@ -513,7 +471,7 @@ def data_processing_flow():
                 st.error(f"Erreur fatale lors du traitement des données Clients: {e}")
                 st.session_state[skey("raw_clients_content")] = None
 
-    # --- Visa ---
+    # Visa
     raw_visa_content = st.session_state.get(skey("raw_visa_content"))
     df_visa_current = st.session_state.get(skey("df_visa"), pd.DataFrame())
 
@@ -524,7 +482,6 @@ def data_processing_flow():
                 df_cleaned_visa = _clean_visa_data(df_raw_visa)
                 if not df_cleaned_visa.empty:
                     st.session_state[skey("df_visa")] = df_cleaned_visa
-                    # Forcer la reconstruction immédiate de la structure après le chargement du DF
                     global VISA_STRUCTURE
                     VISA_STRUCTURE = _build_visa_structure(df_cleaned_visa)
                 else:
@@ -571,7 +528,7 @@ def accounting_tab(df_clients: pd.DataFrame):
 
     summary = _summarize_data(df_clients)
 
-    # 1. KPIs
+    # KPIs
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Facturé (Montant)", f"${summary['total_honoraires']:,.2f}".replace(",", " "))
     col2.metric("Total Reçu (Payé)", f"${summary['total_payé']:,.2f}".replace(",", " "))
@@ -580,7 +537,7 @@ def accounting_tab(df_clients: pd.DataFrame):
 
     st.divider()
 
-    # --- Filtre Client ---
+    # Filtre Client
     st.subheader("Détail du Compte Client")
 
     df_clients_for_select = df_clients[['dossier_n', 'nom']].dropna(subset=['dossier_n'])
@@ -596,18 +553,15 @@ def accounting_tab(df_clients: pd.DataFrame):
     )
 
     df_filtered = df_clients.copy()
-
     if selected_key_acct != "Tous les clients":
         selected_dossier_n = client_options.get(selected_key_acct)
         df_filtered = df_clients[df_clients['dossier_n'].astype(str) == selected_dossier_n].copy()
 
-    # 2. Tableau de ventilation
     accounting_cols = ['dossier_n', 'nom', 'categorie', 'montant', 'payé', 'solde', 'date']
     valid_cols = [col for col in accounting_cols if col in df_filtered.columns]
 
     df_accounting = df_filtered[valid_cols].copy()
 
-    # Formatage des colonnes monétaires pour l'affichage
     for col in ['montant', 'payé', 'solde']:
         if col in df_accounting.columns:
             df_accounting[col] = pd.to_numeric(df_accounting[col], errors='coerce').fillna(0.0)
@@ -630,103 +584,31 @@ def accounting_tab(df_clients: pd.DataFrame):
     st.caption("Le solde dû est calculé par `Montant Facturé - Total Payé`.")
 
 
-# --- GESTION DES DOSSIERS (AJOUT/MODIF/SUPPRESSION) ---
 def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
     """Contenu de l'onglet Saisie/Modification/Suppression de Dossiers."""
     st.header("📝 Gestion des Dossiers Clients (CRUD)")
 
-    # Vérification de la structure VISA (corrigée)
     if not visa_structure:
         st.error("Veuillez charger votre fichier Visa (Table de Référence) pour activer la classification de visa.")
         return
 
     tab_add, tab_modify, tab_delete = st.tabs(["➕ Ajouter un Dossier", "✍️ Modifier un Dossier", "🗑️ Supprimer un Dossier"])
 
-    paye_initial = col_paye.number_input(
-                    "Total Payé (Payé)",
-                    min_value=0.0,
-                    step=100.0,
-                    value=current_data.get('payé', 0.0), # Valeur pré-remplie
-                    key=skey("form_mod", "payé")
-                )
+    # Préparer les options clients pour les selectbox si df_clients non vide
+    client_options = {}
+    if not df_clients.empty and 'dossier_n' in df_clients.columns:
+        df_clients_for_select = df_clients[['dossier_n', 'nom']].dropna(subset=['dossier_n'])
+        client_options = {
+            f"{r['dossier_n']} - {r['nom']}": r['dossier_n']
+            for _, r in df_clients_for_select.iterrows()
+        }
 
-                st.markdown("### Notes")
-                commentaires = st.text_area(
-                    "Commentaires",
-                    value=current_data.get('commentaires', ''), # Valeur pré-remplie
-                    key=skey("form_mod", "commentaires")
-                )
-
-                submitted_mod = st.form_submit_button("✍️ Modifier le Dossier")
-
-                if submitted_mod:
-                    new_data = {
-                        'dossier_n': selected_dossier_n,
-                        'nom': client_name,
-                        'date': date_dossier,
-                        'categorie': cat_n1,
-                        'sous_categorie': sub_cat_final,
-                        'montant': montant_facture,
-                        'payé': paye_initial,
-                        'commentaires': commentaires,
-                    }
-                    # Appel de la fonction CRUD avec action "MODIFY"
-                    st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "MODIFY")
-                    st.rerun() # Rafraîchir l'application pour montrer le succès
-
-            else:
-                st.info("Sélectionnez un dossier ci-dessus pour afficher ses détails.")
-
-    # =========================================================================
-    # LOGIQUE DE SUPPRESSION (DELETE)
-    # =========================================================================
-    with tab_delete:
-        st.subheader("Supprimer définitivement un dossier client")
-        if df_clients.empty:
-            st.info("Veuillez charger des dossiers clients pour pouvoir les supprimer.")
-            return
-
-        df_clients_for_select = df_clients[['dossier_n', 'nom']].dropna(subset=['dossier_n'])
-        client_options = {
-            f"{r['dossier_n']} - {r['nom']}": r['dossier_n']
-            for _, r in df_clients_for_select.iterrows()
-        }
-
-        selected_key_del = st.selectbox(
-            "Sélectionner le Dossier à Supprimer",
-            ["Sélectionnez un dossier"] + list(client_options.keys()),
-            key=skey("delete", "select_client")
-        )
-
-        selected_dossier_n_del = None
-        if selected_key_del != "Sélectionnez un dossier":
-            selected_dossier_n_del = client_options.get(selected_key_del)
-            client_name_del = selected_key_del.split(' - ')[1]
-
-            st.error(f"⚠️ Confirmation : Vous allez **SUPPRIMER DÉFINITIVEMENT** le dossier N° **{selected_dossier_n_del}** (Client : **{client_name_del}**).")
-            st.warning("Cette action est irréversible et supprime le dossier de la base de données actuelle.")
-
-            with st.form("delete_client_form"):
-                # Un champ caché pour passer l'ID au formulaire
-                st.text_input("Dossier à supprimer (Confirmation)", value=selected_dossier_n_del, disabled=True, label_visibility="collapsed", key=skey("form_del", "dossier_n"))
-                
-                submitted_del = st.form_submit_button("🗑️ Confirmer la Suppression Définitive", type="primary")
-
-                if submitted_del and selected_dossier_n_del:
-                    data_to_delete = {'dossier_n': selected_dossier_n_del}
-                    # Appel de la fonction CRUD avec action "DELETE"
-                    st.session_state[skey("df_clients")] = _update_client_data(df_clients, data_to_delete, "DELETE")
-                    st.rerun() # Rafraîchir l'application
-
-    # =========================================================================
-    # LOGIQUE D'AJOUT (ADD)
-    # =========================================================================
+    # ADD
     with tab_add:
         st.subheader("Ajouter un nouveau dossier client")
         next_dossier_n = 13000
         if not df_clients.empty and 'dossier_n' in df_clients.columns:
             try:
-                # Extrait les nombres des numéros de dossier et prend le maximum pour incrémenter
                 numeric_dossiers = df_clients['dossier_n'].astype(str).str.extract(r'(\d+)').astype(float)
                 max_n = numeric_dossiers[pd.notna(numeric_dossiers)].max()
                 next_dossier_n = int(max_n + 1) if not pd.isna(max_n) and max_n >= 12000 else 13000
@@ -742,7 +624,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
             date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=date.today(), key=skey("form_add", "date"))
 
             st.markdown("### Classification Visa")
-            # --- CLASSIFICATION EN CASCADE ---
             cat_n1, sub_cat_final = _render_visa_classification_form(
                 key_suffix="add",
                 visa_structure=visa_structure,
@@ -769,159 +650,129 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                     'payé': paye_initial,
                     'commentaires': commentaires,
                 }
-                # Appel de la fonction CRUD
                 st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "ADD")
-                st.rerun()  # Rafraîchir l'application pour montrer le succès
+                st.rerun()
 
-    # =========================================================================
-    # LOGIQUE DE MODIFICATION (MODIFY)
-    # =========================================================================
+    # MODIFY
     with tab_modify:
         st.subheader("Modifier un dossier client existant")
         if df_clients.empty:
             st.info("Veuillez charger ou ajouter des dossiers clients pour pouvoir les modifier.")
-            return
+        else:
+            selected_key_mod = st.selectbox(
+                "Sélectionner le Dossier à Modifier",
+                ["Sélectionnez un dossier"] + list(client_options.keys()),
+                key=skey("modify", "select_client")
+            )
 
-        df_clients_for_select = df_clients[['dossier_n', 'nom']].dropna(subset=['dossier_n'])
-        client_options = {
-            f"{r['dossier_n']} - {r['nom']}": r['dossier_n']
-            for _, r in df_clients_for_select.iterrows()
-        }
+            if selected_key_mod != "Sélectionnez un dossier":
+                selected_dossier_n = client_options.get(selected_key_mod)
+                current_data = df_clients[df_clients['dossier_n'].astype(str) == selected_dossier_n].iloc[0].to_dict()
 
-        selected_key_mod = st.selectbox(
-            "Sélectionner le Dossier à Modifier",
-            ["Sélectionnez un dossier"] + list(client_options.keys()),
-            key=skey("modify", "select_client")
-        )
+                initial_cat = str(current_data.get('categorie', '')).strip()
+                initial_sub_cat = str(current_data.get('sous_categorie', '')).strip()
 
-        selected_dossier_n = None
-        if selected_key_mod != "Sélectionnez un dossier":
-            selected_dossier_n = client_options.get(selected_key_mod)
-            current_data = df_clients[df_clients['dossier_n'].astype(str) == selected_dossier_n].iloc[0].to_dict()
+                n2_type, n3_key, n4_option = _resolve_visa_levels(initial_cat, initial_sub_cat, visa_structure)
 
-            # Résoudre les niveaux de classification pour pré-remplir les selectbox
-            initial_cat = str(current_data.get('categorie', '')).strip()
-            initial_sub_cat = str(current_data.get('sous_categorie', '')).strip()
+                with st.form("modify_client_form"):
+                    st.markdown("---")
+                    col_id, col_name, col_date = st.columns(3)
 
-            n2_type, n3_key, n4_option = _resolve_visa_levels(initial_cat, initial_sub_cat, visa_structure)
+                    col_id.text_input("Numéro de Dossier", value=selected_dossier_n, disabled=True)
+                    client_name = col_name.text_input("Nom du Client", value=current_data.get('nom', ''), key=skey("form_mod", "nom"))
 
-            with st.form("modify_client_form"):
-                st.markdown("---")
-                col_id, col_name, col_date = st.columns(3)
-
-                # Le N° Dossier ne doit pas être modifiable facilement
-                col_id.text_input("Numéro de Dossier", value=selected_dossier_n, disabled=True)
-                client_name = col_name.text_input("Nom du Client", value=current_data.get('nom', ''), key=skey("form_mod", "nom"))
-
-                # Conversion sécurisée de la date pour le date_input
-                current_date = current_data.get('date')
-                if pd.isna(current_date):
-                    date_value = date.today()
-                else:
-                    try:
-                        date_value = pd.to_datetime(current_date).date()
-                    except:
+                    current_date = current_data.get('date')
+                    if pd.isna(current_date):
                         date_value = date.today()
+                    else:
+                        try:
+                            date_value = pd.to_datetime(current_date).date()
+                        except:
+                            date_value = date.today()
 
-                date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=date_value, key=skey("form_mod", "date"))
+                    date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=date_value, key=skey("form_mod", "date"))
 
-                st.markdown("### Classification Visa")
-                # --- CLASSIFICATION EN CASCADE (PRÉ-REMPLIE) ---
-                cat_n1, sub_cat_final = _render_visa_classification_form(
-                    key_suffix="mod",
-                    visa_structure=visa_structure,
-                    initial_category=initial_cat,
-                    initial_type=n2_type,
-                    initial_level4_option=n4_option  # n3_key est ignoré ici
-                )
+                    st.markdown("### Classification Visa")
+                    cat_n1, sub_cat_final = _render_visa_classification_form(
+                        key_suffix="mod",
+                        visa_structure=visa_structure,
+                        initial_category=initial_cat,
+                        initial_type=n2_type,
+                        initial_level4_option=n4_option
+                    )
 
-                st.markdown("### Finance")
-                col_montant, col_paye = st.columns(2)
-                montant_facture = col_montant.number_input(
-                    "Total Facturé (Montant)",
-                    min_value=0.0,
-                    step=100.0,
-                    value=current_data.get('montant', 0.0),
-                    key=skey("form_mod", "montant")
-                )
-                paye_initial = col_paye.number_input(
-                    "Total Payé (Payé)",
-                    min_value=0.0,
-                    step=100.0,
-                    value=current_data.get('payé', 0.0),
-                    key=skey("form_mod", "payé")
-                )
+                    st.markdown("### Finance")
+                    col_montant, col_paye = st.columns(2)
+                    montant_facture = col_montant.number_input(
+                        "Total Facturé (Montant)",
+                        min_value=0.0,
+                        step=100.0,
+                        value=current_data.get('montant', 0.0),
+                        key=skey("form_mod", "montant")
+                    )
+                    paye_initial = col_paye.number_input(
+                        "Total Payé (Payé)",
+                        min_value=0.0,
+                        step=100.0,
+                        value=current_data.get('payé', 0.0),
+                        key=skey("form_mod", "payé")
+                    )
 
-                st.markdown("### Notes")
-                commentaires = st.text_area("Commentaires", value=current_data.get('commentaires', ''), key=skey("form_mod", "commentaires"))
+                    st.markdown("### Notes")
+                    commentaires = st.text_area("Commentaires", value=current_data.get('commentaires', ''), key=skey("form_mod", "commentaires"))
 
-                submitted_mod = st.form_submit_button("✍️ Modifier le Dossier")
+                    submitted_mod = st.form_submit_button("✍️ Modifier le Dossier")
 
-                if submitted_mod:
-                    new_data = {
-                        'dossier_n': selected_dossier_n,
-                        'nom': client_name,
-                        'date': date_dossier,
-                        'categorie': cat_n1,
-                        'sous_categorie': sub_cat_final,
-                        'montant': montant_facture,
-                        'payé': paye_initial,
-                        'commentaires': commentaires,
-                    }
-                    st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "MODIFY")
-                    st.rerun()
+                    if submitted_mod:
+                        new_data = {
+                            'dossier_n': selected_dossier_n,
+                            'nom': client_name,
+                            'date': date_dossier,
+                            'categorie': cat_n1,
+                            'sous_categorie': sub_cat_final,
+                            'montant': montant_facture,
+                            'payé': paye_initial,
+                            'commentaires': commentaires,
+                        }
+                        st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "MODIFY")
+                        st.rerun()
 
-    # =========================================================================
-    # LOGIQUE DE SUPPRESSION (DELETE)
-    # =========================================================================
+    # DELETE
     with tab_delete:
         st.subheader("Supprimer un dossier client")
         if df_clients.empty:
             st.info("Aucun dossier à supprimer.")
-            return
+        else:
+            selected_key_del = st.selectbox(
+                "Sélectionner le Dossier à Supprimer",
+                ["Sélectionnez un dossier"] + list(client_options.keys()),
+                key=skey("delete", "select_client")
+            )
 
-        selected_key_del = st.selectbox(
-            "Sélectionner le Dossier à Supprimer",
-            ["Sélectionnez un dossier"] + list(client_options.keys()),
-            key=skey("delete", "select_client")
-        )
+            if selected_key_del != "Sélectionnez un dossier":
+                selected_dossier_n_del = client_options.get(selected_key_del)
+                st.error(f"⚠️ Êtes-vous sûr de vouloir supprimer définitivement le Dossier N° {selected_dossier_n_del} ?")
 
-        selected_dossier_n_del = None
-        if selected_key_del != "Sélectionnez un dossier":
-            selected_dossier_n_del = client_options.get(selected_key_del)
+                if st.button(f"🗑️ Confirmer la Suppression de {selected_dossier_n_del}"):
+                    new_data = {'dossier_n': selected_dossier_n_del}
+                    st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "DELETE")
+                    st.rerun()
 
-            st.error(f"⚠️ Êtes-vous sûr de vouloir supprimer définitivement le Dossier N° {selected_dossier_n_del} ?")
-
-            if st.button(f"🗑️ Confirmer la Suppression de {selected_dossier_n_del}"):
-                new_data = {'dossier_n': selected_dossier_n_del}
-                st.session_state[skey("df_clients")] = _update_client_data(df_clients, new_data, "DELETE")
-                st.rerun()
-
-
-# =========================================================================
-# POINT D'ENTRÉE PRINCIPAL DE L'APPLICATION STREAMLIT
-# =========================================================================
 
 def main():
     st.set_page_config(layout="wide", page_title=APP_TITLE)
     st.title(APP_TITLE)
 
-    # 1. Barre latérale de chargement
     upload_section()
-
-    # 2. Flux de Traitement des Données (Lit, Nettoie, stocke les DF)
     data_processing_flow()
 
-    # 3. Récupération des DataFrames et de la Structure VISA
     df_clients = st.session_state.get(skey("df_clients"), pd.DataFrame())
     df_visa = st.session_state.get(skey("df_visa"), pd.DataFrame())
 
-    # 4. Construction de la structure VISA si elle n'a pas été faite dans le flow
     global VISA_STRUCTURE
     if not df_visa.empty and not VISA_STRUCTURE:
         VISA_STRUCTURE = _build_visa_structure(df_visa)
 
-    # 5. Affichage principal des onglets
     if df_clients.empty and df_visa.empty:
         st.info("Veuillez charger vos fichiers Clients et/ou Visa pour commencer.")
 
