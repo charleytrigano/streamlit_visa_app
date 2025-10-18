@@ -41,8 +41,10 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
     file_content.seek(0) 
 
 # Ligne 44 (Assurez-vous qu'il n'y a pas d'espace non imprimable à la fin)
-            df = pd.read_excel(file_content, header=header_row, engine='openpyxl', dtype=str)
-        except Exception as e:
+           try:
+        # Tenter la lecture Excel pour les formats xls/xlsx
+        df = pd.read_excel(file_content, header=header_row, engine='openpyxl', dtype=str)
+    except Exception as e:
             st.error(f"Erreur de lecture Excel : {e}")
             return pd.DataFrame()
     else: 
