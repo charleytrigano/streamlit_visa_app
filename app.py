@@ -11,11 +11,72 @@ import numpy as np
 # =========================
 # Constantes et Configuration
 # =========================================================================
-APP_TITLE = "🛂 Visa Manager - Gestion Complète"
-SID = "vmgr_v6"
+APP_TITLE = "🛂 Visa Manager - Gestion Complète (N1 > N2 > N3 > N4)"
+SID = "vmgr_v7"
 
 # Le dictionnaire codé en dur est vide, il sera rempli par la fonction _build_visa_structure
 VISA_STRUCTURE = {}
+
+# Mappage statique des options de Niveau 4 (colonnes) vers leur Groupe de Niveau 3 (N3)
+# Ce mappage est la clé pour structurer les 4 niveaux.
+N4_TO_N3_MAP = {
+    # Statut/Modalité
+    '1-COS': 'Statut de Processus',
+    '2-EOS': 'Statut de Processus',
+    '1-Inv.': 'Statut de Processus',
+    '2-CP': 'Statut de Processus',
+    '3-USCIS': 'Statut de Processus',
+    '1-CP': 'Statut de Processus',  # Peut être ambigu, mais utilisé pour les chemins généraux
+    '2-USCIS': 'Statut de Processus',
+
+    # Cycle de Vie
+    '1-Initial': 'Cycle de Vie',
+    '2-Extension': 'Cycle de Vie',
+    '3-Transfer': 'Cycle de Vie',
+    '4-CP': 'Cycle de Vie',
+
+    # Résidence Permanente (Emploi)
+    '1-Employement': 'Voie I-140',
+    '1-I-140': 'Voie I-140',
+    '2-AOS': 'Voie I-140',
+    '3-I-140 & AOS': 'Voie I-140',
+    '4-Perm': 'Voie I-140',
+    '5-CP': 'Voie I-140',
+
+    # Résidence Permanente (Investissement)
+    '1-I-526': 'Voie EB-5 (Investissement)',
+    '2-AOS': 'Voie EB-5 (Investissement)', # Duplicat mais spécifique à EB-5 ici
+    '3-I527 & AOS': 'Voie EB-5 (Investissement)',
+    '4-CP': 'Voie EB-5 (Investissement)', # Duplicat mais spécifique à EB-5 ici
+    '1--829': 'Voie EB-5 (Investissement)',
+
+    # Résidence Permanente (Famille)
+    '2-I-130': 'Voie Familiale',
+    '3-AOS': 'Voie Familiale', # Duplicat mais spécifique à Famille ici
+    '4-I-130 & AOS': 'Voie Familiale',
+    '5-CP': 'Voie Familiale', # Duplicat mais spécifique à Famille ici
+
+    # Nature de la Demande
+    'Traditional': 'Nature de la Demande',
+    'Marriage': 'Nature de la Demande',
+    'Derivatives': 'Nature de la Demande',
+
+    # Documents Annexes
+    'Travel Permit': 'Documents Annexes',
+    'Work Permit': 'Documents Annexes',
+    'I-751': 'Documents Annexes',
+    'Re-entry Permit': 'Documents Annexes',
+    'I-90': 'Documents Annexes',
+    'I-407': 'Documents Annexes',
+
+    # Consultation
+    'Consultation': 'Consultation',
+    'Analysis': 'Consultation',
+    'Referal': 'Consultation',
+    
+    # Assurer une catégorie pour les options oubliées
+    'Autre Option N4': 'Divers'
+}
 
 
 # =========================
@@ -31,10 +92,10 @@ def skey(*args) -> str:
 def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) -> pd.DataFrame:
     """
     Lit les données d'un fichier téléchargé (CSV ou Excel).
+    (Code de la fonction _read_data_file inchangé)
     """
     is_excel = file_name.endswith(('.xls', '.xlsx')) or 'xlsx' in file_name.lower() or 'xls' in file_name.lower()
 
-    # Assurez-vous que le pointeur est au début du fichier
     file_content.seek(0)
 
     if is_excel:
@@ -73,7 +134,6 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
             st.error(f"Erreur de lecture CSV : {e}")
             return pd.DataFrame()
 
-    # Nettoyage standard
     df = df.dropna(axis=1, how='all')
     df.columns = df.columns.str.strip().fillna('')
     df = df.dropna(axis=0, how='all')
@@ -82,7 +142,9 @@ def _read_data_file(file_content: BytesIO, file_name: str, header_row: int = 0) 
 
 
 def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoie et standardise les types de données du DataFrame Clients."""
+    """Nettoie et standardise les types de données du DataFrame Clients.
+    (Code de la fonction _clean_clients_data inchangé)
+    """
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
 
     money_cols = ['honoraires', 'payé', 'solde', 'acompte_1', 'acompte_2', 'montant', 'autres_frais_us_']
@@ -116,19 +178,20 @@ def _clean_clients_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _clean_visa_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoyage simple du DataFrame Visa."""
+    """Nettoyage simple du DataFrame Visa.
+    (Code de la fonction _clean_visa_data inchangé)
+    """
     df.columns = df.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
     for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
     return df
 
 
-@st.cache_data(show_spinner="Construction de la structure Visa...")
+@st.cache_data(show_spinner="Construction de la structure Visa (4 Niveaux)...")
 def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
     """
-    Construit la structure de classification VISA à partir du DataFrame Visa.xlsx.
-    Structure attendue : les deux premières colonnes sont N1 (Catégorie) et N2 (Type),
-    les colonnes suivantes sont des options (marquées par '1' sur chaque ligne).
+    Construit la structure de classification VISA à 4 niveaux (N1 > N2 > N3 > N4)
+    à partir du DataFrame Visa.xlsx et du mappage N4_TO_N3_MAP.
     """
     if df_visa.empty:
         return {}
@@ -140,26 +203,16 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
         st.error("Le fichier Visa doit contenir au moins les colonnes Catégorie et Sous_categories.")
         return {}
 
-    # Renommage des deux premières colonnes
+    # Renommage des deux premières colonnes (N1 et N2)
     col_map = {cols[0]: 'N1_Categorie', cols[1]: 'N2_Type'}
     df_temp.rename(columns=col_map, inplace=True)
 
     option_columns = cols[2:]
 
-    # Filtrage : garder les lignes valides selon la présence d'indicateurs '1' dans les colonnes d'options,
-    # sinon garder les lignes ayant N1 et N2 remplis.
-    if not option_columns:
-        df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
-    else:
-        df_options = df_temp[option_columns].astype(str).fillna('').replace('nan', '')
-        has_indicator = df_options.apply(lambda row: '1' in row.values, axis=1)
-        # On garde toutes les lignes qui ont soit un indicateur, soit Catégorie/Type remplis
-        df_valid = df_temp[has_indicator | df_temp[['N1_Categorie', 'N2_Type']].notna().all(axis=1)].copy()
+    df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
 
-    if df_valid.empty:
-        df_valid = df_temp.dropna(subset=['N1_Categorie', 'N2_Type']).copy()
-
-    structure: Dict[str, Dict[str, List[str]]] = {}
+    # Structure attendue: N1 -> N2 -> N3 -> [Liste des N4]
+    structure: Dict[str, Dict[str, Dict[str, List[str]]]] = {}
 
     for _, row in df_valid.iterrows():
         n1_cat = str(row.get('N1_Categorie', '')).strip()
@@ -171,51 +224,69 @@ def _build_visa_structure(df_visa: pd.DataFrame) -> Dict[str, Any]:
         if n1_cat not in structure:
             structure[n1_cat] = {}
         if n2_type not in structure[n1_cat]:
-            structure[n1_cat][n2_type] = []
+            structure[n1_cat][n2_type] = {} # N2 pointe maintenant vers N3
 
         for col_name in option_columns:
             # Vérifie si la colonne d'option est activée ('1')
             if str(row.get(col_name)).strip() == '1':
-                option = str(col_name).strip()
-                if option and option not in structure[n1_cat][n2_type]:
-                    structure[n1_cat][n2_type].append(option)
+                n4_option = str(col_name).strip()
+                
+                # Récupère le groupe N3 à partir du mappage global
+                n3_group = N4_TO_N3_MAP.get(n4_option, 'Divers / Non Classé')
+                
+                if n3_group not in structure[n1_cat][n2_type]:
+                    structure[n1_cat][n2_type][n3_group] = [] # N3 pointe vers la liste des N4
+                
+                if n4_option and n4_option not in structure[n1_cat][n2_type][n3_group]:
+                    structure[n1_cat][n2_type][n3_group].append(n4_option)
 
-    st.success("Structure de classification Visa construite dynamiquement (Matrice corrigée).")
+    st.success("Structure de classification Visa construite dynamiquement (4 Niveaux corrigés).")
     return structure
 
 
 def _resolve_visa_levels(category: str, full_sub_cat: str, visa_structure: Dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Résout les niveaux de classification à partir des valeurs stockées dans les dossiers.
-    Retourne (niveau2_type, niveau3_key (toujours None ici), niveau4_option)
+    Le format sauvegardé est: [N2 Type] ([N3 Group] - [N4 Option])
+    Retourne (niveau2_type, niveau3_group, niveau4_option)
     """
     if not category or category not in visa_structure:
         return None, None, None
 
     sub_cat_stripped = str(full_sub_cat).strip()
 
-    # Si la sous-catégorie contient une option entre parenthèses (format "Type (Option)"), on la sépare
-    match_paren = re.search(r'\((.+)\)', sub_cat_stripped)
-    if match_paren:
-        level4_option = match_paren.group(1).strip()
-        level2_type_search = sub_cat_stripped[:match_paren.start()].strip()
-    else:
-        level4_option = None
-        level2_type_search = sub_cat_stripped
+    # Pattern pour extraire: Type (Groupe N3 - Option N4)
+    # Ex: 'E-2 (Statut de Processus - 1-COS)'
+    match = re.search(r'^(.*)\s\((.*?)\s-\s(.+?)\)$', sub_cat_stripped)
 
-    level2_options = visa_structure.get(category, {})
+    if match:
+        level2_type_search = match.group(1).strip()
+        level3_group = match.group(2).strip()
+        level4_option = match.group(3).strip()
+        
+        # Vérification simple pour s'assurer que les valeurs extraites sont cohérentes
+        if level2_type_search in visa_structure.get(category, {}):
+            n2_data = visa_structure[category][level2_type_search]
+            if level3_group in n2_data and level4_option in n2_data[level3_group]:
+                return level2_type_search, level3_group, level4_option
+    
+    # Fallback au cas où l'ancien format 'Type (Option N4)' ou juste 'Type' était sauvegardé
+    match_old_format = re.search(r'^(.*)\s\((.+?)\)$', sub_cat_stripped)
+    if match_old_format:
+        # Tente de résoudre l'ancienne N4 option
+        level4_option_search = match_old_format.group(2).strip()
+        level2_type_search = match_old_format.group(1).strip()
+        
+        if level2_type_search in visa_structure.get(category, {}):
+            for n3_group, n4_list in visa_structure[category][level2_type_search].items():
+                if level4_option_search in n4_list:
+                    # On a trouvé la N4, on déduit la N3
+                    return level2_type_search, n3_group, level4_option_search
+    
+    # Si seul le N2 Type est stocké
+    if sub_cat_stripped in visa_structure.get(category, {}):
+        return sub_cat_stripped, None, None
 
-    if level2_type_search in level2_options:
-        # cas où la valeur sauvegardée est le type N2
-        if level4_option and level4_option in level2_options[level2_type_search]:
-            return level2_type_search, None, level4_option
-        if not level4_option or not level2_options[level2_type_search]:
-            return level2_type_search, None, None
-
-    # fallback : la valeur sauvegardée peut être seulement une option N4 (sans N2 extrait)
-    for key_level2, val_level2 in level2_options.items():
-        if isinstance(val_level2, list) and level2_type_search in val_level2:
-            return key_level2, None, level2_type_search
 
     return None, None, None
 
@@ -225,14 +296,14 @@ def _render_visa_classification_form(
     visa_structure: Dict,
     initial_category: Optional[str] = None,
     initial_type: Optional[str] = None,
-    initial_level3_key: Optional[str] = None,
+    initial_level3_group: Optional[str] = None,
     initial_level4_option: Optional[str] = None
 ) -> Tuple[str, str]:
     """
-    Affiche les selectbox en cascade pour la classification des visas et renvoie
+    Affiche les selectbox en cascade pour la classification des visas (N1 > N2 > N3 > N4) et renvoie
     (categorie_n1, sous_categorie_finale) où sous_categorie_finale a le format:
-    - "Type" si pas d'option N4
-    - "Type (Option)" si option finale choisie (ex: 'E-2 (1-COS)')
+    - "Type" si pas d'option N3/N4
+    - "Type (N3 Groupe - N4 Option)" si option finale choisie (ex: 'E-2 (Statut de Processus - 1-COS)')
     """
     col_cat, col_type = st.columns(2)
 
@@ -240,73 +311,102 @@ def _render_visa_classification_form(
     default_cat_index = main_keys.index(initial_category) + 1 if initial_category in main_keys else 0
 
     visa_category = initial_category if initial_category in main_keys else "Sélectionnez un groupe"
-    final_visa_type = ""
+    final_visa_type_saved = ""
     selected_type = ""
+    selected_group_n3 = ""
 
     with col_cat:
         visa_category = st.selectbox(
-            "1. Catégorie de Visa (Grand Groupe)",
+            "1. Catégorie de Visa (N1 - Grand Groupe)",
             ["Sélectionnez un groupe"] + main_keys,
             index=default_cat_index,
             key=skey("form", key_suffix, "cat_main"),
         )
 
     if visa_category != "Sélectionnez un groupe":
-        selected_options = visa_structure.get(visa_category, {})
-        visa_types_list = list(selected_options.keys())
+        selected_options_n2 = visa_structure.get(visa_category, {})
+        visa_types_list = list(selected_options_n2.keys())
         default_type_index = visa_types_list.index(initial_type) + 1 if initial_type in visa_types_list else 0
 
         with col_type:
             selected_type = st.selectbox(
-                f"2. Type de Visa ({visa_category})",
+                f"2. Type de Visa (N2 - {visa_category})",
                 ["Sélectionnez un type"] + visa_types_list,
                 index=default_type_index,
                 key=skey("form", key_suffix, "cat_type"),
             )
 
         if selected_type and selected_type != "Sélectionnez un type":
-            current_options = selected_options.get(selected_type)
+            options_n3 = selected_options_n2.get(selected_type)
 
-            if isinstance(current_options, list):
-                # Les options N4 sont les "boutons bascules" (COS, EOS, etc.)
-                options_list = [opt for opt in current_options if opt]
-
-                if not options_list:
-                    # N2 final (pas d'options N4 définies dans la matrice)
-                    final_visa_type = selected_type
-                else:
-                    st.subheader(f"3. Option de Dépôt / Classification pour **{selected_type}**")
-                    st.caption("Ces options correspondent aux colonnes `1-COS`, `2-EOS`, etc. dans votre matrice Visa.")
-                    
-                    # Définir l'index initial pour les boutons radio
-                    default_sub_index = 0
-                    if initial_level4_option in options_list:
-                        default_sub_index = options_list.index(initial_level4_option)
-
-                    final_selection = st.radio(
-                        "Choisissez l'option finale",
-                        options_list,
-                        index=default_sub_index,
-                        key=skey("form", key_suffix, "sub1"),
-                        horizontal=True # Affichage en ligne des boutons bascules
-                    )
-                    # Format de sauvegarde : Type (Option) -> Ex: "E-2 (1-COS)"
-                    final_visa_type = f"{selected_type} ({final_selection})"
+            if not options_n3:
+                 # Pas d'options N3/N4 définies, le N2 est la classification finale.
+                 final_visa_type_saved = selected_type
             else:
-                final_visa_type = selected_type
+                st.markdown("---")
+                col_n3, col_n4 = st.columns(2)
+                
+                # --- NIVEAU 3 (Groupe de Classification / Voie) ---
+                options_n3_list = list(options_n3.keys())
+                default_n3_index = options_n3_list.index(initial_level3_group) + 1 if initial_level3_group in options_n3_list else 0
 
-    return visa_category, final_visa_type
+                with col_n3:
+                    selected_group_n3 = st.selectbox(
+                        f"3. Voie de Classification (N3 - Thème)",
+                        ["Sélectionnez la voie"] + options_n3_list,
+                        index=default_n3_index,
+                        key=skey("form", key_suffix, "cat_group_n3"),
+                    )
+
+                # --- NIVEAU 4 (Boutons Bascules - Option Spécifique) ---
+                if selected_group_n3 and selected_group_n3 != "Sélectionnez la voie":
+                    options_n4_list = options_n3.get(selected_group_n3, [])
+
+                    if options_n4_list:
+                        with col_n4:
+                            st.subheader(f"4. Option Finale (N4)")
+                            st.caption("Boutons Bascules (COS, EOS, etc.)")
+                        
+                            # Définir l'index initial pour les boutons radio
+                            default_n4_index = 0
+                            if initial_level4_option in options_n4_list:
+                                default_n4_index = options_n4_list.index(initial_level4_option)
+
+                            final_selection_n4 = st.radio(
+                                f"Choisissez l'option finale pour **{selected_type} ({selected_group_n3})**",
+                                options_n4_list,
+                                index=default_n4_index,
+                                key=skey("form", key_suffix, "sub4"),
+                                horizontal=True 
+                            )
+                            # Format de sauvegarde N2 (N3 - N4) -> Ex: "E-2 (Statut de Processus - 1-COS)"
+                            final_visa_type_saved = f"{selected_type} ({selected_group_n3} - {final_selection_n4})"
+                    else:
+                        # N3 sélectionné mais pas d'options N4 définies (ne devrait pas arriver avec la logique _build)
+                        final_visa_type_saved = selected_type
+                else:
+                    # N2 sélectionné mais pas de N3 sélectionné
+                    final_visa_type_saved = selected_type
+        
+    # Si rien n'est sélectionné au-delà de N1
+    if not final_visa_type_saved and selected_type and selected_type != "Sélectionnez un type":
+        final_visa_type_saved = selected_type
+    if not final_visa_type_saved:
+        final_visa_type_saved = initial_type or ""
+
+    return visa_category, final_visa_type_saved
 
 
 def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
-    """Calcule les métriques clés pour l'affichage."""
+    """Calcule les métriques clés pour l'affichage.
+    (Code de la fonction _summarize_data inchangé)
+    """
     if df.empty:
         return {
             "total_clients": 0, "clients_actifs": 0, "clients_payés": 0,
             "total_honoraires": 0.0, "total_payé": 0.0, "solde_du": 0.0
         }
 
-    # Assurer les types float pour le calcul et utiliser np.nansum
     df['montant'] = pd.to_numeric(df['montant'], errors='coerce').fillna(0.0)
     df['payé'] = pd.to_numeric(df['payé'], errors='coerce').fillna(0.0)
     df['solde'] = pd.to_numeric(df['solde'], errors='coerce').fillna(0.0)
@@ -315,7 +415,7 @@ def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
     total_payé = np.nansum(df['payé'])
     solde_du = np.nansum(df['solde'])
 
-    clients_actifs = len(df)  # Simplification: tous les clients sont actifs
+    clients_actifs = len(df) 
     clients_payés = (df['solde'] <= 0).sum()
 
     return {
@@ -329,7 +429,9 @@ def _summarize_data(df: pd.DataFrame) -> Dict[str, Any]:
 
 
 def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str) -> pd.DataFrame:
-    """Ajoute, Modifie ou Supprime un client. Centralisation des actions CRUD."""
+    """Ajoute, Modifie ou Supprime un client. Centralisation des actions CRUD.
+    (Code de la fonction _update_client_data inchangé)
+    """
     dossier_n = str(new_data.get('dossier_n')).strip()
 
     if not dossier_n or dossier_n.lower() in ('nan', 'none', 'na', ''):
@@ -356,7 +458,6 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
     new_df_row = pd.DataFrame([new_data])
     new_df_row.columns = new_df_row.columns.str.replace(r'[^a-zA-Z0-9_]', '_', regex=True).str.strip('_').str.lower()
 
-    # Remplir les colonnes manquantes du DF principal si elles existent dans la nouvelle ligne
     for col in new_df_row.columns:
         if col not in df.columns:
             df[col] = pd.NA
@@ -370,15 +471,13 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
     paye = new_df_row['payé'].iloc[0] if 'payé' in new_df_row.columns else 0.0
     new_df_row['solde'] = montant - paye
 
-    # Traitement des dates (pour l'ajout)
     date_cols = ['date', 'dossier_envoyé', 'dossier_approuvé', 'dossier_refusé', 'dossier_annulé']
     for col in date_cols:
         if col in new_df_row.columns and new_df_row[col].iloc[0] is not None:
              try:
-                 # Assure que la valeur est convertie en datetime pour correspondre au type du DF
                  new_df_row[col] = pd.to_datetime(new_df_row[col])
              except:
-                 new_df_row[col] = pd.NaT # Not a Time
+                 new_df_row[col] = pd.NaT 
 
     # MODIFY
     if action == "MODIFY":
@@ -414,7 +513,9 @@ def _update_client_data(df: pd.DataFrame, new_data: Dict[str, Any], action: str)
 
 
 def upload_section():
-    """Section de chargement des fichiers (Barre latérale)."""
+    """Section de chargement des fichiers (Barre latérale).
+    (Code de la fonction upload_section inchangé)
+    """
     st.sidebar.header("📁 Chargement des Fichiers")
 
     header_clients = st.sidebar.number_input(
@@ -466,7 +567,9 @@ def upload_section():
 
 
 def data_processing_flow():
-    """Gère le chargement, le nettoyage et le stockage des DataFrames."""
+    """Gère le chargement, le nettoyage et le stockage des DataFrames.
+    (Code de la fonction data_processing_flow inchangé)
+    """
     header_clients = st.session_state.get(skey("header_clients_row"), 0)
     header_visa = st.session_state.get(skey("header_visa_row"), 0)
 
@@ -508,7 +611,9 @@ def data_processing_flow():
 
 
 def home_tab(df_clients: pd.DataFrame):
-    """Contenu de l'onglet Accueil/Statistiques."""
+    """Contenu de l'onglet Accueil/Statistiques.
+    (Code de la fonction home_tab inchangé)
+    """
     st.header("📊 Statistiques Clés")
 
     if df_clients.empty:
@@ -535,7 +640,9 @@ def home_tab(df_clients: pd.DataFrame):
 
 
 def accounting_tab(df_clients: pd.DataFrame):
-    """Contenu de l'onglet Comptabilité (Suivi financier)."""
+    """Contenu de l'onglet Comptabilité (Suivi financier).
+    (Code de la fonction accounting_tab inchangé)
+    """
     st.header("📈 Suivi Financier (Comptabilité Client)")
 
     if df_clients.empty:
@@ -601,7 +708,9 @@ def accounting_tab(df_clients: pd.DataFrame):
 
 
 def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
-    """Contenu de l'onglet Saisie/Modification/Suppression de Dossiers."""
+    """Contenu de l'onglet Saisie/Modification/Suppression de Dossiers.
+    (Seules les parties concernant l'affichage de la classification N1 > N2 > N3 > N4 ont été modifiées)
+    """
     st.header("📝 Gestion des Dossiers Clients (CRUD)")
 
     if not visa_structure:
@@ -627,7 +736,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
         next_dossier_n = 13000
         if not df_clients.empty and 'dossier_n' in df_clients.columns:
             try:
-                # Extraire les numéros de base (avant le premier '-') et trouver le max
                 base_dossiers = df_clients['dossier_n'].astype(str).str.split('-').str[0]
                 numeric_dossiers = base_dossiers.str.extract(r'(\d+)').astype(float)
                 max_n = numeric_dossiers[pd.notna(numeric_dossiers)].max()
@@ -642,7 +750,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
             st.markdown("#### 1. Identification du Dossier")
             col_parent, col_date = st.columns(2)
             
-            # LOGIQUE SOUS-DOSSIER
             parent_dossier_options = ["Nouveau Dossier Principal"] + list(client_options.keys())
             selected_parent_key = col_parent.selectbox(
                 "Type de Dossier à Ajouter",
@@ -658,7 +765,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
             if is_sub_dossier:
                 base_dossier_n = client_options.get(selected_parent_key, "")
                 
-                # Calcule le prochain suffixe (-01, -02, etc.)
                 pattern = re.compile(f"^{re.escape(base_dossier_n)}(-\d+)?$")
                 sub_dossiers = df_clients['dossier_n'].astype(str).loc[df_clients['dossier_n'].astype(str).apply(lambda x: pattern.match(x) is not None)]
                 
@@ -672,7 +778,7 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                 dossier_n_value = f"{base_dossier_n}-{next_suffix:02d}"
 
                 parent_name = selected_parent_key.split(' - ', 1)[1] if ' - ' in selected_parent_key else ""
-                client_name_value = parent_name # Le nom du client est pré-rempli avec le nom du dossier parent
+                client_name_value = parent_name 
                 
                 col_parent.text_input(
                     "Numéro de Dossier (Sous-Dossier Auto)", 
@@ -689,15 +795,13 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                     key=skey("form_add", "dossier_n_main")
                 )
             
-            # Utilise la valeur calculée/suggérée/saisie pour le dictionnaire final
             dossier_n = st.session_state.get(skey("form_add", "dossier_n_sub"), st.session_state.get(skey("form_add", "dossier_n_main"), dossier_n_value))
 
             client_name = st.text_input("Nom du Client", value=client_name_value, key=skey("form_add", "nom"))
             
             date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=date.today(), key=skey("form_add", "date"), format="DD/MM/YYYY")
-            # FIN LOGIQUE SOUS-DOSSIER
 
-            st.markdown("### 2. Classification Visa")
+            st.markdown("### 2. Classification Visa (N1 > N2 > N3 > N4)")
             cat_n1, sub_cat_final = _render_visa_classification_form(
                 key_suffix="add",
                 visa_structure=visa_structure,
@@ -709,7 +813,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
             paye_initial = col_paye.number_input("Paiement Initial Reçu (Payé)", min_value=0.0, step=100.0, key=skey("form_add", "payé"))
 
             st.markdown("### 4. État du Dossier (Dates Clés)")
-            # Nouveaux champs pour le suivi de l'état du dossier
             col_sent, col_approved, col_refused, col_cancelled = st.columns(4)
             date_envoye = col_sent.date_input("Dossier Envoyé", value=None, key=skey("form_add", "dossier_envoyé"), format="DD/MM/YYYY")
             date_approuve = col_approved.date_input("Dossier Approuvé", value=None, key=skey("form_add", "dossier_approuvé"), format="DD/MM/YYYY")
@@ -731,7 +834,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                     'sous_categorie': sub_cat_final,
                     'montant': montant_facture,
                     'payé': paye_initial,
-                    # Ajout des nouvelles dates d'état
                     'dossier_envoyé': date_envoye,
                     'dossier_approuvé': date_approuve,
                     'dossier_refusé': date_refuse,
@@ -760,7 +862,8 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                 initial_cat = str(current_data.get('categorie', '')).strip()
                 initial_sub_cat = str(current_data.get('sous_categorie', '')).strip()
 
-                n2_type, n3_key, n4_option = _resolve_visa_levels(initial_cat, initial_sub_cat, visa_structure)
+                # Résolution de la structure 4 niveaux à partir des données sauvegardées
+                n2_type, n3_group, n4_option = _resolve_visa_levels(initial_cat, initial_sub_cat, visa_structure)
 
                 with st.form("modify_client_form"):
                     st.markdown("---")
@@ -769,26 +872,24 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                     col_id.text_input("Numéro de Dossier", value=selected_dossier_n, disabled=True)
                     client_name = col_name.text_input("Nom du Client", value=current_data.get('nom', ''), key=skey("form_mod", "nom"))
 
-                    # Fonction utilitaire locale pour gérer la conversion des dates
                     def _get_current_date(data, col_name):
                         val = data.get(col_name)
-                        # Vérifie si la valeur est NaN, NaT, ou vide
                         if pd.isna(val) or val is None:
                             return None
                         try:
-                            # Tente de convertir en date.date()
                             return pd.to_datetime(val).date()
                         except:
                             return None
 
                     date_dossier = col_date.date_input("Date d'Ouverture du Dossier", value=_get_current_date(current_data, 'date'), key=skey("form_mod", "date"), format="DD/MM/YYYY")
 
-                    st.markdown("### Classification Visa")
+                    st.markdown("### Classification Visa (N1 > N2 > N3 > N4)")
                     cat_n1, sub_cat_final = _render_visa_classification_form(
                         key_suffix="mod",
                         visa_structure=visa_structure,
                         initial_category=initial_cat,
                         initial_type=n2_type,
+                        initial_level3_group=n3_group,
                         initial_level4_option=n4_option
                     )
 
@@ -810,7 +911,6 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
                     )
 
                     st.markdown("### État du Dossier (Dates Clés)")
-                    # Affichage des dates d'état existantes pour modification
                     col_sent, col_approved, col_refused, col_cancelled = st.columns(4)
                     date_envoye = col_sent.date_input("Dossier Envoyé", value=_get_current_date(current_data, 'dossier_envoyé'), key=skey("form_mod", "dossier_envoyé"), format="DD/MM/YYYY")
                     date_approuve = col_approved.date_input("Dossier Approuvé", value=_get_current_date(current_data, 'dossier_approuvé'), key=skey("form_mod", "dossier_approuvé"), format="DD/MM/YYYY")
@@ -855,7 +955,7 @@ def dossier_management_tab(df_clients: pd.DataFrame, visa_structure: Dict):
 
             if selected_key_del != "Sélectionnez un dossier":
                 selected_dossier_n_del = client_options.get(selected_key_del)
-                st.error(f"⚠️ Êtes-vous sûr de vouloir supprimer définitivement le Dossier N° {selected_dossier_n_del} ?")
+                st.error(f"⚠️ Êtes-vous sûr de vouloir supprimer définitivement le Dossier N° **{selected_dossier_n_del}** ?")
 
                 if st.button(f"🗑️ Confirmer la Suppression de {selected_dossier_n_del}"):
                     new_data = {'dossier_n': selected_dossier_n_del}
@@ -874,7 +974,6 @@ def main():
     df_visa = st.session_state.get(skey("df_visa"), pd.DataFrame())
 
     global VISA_STRUCTURE
-    # Reconstruire la structure Visa si le DF est là mais la structure est vide (ex: après un st.rerun)
     if not df_visa.empty and not VISA_STRUCTURE:
         VISA_STRUCTURE = _build_visa_structure(df_visa)
         
@@ -884,7 +983,7 @@ def main():
 
     # Tabs principaux
     tab_home, tab_acct, tab_dossier, tab_visa = st.tabs([
-        "🏠 Accueil & Stats", "📈 Comptabilité", "📝 Gestion des Dossiers (CRUD)", "📑 Structure Visa"
+        "🏠 Accueil & Stats", "📈 Comptabilité", "📝 Gestion des Dossiers (CRUD)", "📑 Structure Visa (N1-N4)"
     ])
 
     with tab_home:
@@ -897,9 +996,11 @@ def main():
         dossier_management_tab(df_clients, VISA_STRUCTURE)
 
     with tab_visa:
-        st.header("📑 Aperçu de la Structure Visa (N1 > N2 > N4)")
+        st.header("📑 Aperçu de la Structure Visa (4 Niveaux)")
+        st.subheader("Format: N1 (Catégorie) > N2 (Type) > N3 (Voie/Groupe) > N4 (Option/Statut)")
         if VISA_STRUCTURE:
             st.json(VISA_STRUCTURE)
+            st.caption("Cette structure est dérivée de vos colonnes Visa.csv et du Mappage N4->N3 défini dans le code.")
         else:
             st.warning("Structure Visa non chargée ou vide. Veuillez vérifier votre fichier Visa.")
 
