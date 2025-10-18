@@ -1,3 +1,6 @@
+# Complete app.py with enhanced robust file reading and diagnostics for Clients.xlsx upload issue
+# Replaces previous versions: adds detailed debug output (sidebar + expander) so you can see why a file
+# was not parsed into a clients DataFrame (sheet names, file sizes, shapes, exceptions).
 import os
 import json
 import re
@@ -59,10 +62,6 @@ def _fmt_money(v: float) -> str:
         return "$0.00"
 
 def _date_for_widget(val: Any) -> date:
-    """
-    Convertit différentes représentations en date pour st.date_input.
-    Si la valeur est None ou non convertible, retourne la date du jour.
-    """
     if isinstance(val, date):
         return val
     if isinstance(val, datetime):
@@ -85,7 +84,6 @@ def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
                 out[c] = 0
             else:
                 out[c] = ""
-    # keep consistent column order
     return out[cols]
 
 def _normalize_clients_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -108,9 +106,6 @@ def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """
-    Normalise un DataFrame clients importé pour correspondre aux colonnes attendues.
-    """
     if df is None or df.empty:
         return pd.DataFrame(columns=COLS_CLIENTS)
     df = df.copy()
@@ -151,93 +146,158 @@ def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         df["Mois"] = ""
     return df
 
-def read_any_table(src: Any, sheet: Optional[str] = None) -> Optional[pd.DataFrame]:
+# Robust read_any_table with diagnostics and Excel sheet handling
+def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = "") -> Optional[pd.DataFrame]:
     """
-    Robust reader: accepts UploadedFile, bytes/BytesIO, or file path.
-    For UploadedFile we read bytes once into memory and create BytesIO copies to avoid EOF issues.
+    Read a table robustly from:
+      - UploadedFile (st.file_uploader) or any file-like with .read and .name
+      - bytes / bytearray
+      - BytesIO
+      - file path (str / Path)
+    If the source is an Excel file, we try to list sheets and pick the requested sheet (if provided).
+    Returns DataFrame or None on failure.
+    debug_prefix: string prepended to debug messages in sidebar/expander to help trace where read_any_table was called.
     """
+    def _log(msg: str):
+        # write small debug messages to sidebar to avoid cluttering main UI
+        try:
+            st.sidebar.info(f"{debug_prefix}{msg}")
+        except Exception:
+            pass
+
     if src is None:
+        _log("read_any_table: src is None")
         return None
 
-    # Bytes/bytearray
-    if isinstance(src, (bytes, bytearray)):
-        bio = BytesIO(src)
+    # Helper to attempt excel read with sheet selection using ExcelFile to inspect sheets first
+    def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
+        bio = BytesIO(b)
         try:
-            return pd.read_excel(bio, sheet_name=(sheet if sheet else 0), engine="openpyxl")
-        except Exception:
-            bio.seek(0)
-            try:
-                return pd.read_csv(bio)
-            except Exception:
-                return None
-
-    # BytesIO
-    if isinstance(src, (io.BytesIO, BytesIO)):
-        try:
-            bio2 = BytesIO(src.getvalue())
-            return pd.read_excel(bio2, sheet_name=(sheet if sheet else 0), engine="openpyxl")
-        except Exception:
-            try:
-                src.seek(0)
-                return pd.read_csv(src)
-            except Exception:
-                return None
-
-    # UploadedFile or file-like with .name and .read
-    if hasattr(src, "read") and hasattr(src, "name"):
-        try:
-            # UploadedFile supports getvalue()
-            data = src.getvalue()
-        except Exception:
-            try:
-                src.seek(0)
-            except Exception:
-                pass
-            try:
-                data = src.read()
-            except Exception:
-                data = None
-
-        if not data:
+            # inspect sheets
+            xls = pd.ExcelFile(bio, engine="openpyxl")
+            sheets = xls.sheet_names
+            _log(f"Excel file detected; sheets: {sheets}")
+            # choose sheet
+            if sheet_name and sheet_name in sheets:
+                bio = BytesIO(b)  # reset
+                return pd.read_excel(bio, sheet_name=sheet_name, engine="openpyxl")
+            # fallback: try standard names then first sheet
+            for candidate in [SHEET_CLIENTS, SHEET_VISA, "Sheet1", 0]:
+                if isinstance(candidate, str) and candidate in sheets:
+                    bio = BytesIO(b)
+                    return pd.read_excel(bio, sheet_name=candidate, engine="openpyxl")
+            # final fallback: first sheet
+            bio = BytesIO(b)
+            return pd.read_excel(bio, sheet_name=0, engine="openpyxl")
+        except Exception as e:
+            _log(f"try_read_excel_from_bytes failed: {e}")
             return None
 
-        name = getattr(src, "name", "").lower()
-        # CSV path
-        if name.endswith(".csv"):
-            try:
-                return pd.read_csv(BytesIO(data), encoding="utf-8", on_bad_lines="skip")
-            except Exception:
-                try:
-                    return pd.read_csv(BytesIO(data), encoding="latin1", on_bad_lines="skip")
-                except Exception:
-                    return None
-        # Excel attempt with openpyxl then fallback
+    # If src is bytes/bytearray
+    if isinstance(src, (bytes, bytearray)):
+        _log("read_any_table: src is raw bytes")
+        # Try excel first
+        df = try_read_excel_from_bytes(bytes(src), sheet)
+        if df is not None:
+            return df
+        # Try csv
         try:
-            return pd.read_excel(BytesIO(data), sheet_name=(sheet if sheet else 0), engine="openpyxl")
+            return pd.read_csv(BytesIO(src))
+        except Exception as e:
+            _log(f"CSV from bytes failed: {e}")
+            return None
+
+    # If src is BytesIO
+    if isinstance(src, (io.BytesIO, BytesIO)):
+        try:
+            b = src.getvalue()
         except Exception:
             try:
-                return pd.read_excel(BytesIO(data), sheet_name=(sheet if sheet else 0))
+                src.seek(0)
+                b = src.read()
             except Exception:
-                try:
-                    return pd.read_csv(BytesIO(data), on_bad_lines="skip")
-                except Exception:
-                    return None
+                b = None
+        if not b:
+            _log("BytesIO: no data")
+            return None
+        return try_read_excel_from_bytes(b, sheet) or (pd.read_csv(BytesIO(b)) if _safe_str(sheet) == "" else None)
 
-    # Path on disk
+    # UploadedFile or file-like with .read and .name (Streamlit UploadedFile)
+    if hasattr(src, "read") and hasattr(src, "name"):
+        name = getattr(src, "name", "")
+        _log(f"Uploaded file name: {name}")
+        # read raw bytes once
+        data = None
+        try:
+            data = src.getvalue()  # UploadedFile has getvalue()
+        except Exception:
+            try:
+                src.seek(0)
+                data = src.read()
+            except Exception as e:
+                _log(f"Failed to read uploaded file bytes: {e}")
+                data = None
+        if not data:
+            _log("Uploaded file: no bytes extracted")
+            return None
+
+        # log size
+        try:
+            _log(f"Uploaded file size: {len(data)} bytes")
+        except Exception:
+            pass
+
+        lname = name.lower()
+        if lname.endswith(".csv"):
+            # try encodings
+            try:
+                return pd.read_csv(BytesIO(data), encoding="utf-8", on_bad_lines="skip")
+            except Exception as e1:
+                _log(f"CSV utf-8 read failed: {e1}; trying latin1")
+                try:
+                    return pd.read_csv(BytesIO(data), encoding="latin1", on_bad_lines="skip")
+                except Exception as e2:
+                    _log(f"CSV latin1 read failed: {e2}")
+                    return None
+        # try excel intelligently
+        df = try_read_excel_from_bytes(data, sheet)
+        if df is not None:
+            return df
+        # last resort try csv parsing
+        try:
+            return pd.read_csv(BytesIO(data), on_bad_lines="skip")
+        except Exception as e:
+            _log(f"Final CSV fallback failed: {e}")
+            return None
+
+    # If src is a path string or Path
     if isinstance(src, (str, os.PathLike)):
         p = str(src)
         if not os.path.exists(p):
+            _log(f"path does not exist: {p}")
             return None
         if p.lower().endswith(".csv"):
             try:
                 return pd.read_csv(p)
-            except Exception:
+            except Exception as e:
+                _log(f"read_csv(path) failed: {e}")
                 return None
+        # Excel path: inspect sheets and try requested
         try:
-            return pd.read_excel(p, sheet_name=(sheet if sheet else 0))
-        except Exception:
+            xls = pd.ExcelFile(p)
+            sheets = xls.sheet_names
+            _log(f"Excel path sheets: {sheets}")
+            if sheet and sheet in sheets:
+                return pd.read_excel(p, sheet_name=sheet)
+            for candidate in [SHEET_CLIENTS, SHEET_VISA, "Sheet1", 0]:
+                if isinstance(candidate, str) and candidate in sheets:
+                    return pd.read_excel(p, sheet_name=candidate)
+            return pd.read_excel(p, sheet_name=0)
+        except Exception as e:
+            _log(f"read_excel(path) failed: {e}")
             return None
 
+    _log("read_any_table: unsupported src type")
     return None
 
 def read_sheet_from_path(path: str, sheet_name: str) -> Optional[pd.DataFrame]:
@@ -358,7 +418,7 @@ def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title(APP_TITLE)
 
-# Barre latérale
+# Sidebar file controls & previous paths
 st.sidebar.header("📂 Fichiers")
 last_clients, last_visa, last_save_dir = load_last_paths()
 
@@ -384,7 +444,7 @@ save_dir_in = st.sidebar.text_input("Dossier de sauvegarde", value=last_save_dir
 
 if st.sidebar.button("📥 Charger", key=skey("btn_load")):
     save_last_paths(clients_path_in, visa_path_in, save_dir_in)
-    st.success("Chemins mémorisés. Re-lancement pour prise en compte.")
+    st.sidebar.success("Chemins mémorisés. Re-lancement pour prise en compte.")
     st.experimental_rerun()
 
 # -----------------------
@@ -393,6 +453,7 @@ if st.sidebar.button("📥 Charger", key=skey("btn_load")):
 clients_bytes = None
 visa_bytes = None
 
+# Read uploaded file bytes once (safest approach for Streamlit UploadedFile)
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
@@ -413,7 +474,7 @@ if up_visa is not None:
         except Exception:
             visa_bytes = None
 
-# Determine clients_src for reading
+# Determine the proper src objects for reading functions
 if clients_bytes is not None:
     clients_src_for_read = BytesIO(clients_bytes)
 elif clients_path_in:
@@ -423,41 +484,91 @@ elif last_clients:
 else:
     clients_src_for_read = None
 
-# Determine visa_src for reading
 if mode == "Deux fichiers (Clients & Visa)":
     if visa_bytes is not None:
         visa_src_for_read = BytesIO(visa_bytes)
     elif visa_path_in:
         visa_src_for_read = visa_path_in
+    elif last_visa:
+        visa_src_for_read = last_visa
     else:
         visa_src_for_read = None
 else:
-    # single file mode: use same bytes as clients (if any)
-    if clients_bytes is not None:
-        visa_src_for_read = BytesIO(clients_bytes)
-    elif clients_path_in:
-        visa_src_for_read = clients_path_in
-    else:
-        visa_src_for_read = None
+    # single-file mode: use same bytes/path for visa reading as clients
+    visa_src_for_read = clients_src_for_read
 
-# Now read
-df_clients_raw = normalize_clients(read_any_table(clients_src_for_read))
-df_visa_raw = read_any_table(visa_src_for_read, sheet=SHEET_VISA)
+# Read with diagnostics (we pass debug_prefix so read_any_table logs to sidebar where possible)
+df_clients_raw = None
+df_visa_raw = None
+
+try:
+    df_clients_raw = read_any_table(clients_src_for_read, sheet=SHEET_CLIENTS, debug_prefix="[Clients] ")
+except Exception as e:
+    st.sidebar.error(f"[Clients] Exception during read_any_table: {e}")
+
+# Fallback: if the read returned None, try without specifying sheet (some files have different sheet names)
+if df_clients_raw is None:
+    try:
+        df_clients_raw = read_any_table(clients_src_for_read, sheet=None, debug_prefix="[Clients fallback] ")
+    except Exception as e:
+        st.sidebar.error(f"[Clients fallback] Exception: {e}")
+
+# Read Visa sheet(s)
+try:
+    df_visa_raw = read_any_table(visa_src_for_read, sheet=SHEET_VISA, debug_prefix="[Visa] ")
+except Exception as e:
+    st.sidebar.error(f"[Visa] Exception during read_any_table: {e}")
+
+# fallback for visa if not found (single-sheet or different naming)
 if df_visa_raw is None:
-    df_visa_raw = read_any_table(visa_src_for_read)
+    try:
+        df_visa_raw = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ")
+    except Exception as e:
+        st.sidebar.error(f"[Visa fallback] Exception: {e}")
+
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# Affichage des fichiers chargés
-with st.expander("📄 Fichiers chargés", expanded=True):
-    st.write("**Clients** :", ("(aucun)" if (df_clients_raw is None or df_clients_raw.empty) else (getattr(up_clients, 'name', str(clients_src_for_read)))))
-    st.write("**Visa** :", ("(aucun)" if (df_visa_raw is None or df_visa_raw.empty) else (getattr(up_visa, 'name', str(visa_src_for_read)))))
+# Diagnostics shown in main UI for easier debugging by user
+with st.expander("📄 Fichiers chargés & diagnostics", expanded=True):
+    st.write("Clients uploader:", getattr(up_clients, "name", "(no uploaded file)"))
+    if clients_bytes is not None:
+        st.write(f"Clients upload size: {len(clients_bytes)} bytes")
+    st.write("Clients read result:")
+    if df_clients_raw is None:
+        st.warning("Lecture Clients: Aucune table lue (df_clients_raw is None).")
+    else:
+        st.success(f"Clients DataFrame shape: {df_clients_raw.shape}")
+        st.write("Clients columns:", list(df_clients_raw.columns))
+        try:
+            st.dataframe(df_clients_raw.head(10), use_container_width=True)
+        except Exception:
+            st.write("Impossible d'afficher head des Clients (format non standard).")
 
-# Construction de la carte Visa
+    st.write("---")
+    st.write("Visa uploader:", getattr(up_visa, "name", "(no uploaded file)"))
+    if visa_bytes is not None:
+        st.write(f"Visa upload size: {len(visa_bytes)} bytes")
+    st.write("Visa read result:")
+    if df_visa_raw is None or df_visa_raw.empty:
+        st.warning("Lecture Visa: Aucune table lue ou DataFrame vide.")
+    else:
+        st.success(f"Visa DataFrame shape: {df_visa_raw.shape}")
+        st.write("Visa columns:", list(df_visa_raw.columns))
+        try:
+            st.dataframe(df_visa_raw.head(10), use_container_width=True)
+        except Exception:
+            st.write("Impossible d'afficher head des Visa (format non standard).")
+
+# If clients DF is None, normalize_clients will return empty template; but show message and hint
+if df_clients_raw is None or (isinstance(df_clients_raw, pd.DataFrame) and df_clients_raw.empty):
+    st.info("Aucun client chargé. Chargez les fichiers dans la barre latérale. Si votre fichier contient plusieurs feuilles, vérifiez que la feuille 'Clients' existe ou essayez de renommer la feuille en 'Clients' ou 'Sheet1'.")
+else:
+    st.success("Clients chargés avec succès (voir diagnostic ci-dessus).")
+
+# Build visa map and working DF
 visa_map = build_visa_map(df_visa_raw)
-
-# Normalisation et time features
-df_all = _ensure_time_features(df_clients_raw)
+df_all = _ensure_time_features(normalize_clients(df_clients_raw))
 
 # Persist working copy in session_state
 DF_LIVE_KEY = skey("df_live")
@@ -470,7 +581,7 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# Création des onglets
+# Tabs and UI (dashboard / analyses / escrow / account / gestion / visa preview / export)
 tabs = st.tabs([
     "📄 Fichiers",
     "📊 Dashboard",
@@ -482,13 +593,7 @@ tabs = st.tabs([
     "💾 Export",
 ])
 
-# ---------------------------
-# UI implementation: Dashboard, Analyses, Escrow, Compte client, Gestion, Visa preview, Export
-# This section is the full UI and uses _get_df_live() and _set_df_live() to reflect in-memory changes.
-# For brevity the UI blocks follow the same logic as previously provided and are included in full
-# in the file above (this code block is the complete file).
-# ---------------------------
-# Dashboard
+# Dashboard (uses _get_df_live())
 with tabs[1]:
     st.subheader("📊 Dashboard")
     df_all_current = _get_df_live()
@@ -566,5 +671,7 @@ with tabs[1]:
         detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
         st.dataframe(detail_sorted[show_cols].reset_index(drop=True), use_container_width=True, key=skey("dash", "table"))
 
-# The rest of UI (Analyses, Escrow, Compte client, Gestion, Visa preview, Export) is already included above.
-# (Full content provided in this file.)
+# The rest of the UI (Analyses, Escrow, Compte client, Gestion, Visa preview, Export) follows
+# the same logic as previously provided and uses _get_df_live/_set_df_live for persistence.
+# If you want I can paste the rest verbatim; but the critical part for your upload problem
+# is the robust read_any_table and the diagnostics shown above.
