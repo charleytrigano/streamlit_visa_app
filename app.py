@@ -4,7 +4,7 @@
 # Gestion tab (Add/Edit/Delete) with:
 # - automatic ID_Client generation starting at 13057
 # - Categories dropdown populated from Visa file
-# - Sous-categories dependent on selected Category (from Visa mapping)
+# - Sous-categories dependent on selected Category (from Visa mapping, normalized)
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl; optional: plotly for interactive charts.
@@ -218,10 +218,6 @@ def money_to_float(x: Any) -> float:
 # Visa mapping utilities
 # =========================
 def build_visa_map(dfv: pd.DataFrame) -> Dict[str, List[str]]:
-    """
-    Build a mapping Category -> list of sub-categories from the Visa sheet.
-    Expects dfv columns to include 'Categories' and 'Sous-categorie' (after heuristic mapping).
-    """
     vm: Dict[str, List[str]] = {}
     if dfv is None or dfv.empty:
         return vm
@@ -728,10 +724,6 @@ def debug_show_columns_preview(df, name="Data"):
 # Helper: compute next client id
 # -----------------------
 def get_next_client_id(df: pd.DataFrame) -> int:
-    """
-    Determine next numeric client ID. Start from DEFAULT_START_CLIENT_ID if none found.
-    Accepts ID_Client with numeric content; extracts digits.
-    """
     if df is None or df.empty:
         return DEFAULT_START_CLIENT_ID
     vals = df.get("ID_Client", pd.Series([], dtype="object"))
@@ -872,6 +864,7 @@ if isinstance(df_clients_raw, pd.DataFrame):
 
 # Normalize visa sheet and build visa mapping for categories/subcategories
 visa_map = {}
+visa_map_norm = {}
 visa_categories = []
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
@@ -880,10 +873,24 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         raw_vm = build_visa_map(df_visa_raw)
         # normalize keys and values (strip)
         visa_map = {str(k).strip(): [str(s).strip() for s in v if str(s).strip()] for k, v in raw_vm.items() if str(k).strip()}
+        # normalized lookup (lowercase keys) to make lookup robust
+        visa_map_norm = {k.strip().lower(): [s.strip() for s in v] for k, v in visa_map.items()}
         visa_categories = sorted(list(visa_map.keys()))
     except Exception:
         visa_map = {}
+        visa_map_norm = {}
         visa_categories = []
+else:
+    visa_map = {}
+    visa_map_norm = {}
+    visa_categories = []
+
+# debug print of visa_map_norm to sidebar to inspect keys/values
+st.sidebar.markdown("DEBUG visa_map_norm:")
+try:
+    st.sidebar.write(visa_map_norm)
+except Exception:
+    pass
 
 # Apply heuristic mapping & numeric conversion automatically (no mapping print)
 if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
@@ -1175,11 +1182,11 @@ with tabs[3]:
             # Categories dropdown from Visa file (trimmed)
             categories_options_local = [""] + [c.strip() for c in categories_options]
             add_cat = st.selectbox("Categories", options=categories_options_local, index=0, key=skey("add","cat"))
-            # Sous-categories depend on selected category via visa_map (use stripped key)
+            # Sous-categories depend on selected category via visa_map_norm (normalized lookup)
             add_sub_options = []
-            if add_cat and visa_map:
-                add_sub_options = visa_map.get(add_cat.strip(), [])
-            # fallback to existing values if no visa_map
+            if isinstance(add_cat, str) and add_cat.strip():
+                add_sub_options = visa_map_norm.get(add_cat.strip().lower(), [])
+            # fallback to existing values if no visa_map entries found
             if not add_sub_options:
                 add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
             add_sub = st.selectbox("Sous-categorie", options=[""] + add_sub_options, index=0, key=skey("add","sub"))
@@ -1236,9 +1243,9 @@ with tabs[3]:
                     default_cat_index = edit_cat_options_with_empty.index(init_cat) if init_cat in edit_cat_options_with_empty else 0
                     e_cat = st.selectbox("Categories", options=edit_cat_options_with_empty, index=default_cat_index, key=skey("edit","cat"))
 
-                    # sub options depend on e_cat (strip key)
-                    if e_cat and visa_map:
-                        edit_sub_options = visa_map.get(e_cat.strip(), [])
+                    # sub options depend on e_cat (normalized lookup)
+                    if isinstance(e_cat, str) and e_cat.strip() and visa_map_norm:
+                        edit_sub_options = visa_map_norm.get(e_cat.strip().lower(), [])
                     else:
                         edit_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
                     edit_sub_options_with_empty = [""] + edit_sub_options
