@@ -1,7 +1,7 @@
 # Visa Manager - app.py
-# Version : présentation améliorée (UI soignée, cases à cocher en grille, expander debug)
+# Version finale : interface soignée, robust I/O et mapping Visa -> Sous-catégorie -> cases à cocher
 # Usage: streamlit run app.py
-# Requis: pandas, openpyxl, streamlit
+# Requis: pandas, openpyxl, streamlit; optionnel: plotly
 
 import os
 import json
@@ -207,8 +207,7 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
         return df
     cols = list(df.columns)
     rename_map = {}
-    def _ck(x):
-        return canonical_key(str(x))
+    def _ck(x): return canonical_key(str(x))
     for c in cols:
         k = _ck(c)
         if ("sous" in k and "categorie" in k) or ("souscategorie" in k):
@@ -411,8 +410,39 @@ def get_sub_options_for(sub_value: str, visa_sub_options_map: Dict[str, List[str
     return []
 
 # =========================
-# Client normalization wrapper
+# Robust column/normalize helpers used by app (defensive)
 # =========================
+def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
+    """
+    Ensure the returned DataFrame contains all cols (adding default empty/zero values).
+    Accepts any input and will coerce to an empty DataFrame if needed.
+    """
+    if not isinstance(df, pd.DataFrame):
+        try:
+            st.sidebar.warning("_ensure_columns: input was not a DataFrame; coercing to empty DataFrame.")
+        except Exception:
+            pass
+        df = pd.DataFrame()
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"]:
+                out[c] = 0.0
+            elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
+                out[c] = 0
+            else:
+                out[c] = ""
+    try:
+        return out[cols]
+    except Exception:
+        safe = pd.DataFrame(columns=cols)
+        for c in cols:
+            if c in out.columns:
+                safe[c] = out[c]
+            else:
+                safe[c] = 0.0 if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"] else ""
+        return safe
+
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
@@ -437,8 +467,10 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         df_clients_raw = pd.DataFrame()
     try:
         df_mapped, _ = map_columns_heuristic(df_clients_raw)
+        if df_mapped is None or not isinstance(df_mapped, pd.DataFrame):
+            df_mapped = pd.DataFrame()
     except Exception:
-        df_mapped = df_clients_raw.copy()
+        df_mapped = df_clients_raw.copy() if isinstance(df_clients_raw, pd.DataFrame) else pd.DataFrame()
     if "Date" in df_mapped.columns:
         try:
             df_mapped["Date"] = pd.to_datetime(df_mapped["Date"], dayfirst=True, errors="coerce")
@@ -450,7 +482,10 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
             try:
                 df[col] = df[col].apply(lambda x: _to_num(x) if not isinstance(x, (int, float)) else float(x))
             except Exception:
-                pass
+                try:
+                    df[col] = df[col].apply(lambda x: 0.0)
+                except Exception:
+                    pass
     df = _normalize_status(df)
     for c in ["Nom", "Categories", "Sous-categorie", "Visa", "Commentaires"]:
         if c in df.columns:
@@ -467,6 +502,9 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         df["_Année_"] = 0; df["_MoisNum_"] = 0; df["Mois"] = ""
     return df
 
+# =========================
+# Next ID & flags helpers
+# =========================
 def get_next_client_id(df: pd.DataFrame) -> int:
     if df is None or df.empty:
         return DEFAULT_START_CLIENT_ID
@@ -492,12 +530,11 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 # =========================
-# Read files and build maps
+# Read files and build maps / UI bootstrap
 # =========================
-clients_bytes = None
-visa_bytes = None
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+st.title(APP_TITLE)
 
-# Sidebar file controls
 st.sidebar.header("📂 Fichiers")
 last_clients, last_visa, last_save_dir = ("", "", "")
 try:
@@ -526,6 +563,8 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
+clients_bytes = None
+visa_bytes = None
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
@@ -584,14 +623,13 @@ if df_visa_raw is None and visa_src_for_read is not None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# Debug expander (sidebar) to avoid clutter
+# debug expander in sidebar
 with st.sidebar.expander("DEBUG Visa / Maps", expanded=False):
     if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         st.markdown("**Visa raw columns (preview):**")
         st.write(list(df_visa_raw.columns)[:80])
     else:
         st.write("Aucun Visa chargé.")
-    # build visa maps
     visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
     if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         try:
@@ -628,7 +666,7 @@ def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
 # =========================
-# Tabs: Files / Dashboard / Analyses / Gestion / Export
+# Tabs and UI
 # =========================
 tabs = st.tabs(["📄 Fichiers", "📊 Dashboard", "📈 Analyses", "➕ / ✏️ / 🗑️ Gestion", "💾 Export"])
 
@@ -686,7 +724,6 @@ with tabs[1]:
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
     else:
-        # filters
         cats = sorted(df_live_view["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_live_view.columns else []
         subs = sorted(df_live_view["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_live_view.columns else []
         years = sorted(pd.to_numeric(df_live_view["_Année_"], errors="coerce").dropna().astype(int).unique().tolist()) if "_Année_" in df_live_view.columns else []
@@ -711,7 +748,6 @@ with tabs[1]:
         st.markdown("---")
         st.subheader("Aperçu récent")
         recent = view.sort_values(by=["_Année_","_MoisNum_"], ascending=[False,False]).head(20).copy()
-        # format money columns for display
         for col in ["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]:
             if col in recent.columns:
                 recent[col] = recent[col].apply(lambda x: _fmt_money(_to_num(x)))
@@ -726,7 +762,6 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("📈 Analyses")
     st.info("Graphiques et analyses (basics).")
-    # small sample: distribution by category
     df_ = _get_df_live()
     if isinstance(df_, pd.DataFrame) and not df_.empty and "Categories" in df_.columns:
         cat_counts = df_["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
@@ -761,7 +796,6 @@ with tabs[3]:
     if not add_sub_options:
         add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
 
-    # If there are sub-options, auto-select first (for better UX)
     default_sub_index = 1 if add_sub_options else 0
 
     with st.form(key=skey("form_add")):
@@ -775,10 +809,8 @@ with tabs[3]:
             add_date = st.date_input("Date", value=date.today(), key=skey("add","date"))
             st.markdown(f"**Catégorie**: {add_cat_sel or '—'}")
             add_sub = st.selectbox("Sous-categorie", options=[""] + add_sub_options, index=default_sub_index, key=skey("add","sub"))
-            # determine checkbox options for sub
             specific_options = get_sub_options_for(add_sub, visa_sub_options_map)
             checkbox_options = specific_options if specific_options else DEFAULT_FLAGS
-            # render checkboxes as grid (2 columns)
             ncols = 2
             cols_chk = st.columns(ncols)
             add_flags_state = {}
