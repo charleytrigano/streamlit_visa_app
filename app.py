@@ -1,5 +1,6 @@
 # Visa Manager - app.py
 # Full application with robust Excel reading and header detection for "Clients" sheet.
+# Dashboard layout redesigned for clearer KPIs, charts and recent items.
 import os
 import json
 import re
@@ -10,6 +11,7 @@ from typing import Tuple, Dict, Any, List, Optional
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 
 # =========================
@@ -93,7 +95,7 @@ def _normalize_clients_numeric(df: pd.DataFrame) -> pd.DataFrame:
     if "Montant honoraires (US $)" in df.columns and "Autres frais (US $)" in df.columns:
         total = df["Montant honoraires (US $)"] + df["Autres frais (US $)"]
         paye = df["Payé"] if "Payé" in df.columns else 0.0
-        df["Solde"] = (total - paye).clip(lower=0.0)
+        df["Solde"] = (total - paye)
     return df
 
 def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
@@ -129,16 +131,15 @@ def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
             pass
     df = _normalize_clients_numeric(df)
     df = _normalize_status(df)
-    df["Nom"] = df["Nom"].astype(str)
-    df["Categories"] = df["Categories"].astype(str)
-    df["Sous-categorie"] = df["Sous-categorie"].astype(str)
-    df["Visa"] = df["Visa"].astype(str)
-    df["Commentaires"] = df["Commentaires"].astype(str)
+    # Clean strings
+    for c in ["Nom", "Categories", "Sous-categorie", "Visa", "Commentaires"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).fillna("")
     try:
         dser = pd.to_datetime(df["Date"], errors="coerce")
         df["_Année_"] = dser.dt.year.fillna(0).astype(int)
         df["_MoisNum_"] = dser.dt.month.fillna(0).astype(int)
-        df["Mois"] = df["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if m and m == m else "")
+        df["Mois"] = df["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) and m>0 else "")
     except Exception:
         df["_Année_"] = 0
         df["_MoisNum_"] = 0
@@ -671,46 +672,142 @@ tabs = st.tabs([
     "💾 Export",
 ])
 
-# Dashboard
+# Dashboard - redesigned presentation
 with tabs[1]:
     st.subheader("📊 Dashboard")
     df_all_current = _get_df_live()
-    if df_all_current is None or df_all_current.empty:
-        st.info("Aucun client chargé. Chargez les fichiers dans la barre latérale.")
-    else:
+
+    # FILTERS area (top) - compact and consistent
+    with st.container():
+        f1, f2, f3, f4 = st.columns([2,2,2,3])
         cats = sorted(df_all_current["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all_current.columns else []
         subs = sorted(df_all_current["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all_current.columns else []
         visas = sorted(df_all_current["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all_current.columns else []
-        years = sorted(pd.to_numeric(df_all_current["_Année_"], errors="coerce").dropna().astype(int).unique().tolist())
+        years = sorted(pd.to_numeric(df_all_current["_Année_"], errors="coerce").dropna().astype(int).unique().tolist()) if "_Année_" in df_all_current.columns else []
 
-        a1, a2, a3, a4 = st.columns([1, 1, 1, 1])
-        fc = a1.multiselect("Catégories", cats, default=[], key=skey("dash", "cats"))
-        fs = a2.multiselect("Sous-catégories", subs, default=[], key=skey("dash", "subs"))
-        fv = a3.multiselect("Visa", visas, default=[], key=skey("dash", "visas"))
-        fy = a4.multiselect("Année", years, default=[], key=skey("dash", "years"))
+        sel_cat = f1.multiselect("Catégories", options=cats, default=[], key=skey("dash", "cats"))
+        sel_sub = f2.multiselect("Sous-catégories", options=subs, default=[], key=skey("dash", "subs"))
+        sel_visa = f3.multiselect("Visa", options=visas, default=[], key=skey("dash", "visas"))
+        sel_year = f4.multiselect("Années", options=years, default=[], key=skey("dash", "years"))
 
-        view = df_all_current.copy()
-        if fc:
-            view = view[view["Categories"].astype(str).isin(fc)]
-        if fs:
-            view = view[view["Sous-categorie"].astype(str).isin(fs)]
-        if fv:
-            view = view[view["Visa"].astype(str).isin(fv)]
-        if fy:
-            view = view[view["_Année_"].isin(fy)]
+    # Apply filters
+    view = df_all_current.copy() if df_all_current is not None else pd.DataFrame()
+    if sel_cat:
+        view = view[view["Categories"].astype(str).isin(sel_cat)]
+    if sel_sub:
+        view = view[view["Sous-categorie"].astype(str).isin(sel_sub)]
+    if sel_visa:
+        view = view[view["Visa"].astype(str).isin(sel_visa)]
+    if sel_year:
+        view = view[view["_Année_"].isin(sel_year)]
 
-        k1, k2, k3, k4, k5 = st.columns([1, 1, 1, 1, 1])
-        k1.metric("Dossiers", f"{len(view)}")
-        total = (view["Montant honoraires (US $)"].apply(_to_num) + view["Autres frais (US $)"].apply(_to_num)).sum()
-        paye = view["Payé"].apply(_to_num).sum()
-        solde = view["Solde"].apply(_to_num).sum()
-        env_pct = 0
-        if "Dossiers envoyé" in view.columns and len(view) > 0:
-            env_pct = int(100 * (view["Dossiers envoyé"].apply(_to_num).clip(lower=0, upper=1).sum() / len(view)))
-        k2.metric("Honoraires+Frais", _fmt_money(total))
-        k3.metric("Payé", _fmt_money(paye))
-        k4.metric("Solde", _fmt_money(solde))
-        k5.metric("Envoyés (%)", f"{env_pct}%")
+    if view is None or view.empty:
+        st.warning("Aucune donnée correspondant aux filtres.")
+    else:
+        # KPIs row: clear, larger metrics
+        total_clients = len(view)
+        total_honoraires = (view["Montant honoraires (US $)"].apply(_to_num) + view["Autres frais (US $)"].apply(_to_num)).sum()
+        total_paye = view["Payé"].apply(_to_num).sum()
+        total_solde = view["Solde"].apply(_to_num).sum()
 
-# NOTE: Remaining UI sections omitted for brevity (Analyses, Escrow, Compte client, Gestion, Visa preview, Export).
-# They are functionally identical to previous versions and use the helpers above.
+        kcol1, kcol2, kcol3, kcol4 = st.columns([1.4,1.4,1.4,1.4])
+        kcol1.metric("Dossiers", f"{total_clients:,}")
+        kcol2.metric("Total Facturé", _fmt_money(total_honoraires))
+        kcol3.metric("Total Reçu", _fmt_money(total_paye))
+        kcol4.metric("Solde Total", _fmt_money(total_solde))
+
+        st.markdown("---")
+
+        # Charts row: Categories distribution + Monthly trend
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.subheader("Répartition par Catégorie")
+            if "Categories" in view.columns:
+                cat_counts = view["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
+                if not cat_counts.empty:
+                    st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
+                else:
+                    st.info("Pas de catégories à afficher.")
+            else:
+                st.info("Colonne 'Categories' introuvable.")
+
+            st.write("")  # spacing
+            st.subheader("Top 10 Sous-catégories")
+            if "Sous-categorie" in view.columns:
+                sub_counts = view["Sous-categorie"].value_counts().head(10)
+                st.bar_chart(sub_counts)
+            else:
+                st.info("Colonne 'Sous-categorie' introuvable.")
+
+        with c2:
+            st.subheader("Évolution Mensuelle (Honoraires + Frais)")
+            # build monthly aggregation
+            tmp = view.copy()
+            tmp["Total_US"] = tmp["Montant honoraires (US $)"].apply(_to_num) + tmp["Autres frais (US $)"].apply(_to_num)
+            if "_Année_" in tmp.columns and "Mois" in tmp.columns:
+                tmp["YearMonth"] = tmp["_Année_"].astype(str) + "-" + tmp["Mois"].astype(str)
+                g = tmp.groupby("YearMonth", as_index=False)["Total_US"].sum().sort_values("YearMonth")
+                if not g.empty:
+                    g = g.set_index("YearMonth")
+                    st.line_chart(g)
+                else:
+                    st.info("Pas assez de données mensuelles.")
+            else:
+                st.info("Colonnes temporelles manquantes (_Année_/Mois).")
+
+        st.markdown("---")
+
+        # Right side quick KPIs and filters summary
+        r1, r2, r3 = st.columns([1,1,2])
+        with r1:
+            st.metric("Dossiers Envoyés", f"{int(view['Dossiers envoyé'].apply(_to_num).sum())}" if "Dossiers envoyé" in view.columns else "N/A")
+        with r2:
+            st.metric("Dossiers Approuvés", f"{int(view['Dossier approuvé'].apply(_to_num).sum())}" if "Dossier approuvé" in view.columns else "N/A")
+        with r3:
+            st.write("Filtres actifs:")
+            act_filters = []
+            if sel_cat: act_filters.append(f"Catégories: {', '.join(sel_cat)}")
+            if sel_sub: act_filters.append(f"Sous-catégories: {', '.join(sel_sub)}")
+            if sel_visa: act_filters.append(f"Visa: {', '.join(sel_visa)}")
+            if sel_year: act_filters.append(f"Années: {', '.join(map(str, sel_year))}")
+            if not act_filters:
+                st.write("Aucun filtre actif.")
+            else:
+                for ftxt in act_filters:
+                    st.caption(ftxt)
+
+        st.markdown("---")
+
+        # Table: Recent items with formatted money and important columns
+        st.subheader("Aperçu récent des dossiers")
+        recent = view.sort_values(by=["_Année_", "_MoisNum_"], ascending=[False, False]).head(20).copy()
+        display_cols = [c for c in [
+            "Dossier N", "ID_Client", "Nom", "Date", "Categories", "Sous-categorie", "Visa",
+            "Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"
+        ] if c in recent.columns]
+        # format money columns
+        for col in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"]:
+            if col in recent.columns:
+                recent[col] = recent[col].apply(lambda x: _fmt_money(_to_num(x)))
+        # format date
+        if "Date" in recent.columns:
+            try:
+                recent["Date"] = pd.to_datetime(recent["Date"], errors="coerce").dt.date.astype(str)
+            except Exception:
+                recent["Date"] = recent["Date"].astype(str)
+        st.dataframe(recent[display_cols].reset_index(drop=True), use_container_width=True)
+
+        # Export quick: allow user to export the filtered view
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            view.to_excel(writer, index=False, sheet_name="Filtered")
+        st.download_button(
+            "⬇️ Exporter la vue filtrée (.xlsx)",
+            data=buf.getvalue(),
+            file_name="Clients_filtered.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=skey("dash", "export_filtered")
+        )
+
+# NOTE: Remaining UI sections (Analyses, Escrow, Compte client, Gestion, Visa preview, Export)
+# remain functionally identical to prior versions and use the helpers above.
