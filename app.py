@@ -1,9 +1,8 @@
 # Visa Manager - app.py
-# Full Streamlit app with robust Excel/.csv reading, automatic column normalization for Clients,
-# simplified Files tab and enhanced Dashboard (date range, search, KPIs, interactive charts).
+# Streamlit app: robust Excel/CSV reading, automatic column normalization for Clients,
+# simplified Files tab, Dashboard (KPIs & table) and Analyses tab (charts).
 #
 # Usage: streamlit run app.py
-#
 # Requirements: pandas, openpyxl; optional: plotly for interactive charts.
 
 import os
@@ -28,7 +27,7 @@ except Exception:
     HAS_PLOTLY = False
 
 # =========================
-# Constantes et configuration
+# Constants / config
 # =========================
 APP_TITLE = "🛂 Visa Manager"
 
@@ -47,14 +46,13 @@ SHEET_VISA = "Visa"
 SID = "vmgr"
 
 # -------------------------
-# IMPORTANT: define skey early so it's available when UI code references it
+# skey helper must be defined early (used as widget keys)
 # -------------------------
 def skey(*parts: str) -> str:
-    """Session key helper"""
     return f"{SID}_" + "_".join([p for p in parts if p])
 
 # =========================
-# Helper plotting (plotly safe)
+# Plot helpers (Plotly safe)
 # =========================
 def plot_pie(df_counts, names_col: str = "Categorie", value_col: str = "Nombre", title: str = ""):
     if HAS_PLOTLY and px is not None:
@@ -86,15 +84,8 @@ def plot_line(df_line, x: str, y: str, title: str = "", x_title: str = "", y_tit
             st.line_chart(df_line.set_index(x)[y])
 
 # =========================
-# Utilitaires de normalisation (noms de colonnes & montants)
+# Column normalization utilities
 # =========================
-
-def _safe_str(x: Any) -> str:
-    try:
-        return "" if x is None else str(x)
-    except Exception:
-        return ""
-
 def normalize_header_text(s: str) -> str:
     if s is None:
         return ""
@@ -171,6 +162,7 @@ def map_columns_heuristic(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str,str]
         if mapped is None:
             mapped = normalize_header_text(c)
         mapping[c] = mapped
+    # ensure unique names
     new_names = {}
     seen = {}
     for orig, new in mapping.items():
@@ -218,9 +210,8 @@ def money_to_float(x: Any) -> float:
             return 0.0
 
 # =========================
-# Normalization / Time features / numeric helpers
+# Normalization / features
 # =========================
-
 def _to_num(x: Any) -> float:
     return money_to_float(x) if not isinstance(x, (int, float)) else float(x)
 
@@ -279,7 +270,7 @@ def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=COLS_CLIENTS)
     df = df.copy()
-    df, mapping = map_columns_heuristic(df)
+    df, _mapping = map_columns_heuristic(df)
     if "Date" in df.columns:
         try:
             df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
@@ -323,7 +314,7 @@ def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
             df["Mois"] = ""
     return df
 
-# Safe rerun wrapper (handles environments missing experimental_rerun)
+# Safe rerun wrapper
 def safe_rerun():
     try:
         rerun_fn = getattr(st, "experimental_rerun", None)
@@ -343,9 +334,8 @@ def safe_rerun():
         pass
 
 # =========================
-# I/O robust reading (Excel/CSV)
+# Robust I/O reading functions
 # =========================
-
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
     try:
@@ -513,13 +503,12 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     return None
 
 # =========================
-# UI
+# App UI: Tabs - Files, Dashboard, Analyses
 # =========================
-
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title(APP_TITLE)
 
-# Sidebar (file upload controls)
+# Sidebar - file upload controls
 st.sidebar.header("📂 Fichiers")
 last_clients, last_visa, last_save_dir = ("", "", "")
 try:
@@ -559,10 +548,9 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_load")):
         st.sidebar.error("Impossible de sauvegarder les chemins.")
     safe_rerun()
 
-# Read uploaded files robustly and avoid re-consuming UploadedFile stream
+# Read uploaded files into bytes to avoid stream reuse issues
 clients_bytes = None
 visa_bytes = None
-
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
@@ -572,7 +560,6 @@ if up_clients is not None:
             clients_bytes = up_clients.read()
         except Exception:
             clients_bytes = None
-
 if up_visa is not None:
     try:
         visa_bytes = up_visa.getvalue()
@@ -583,7 +570,7 @@ if up_visa is not None:
         except Exception:
             visa_bytes = None
 
-# Determine sources for read
+# Determine read sources
 if clients_bytes is not None:
     clients_src_for_read = BytesIO(clients_bytes)
 elif clients_path_in:
@@ -605,10 +592,9 @@ if mode == "Deux fichiers (Clients & Visa)":
 else:
     visa_src_for_read = clients_src_for_read
 
-# Read (clients + visa)
+# Read tables
 df_clients_raw = None
 df_visa_raw = None
-
 try:
     df_clients_raw = read_any_table(clients_src_for_read, sheet=SHEET_CLIENTS, debug_prefix="[Clients] ")
 except Exception as e:
@@ -634,11 +620,10 @@ if df_visa_raw is None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# If df_clients_raw is DataFrame, apply heuristic renaming + numeric conversion
-mapping_applied = {}
+# Apply heuristic mapping & numeric conversion automatically (no mapping print)
 if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
     try:
-        df_clients_raw, mapping_applied = map_columns_heuristic(df_clients_raw)
+        df_clients_raw, _map = map_columns_heuristic(df_clients_raw)
         for col in NUMERIC_TARGETS:
             if col in df_clients_raw.columns:
                 df_clients_raw[col] = df_clients_raw[col].apply(money_to_float)
@@ -647,11 +632,11 @@ if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
                 df_clients_raw["Date"] = pd.to_datetime(df_clients_raw["Date"], dayfirst=True, errors="coerce")
             except Exception:
                 pass
-        st.sidebar.success("Colonnes Clients normalisées automatiquement.")
+        st.sidebar.success("Clients : colonnes normalisées automatiquement.")
     except Exception as e:
-        st.sidebar.error(f"Erreur lors de la normalisation automatique des colonnes Clients: {e}")
+        st.sidebar.error(f"Erreur normalisation automatique Clients: {e}")
 
-# Ensure we have a usable df_all and initialize session_state safely
+# Build working df_all and persist to session_state
 try:
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
@@ -660,34 +645,17 @@ try:
                 df_clients_raw = tmp
         except Exception:
             pass
-
     try:
         df_all = _ensure_time_features(normalize_clients(df_clients_raw))
     except Exception as e_norm:
-        try:
-            st.sidebar.error(f"Erreur lors de la normalisation des clients : {e_norm}")
-            st.sidebar.exception(e_norm)
-            st.sidebar.write("Type de df_clients_raw:", type(df_clients_raw))
-            try:
-                sr = repr(df_clients_raw)
-                st.sidebar.write("Repr (truncated):", sr[:1000] + ("..." if len(sr) > 1000 else ""))
-            except Exception:
-                pass
-        except Exception:
-            pass
+        st.sidebar.error(f"Erreur normalization: {e_norm}")
         df_all = pd.DataFrame(columns=COLS_CLIENTS)
-
 except Exception as e_top:
-    try:
-        st.sidebar.error(f"Erreur inattendue lors de la préparation des données clients : {e_top}")
-        st.sidebar.exception(e_top)
-    except Exception:
-        pass
+    st.sidebar.error(f"Erreur inattendue préparation données: {e_top}")
     df_all = pd.DataFrame(columns=COLS_CLIENTS)
 
-# Persist working copy in session_state (update when files produced non-empty df_all)
+# Persist session_state: update when df_all non-empty
 DF_LIVE_KEY = skey("df_live")
-
 if isinstance(df_all, pd.DataFrame) and not df_all.empty:
     st.session_state[DF_LIVE_KEY] = df_all.copy()
 else:
@@ -700,15 +668,21 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# -----------------------
-# FICHIERS - Simplified: show only Clients and Visa previews
-# -----------------------
-with st.container():
-    st.header("📂 Fichiers")
-    colA, colB = st.columns(2)
+# Tabs
+tabs = st.tabs([
+    "📄 Fichiers",
+    "📊 Dashboard",
+    "📈 Analyses",
+    "💾 Export",
+])
 
-    # Clients card (left)
-    with colA:
+# -----------------------
+# Fichiers tab: only file previews (no mapping display)
+# -----------------------
+with tabs[0]:
+    st.header("📂 Fichiers")
+    c1, c2 = st.columns(2)
+    with c1:
         st.subheader("Clients")
         if up_clients is not None:
             st.write("Upload:", up_clients.name)
@@ -717,10 +691,9 @@ with st.container():
             except Exception:
                 pass
         elif isinstance(clients_src_for_read, str) and clients_src_for_read:
-            st.write("Chargé depuis chemin local :", clients_src_for_read)
+            st.write("Chargé depuis chemin local:", clients_src_for_read)
         else:
             st.info("Aucun fichier Clients sélectionné.")
-
         if df_clients_raw is None or (isinstance(df_clients_raw, pd.DataFrame) and df_clients_raw.empty):
             st.warning("Lecture Clients : aucun tableau trouvé ou DataFrame vide.")
         else:
@@ -728,18 +701,8 @@ with st.container():
             try:
                 st.dataframe(df_clients_raw.head(8), use_container_width=True, height=220)
             except Exception:
-                st.write("Aperçu indisponible pour ce format de fichier.")
-            if mapping_applied:
-                st.caption("Mapping colonnes appliqué (extrait):")
-                try:
-                    items_show = list(mapping_applied.items())[:12]
-                    for o,n in items_show:
-                        st.caption(f"'{o}' -> '{n}'")
-                except Exception:
-                    pass
-
-    # Visa card (right)
-    with colB:
+                st.write("Aperçu indisponible.")
+    with c2:
         st.subheader("Visa")
         if mode == "Deux fichiers (Clients & Visa)":
             if up_visa is not None:
@@ -749,12 +712,11 @@ with st.container():
                 except Exception:
                     pass
             elif isinstance(visa_src_for_read, str) and visa_src_for_read:
-                st.write("Chargé depuis chemin local :", visa_src_for_read)
+                st.write("Chargé depuis chemin local:", visa_src_for_read)
             else:
                 st.info("Aucun fichier Visa sélectionné.")
         else:
             st.write("Mode 'Un fichier' : Visa sera lu depuis le même fichier Clients si présent.")
-
         if df_visa_raw is None or (isinstance(df_visa_raw, pd.DataFrame) and df_visa_raw.empty):
             st.warning("Lecture Visa : aucun tableau trouvé ou DataFrame vide.")
         else:
@@ -762,205 +724,160 @@ with st.container():
             try:
                 st.dataframe(df_visa_raw.head(8), use_container_width=True, height=220)
             except Exception:
-                st.write("Aperçu Visa indisponible pour ce format de fichier.")
-
+                st.write("Aperçu Visa indisponible.")
     st.markdown("---")
     a1, a2 = st.columns([1,1])
     with a1:
-        if st.button("Réinitialiser la mémoire (annuler modifications en mémoire)"):
+        if st.button("Réinitialiser la mémoire (recharger depuis fichiers)"):
             df_all = _ensure_time_features(normalize_clients(df_clients_raw))
             _set_df_live(df_all)
-            st.success("Mémoire réinitialisée à partir des fichiers chargés.")
+            st.success("Mémoire réinitialisée.")
             safe_rerun()
     with a2:
         if st.button("Actualiser la lecture"):
             safe_rerun()
 
 # -----------------------
-# DASHBOARD - Enhanced (date range, search, KPIs, Plotly charts, Top clients, export)
+# Dashboard tab: KPIs + recent table (no charts)
 # -----------------------
-with st.container():
+with tabs[1]:
     st.subheader("📊 Dashboard")
     df_all_current = _get_df_live()
-
     if df_all_current is None or df_all_current.empty:
         st.info("Aucune donnée cliente en mémoire. Chargez le fichier Clients dans l'onglet Fichiers.")
     else:
-        today = date.today()
-        min_date = df_all_current["Date"].min() if "Date" in df_all_current.columns else pd.Timestamp(today - timedelta(days=365))
-        max_date = df_all_current["Date"].max() if "Date" in df_all_current.columns else pd.Timestamp(today)
-        try:
-            min_date = _date_for_widget(min_date)
-        except Exception:
-            min_date = today - timedelta(days=365)
-        try:
-            max_date = _date_for_widget(max_date)
-        except Exception:
-            max_date = today
+        # Filters: categories, sous, visa, years (compact)
+        cats = sorted(df_all_current["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all_current.columns else []
+        subs = sorted(df_all_current["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all_current.columns else []
+        visas = sorted(df_all_current["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all_current.columns else []
+        years = sorted(pd.to_numeric(df_all_current["_Année_"], errors="coerce").dropna().astype(int).unique().tolist()) if "_Année_" in df_all_current.columns else []
 
-        with st.expander("Filtres (afficher / masquer)", expanded=True):
-            fcol1, fcol2, fcol3, fcol4 = st.columns([2,2,2,2])
-            with fcol1:
-                date_from = st.date_input("Date de", value=min_date, key=skey("filter", "date_from"))
-                date_to = st.date_input("Date à", value=max_date, key=skey("filter", "date_to"))
-            with fcol2:
-                search_text = st.text_input("Recherche (Nom / Partie du nom)", value="", key=skey("filter", "search"))
-            with fcol3:
-                dossier_search = st.text_input("Dossier N (exact)", value="", key=skey("filter", "dossier"))
-            with fcol4:
-                scope_period = st.checkbox("KPIs sur la période filtrée", value=True, key=skey("filter", "scope_period"))
-                top_n = st.number_input("Top clients (N)", min_value=3, max_value=100, value=10, step=1, key=skey("filter", "top_n"))
+        f1, f2, f3, f4 = st.columns([1,1,1,1])
+        sel_cat = f1.multiselect("Catégories", cats, default=[], key=skey("dash","cats"))
+        sel_sub = f2.multiselect("Sous-catégories", subs, default=[], key=skey("dash","subs"))
+        sel_visa = f3.multiselect("Visa", visas, default=[], key=skey("dash","visas"))
+        sel_year = f4.multiselect("Année", years, default=[], key=skey("dash","years"))
 
         view = df_all_current.copy()
-        if "Date" in view.columns:
+        if sel_cat:
+            view = view[view["Categories"].astype(str).isin(sel_cat)]
+        if sel_sub:
+            view = view[view["Sous-categorie"].astype(str).isin(sel_sub)]
+        if sel_visa:
+            view = view[view["Visa"].astype(str).isin(sel_visa)]
+        if sel_year:
+            view = view[view["_Année_"].isin(sel_year)]
+
+        # KPIs
+        total = (view.get("Montant honoraires (US $)", 0).apply(_to_num) + view.get("Autres frais (US $)", 0).apply(_to_num)).sum()
+        paye = view.get("Payé", 0).apply(_to_num).sum() if "Payé" in view.columns else 0.0
+        solde = view.get("Solde", 0).apply(_to_num).sum() if "Solde" in view.columns else 0.0
+        k1, k2, k3, k4, k5 = st.columns([1,1,1,1,1])
+        k1.metric("Dossiers", f"{len(view):,}")
+        k2.metric("Honoraires+Frais", _fmt_money(total))
+        k3.metric("Payé", _fmt_money(paye))
+        k4.metric("Solde", _fmt_money(solde))
+        avg = (total / len(view)) if len(view) else 0.0
+        k5.metric("Moyenne / dossier", _fmt_money(avg))
+
+        st.markdown("---")
+        st.subheader("Aperçu récent des dossiers")
+        recent = view.sort_values(by=["_Année_", "_MoisNum_"], ascending=[False, False]).head(20).copy()
+        display_cols = [c for c in [
+            "Dossier N", "ID_Client", "Nom", "Date", "Categories", "Sous-categorie", "Visa",
+            "Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"
+        ] if c in recent.columns]
+        for col in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"]:
+            if col in recent.columns:
+                recent[col] = recent[col].apply(lambda x: _fmt_money(_to_num(x)))
+        if "Date" in recent.columns:
             try:
-                dt_from = pd.to_datetime(date_from)
-                dt_to = pd.to_datetime(date_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-                view = view[(pd.to_datetime(view["Date"], errors="coerce") >= dt_from) & (pd.to_datetime(view["Date"], errors="coerce") <= dt_to)]
+                recent["Date"] = pd.to_datetime(recent["Date"], errors="coerce").dt.date.astype(str)
             except Exception:
-                pass
+                recent["Date"] = recent["Date"].astype(str)
+        st.dataframe(recent[display_cols].reset_index(drop=True), use_container_width=True)
 
-        if search_text and "Nom" in view.columns:
-            q = search_text.strip().lower()
-            view = view[view["Nom"].str.lower().str.contains(q, na=False)]
-        if dossier_search:
-            col = "Dossier N"
-            if col in view.columns:
-                view = view[view][view[col].astype(str).str.strip() == dossier_search.strip()]
-
-        if "Montant honoraires (US $)" in view.columns and "Autres frais (US $)" in view.columns:
-            view["Total_US"] = view["Montant honoraires (US $)"].apply(_to_num) + view["Autres frais (US $)"].apply(_to_num)
+# -----------------------
+# Analyses tab: charts (moved here)
+# -----------------------
+with tabs[2]:
+    st.subheader("📈 Analyses")
+    df_all_current = _get_df_live()
+    if df_all_current is None or df_all_current.empty:
+        st.info("Aucune donnée pour les analyses. Chargez les fichiers d'abord.")
+    else:
+        # Category distribution
+        st.markdown("### Répartition par Catégorie")
+        if "Categories" in df_all_current.columns:
+            cat_counts = df_all_current["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
+            if not cat_counts.empty:
+                plot_pie(cat_counts, names_col="Categorie", value_col="Nombre", title="Répartition par Catégorie")
+            else:
+                st.info("Pas de catégories à afficher.")
         else:
-            view["Total_US"] = 0.0
-
-        kview = view if scope_period else df_all_current.copy()
-        if "Total_US" not in kview.columns:
-            if "Montant honoraires (US $)" in kview.columns and "Autres frais (US $)" in kview.columns:
-                kview["Total_US"] = kview["Montant honoraires (US $)"].apply(_to_num) + kview["Autres frais (US $)"].apply(_to_num)
-            else:
-                kview["Total_US"] = 0.0
-
-        total_count = len(kview)
-        total_facture = kview["Total_US"].sum() if "Total_US" in kview.columns else 0.0
-        total_recu = kview["Payé"].apply(_to_num).sum() if "Payé" in kview.columns else 0.0
-        total_solde = kview["Solde"].apply(_to_num).sum() if "Solde" in kview.columns else 0.0
-        avg_per_dossier = (total_facture / total_count) if total_count else 0.0
-        taux_envoye = (kview["Dossiers envoyé"].apply(_to_num).clip(0,1).sum() / total_count * 100) if ("Dossiers envoyé" in kview.columns and total_count) else 0.0
-        n_refus = int(kview["Dossier refusé"].apply(_to_num).sum()) if "Dossier refusé" in kview.columns else 0
-
-        k1, k2, k3, k4, k5, k6 = st.columns([1,1,1,1,1,1])
-        k1.metric("Dossiers", f"{total_count:,}")
-        k2.metric("Total facturé", _fmt_money(total_facture))
-        k3.metric("Total reçu", _fmt_money(total_recu))
-        k4.metric("Solde total", _fmt_money(total_solde))
-        k5.metric("Moyenne / dossier", _fmt_money(avg_per_dossier))
-        k6.metric("Taux envoyés (%)", f"{taux_envoye:.0f}%")
-        st.markdown(f"Nombre de refus (période): **{n_refus}**")
+            st.info("Colonne 'Categories' introuvable.")
 
         st.markdown("---")
-
-        chart1, chart2 = st.columns([1,2])
-        with chart1:
-            st.subheader("Répartition par Catégorie")
-            if "Categories" in view.columns:
-                cat_counts = view["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
-                if not cat_counts.empty:
-                    plot_pie(cat_counts, names_col="Categorie", value_col="Nombre", title="Catégories")
+        # Monthly trend
+        st.markdown("### Évolution Mensuelle (Total US)")
+        tmp = df_all_current.copy()
+        if "Montant honoraires (US $)" in tmp.columns and "Autres frais (US $)" in tmp.columns:
+            tmp["Total_US"] = tmp["Montant honoraires (US $)"].apply(_to_num) + tmp["Autres frais (US $)"].apply(_to_num)
+        else:
+            tmp["Total_US"] = 0.0
+        if "_Année_" in tmp.columns and "Mois" in tmp.columns:
+            tmp = tmp.dropna(subset=["_Année_", "Mois"])
+            if not tmp.empty:
+                tmp["YearMonth"] = tmp["_Année_"].astype(int).astype(str) + "-" + tmp["Mois"].astype(str)
+                g = tmp.groupby("YearMonth", as_index=False)["Total_US"].sum().sort_values("YearMonth")
+                if not g.empty:
+                    plot_line(g, x="YearMonth", y="Total_US", title="Évolution Mensuelle", x_title="Période", y_title="Montant (US$)")
                 else:
-                    st.info("Pas de catégories à afficher.")
+                    st.info("Pas assez de données mensuelles.")
             else:
-                st.info("Colonne 'Categories' introuvable.")
-
-            st.write("")
-            st.subheader("Top Sous-catégories")
-            if "Sous-categorie" in view.columns:
-                sub_counts = view["Sous-categorie"].value_counts().head(10).reset_index()
-                sub_counts.columns = ["Sous-categorie", "Nombre"]
-                if not sub_counts.empty:
-                    plot_barh(sub_counts, x="Nombre", y="Sous-categorie", title="Top Sous-catégories")
-                else:
-                    st.info("Pas de sous-catégories à afficher.")
-            else:
-                st.info("Colonne 'Sous-categorie' introuvable.")
-
-        with chart2:
-            st.subheader("Évolution Mensuelle (Total US)")
-            tmp = view.copy()
-            if "_Année_" in tmp.columns and "Mois" in tmp.columns:
-                tmp = tmp.dropna(subset=["_Année_", "Mois"])
-                if not tmp.empty:
-                    tmp["YearMonth"] = tmp["_Année_"].astype(int).astype(str) + "-" + tmp["Mois"].astype(str)
-                    g = tmp.groupby("YearMonth", as_index=False)["Total_US"].sum().sort_values("YearMonth")
-                    if not g.empty:
-                        plot_line(g, x="YearMonth", y="Total_US", title="Évolution Mensuelle", x_title="Période", y_title="Montant (US$)")
-                    else:
-                        st.info("Pas assez de données mensuelles.")
-                else:
-                    st.info("Pas de données temporelles pour la période sélectionnée.")
-            else:
-                st.info("Colonnes temporelles manquantes (_Année_/Mois).")
+                st.info("Pas de données temporelles.")
+        else:
+            st.info("Colonnes temporelles manquantes (_Année_/Mois).")
 
         st.markdown("---")
-
-        st.subheader(f"Top {int(top_n)} clients par Total facturé")
-        if "ID_Client" in view.columns or "Nom" in view.columns:
-            grp = view.groupby(["ID_Client", "Nom"], dropna=False).agg({
-                "Total_US": "sum",
+        # Top clients
+        st.markdown("### Top clients par chiffre d'affaires")
+        if "ID_Client" in df_all_current.columns or "Nom" in df_all_current.columns:
+            grp = df_all_current.groupby(["ID_Client", "Nom"], dropna=False).agg({
+                "Montant honoraires (US $)": lambda s: s.apply(_to_num).sum(),
                 "Dossier N": "count"
-            }).reset_index().rename(columns={"Dossier N": "Nb_dossiers"})
-            grp_sorted = grp.sort_values("Total_US", ascending=False).head(int(top_n))
+            }).reset_index().rename(columns={"Montant honoraires (US $)": "Total_US", "Dossier N": "Nb_dossiers"})
+            grp_sorted = grp.sort_values("Total_US", ascending=False).head(20)
             if not grp_sorted.empty:
                 if HAS_PLOTLY and px is not None:
-                    fig_top = px.bar(grp_sorted, x="Total_US", y="Nom", orientation="h", title=f"Top {int(top_n)} clients", text="Nb_dossiers")
+                    fig_top = px.bar(grp_sorted, x="Total_US", y="Nom", orientation="h", title="Top clients", text="Nb_dossiers")
                     fig_top.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Total facturé (US$)")
                     st.plotly_chart(fig_top, use_container_width=True)
                 else:
-                    st.write(f"Top {int(top_n)} clients")
                     st.dataframe(grp_sorted.assign(Total_US=lambda d: d["Total_US"].map(lambda v: _fmt_money(v))).reset_index(drop=True), use_container_width=True)
             else:
                 st.info("Pas de clients à afficher.")
         else:
             st.info("Colonnes client introuvables (ID_Client/Nom).")
 
-        st.markdown("---")
-
-        st.subheader("Table détaillée")
-        available_cols = [c for c in [
-            "Dossier N", "ID_Client", "Nom", "Date", "Categories", "Sous-categorie", "Visa",
-            "Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde", "Total_US"
-        ] if c in view.columns]
-        default_cols = [c for c in ["Dossier N", "Nom", "Date", "Categories", "Total_US", "Payé", "Solde"] if c in available_cols]
-        cols_selected = st.multiselect("Colonnes à afficher", options=available_cols, default=default_cols, key=skey("table", "cols"))
-
-        page_size = st.selectbox("Lignes par page", options=[10, 25, 50, 100], index=1, key=skey("table", "page_size"))
-        total_rows = len(view)
-        total_pages = max(1, int(np.ceil(total_rows / page_size)))
-        page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key=skey("table", "page_num"))
-
-        start = (page - 1) * page_size
-        end = start + page_size
-        display_df = view.sort_values(by=["_Année_", "_MoisNum_"], ascending=[False, False]).iloc[start:end].copy()
-
-        for col in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde", "Total_US"]:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(lambda x: _fmt_money(_to_num(x)))
-        if "Date" in display_df.columns:
-            try:
-                display_df["Date"] = pd.to_datetime(display_df["Date"], errors="coerce").dt.date.astype(str)
-            except Exception:
-                display_df["Date"] = display_df["Date"].astype(str)
-
-        if cols_selected:
-            st.dataframe(display_df[cols_selected].reset_index(drop=True), use_container_width=True)
-        else:
-            st.dataframe(display_df.reset_index(drop=True), use_container_width=True)
-
+# -----------------------
+# Export tab
+# -----------------------
+with tabs[3]:
+    st.header("💾 Export")
+    df_live = _get_df_live()
+    if df_live is None or df_live.empty:
+        st.info("Aucune donnée à exporter.")
+    else:
+        st.write(f"Vue en mémoire: {df_live.shape[0]} lignes, {df_live.shape[1]} colonnes")
         col1, col2 = st.columns(2)
         with col1:
-            csv_bytes = view.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Export CSV (vue filtrée)", data=csv_bytes, file_name="Clients_filtered.csv", mime="text/csv", key=skey("export", "csv"))
+            csv_bytes = df_live.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
         with col2:
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                view.to_excel(writer, index=False, sheet_name="Filtered")
-            st.download_button("⬇️ Export XLSX (vue filtrée)", data=buf.getvalue(), file_name="Clients_filtered.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=skey("export", "xlsx"))
+                df_live.to_excel(writer, index=False, sheet_name="Clients")
+            st.download_button("⬇️ Export XLSX", data=buf.getvalue(), file_name="Clients_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# End of app.py
