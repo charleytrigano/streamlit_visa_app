@@ -1,14 +1,10 @@
 # Visa Manager - app.py
-# Full Streamlit app: robust Excel (.xlsx/.xls/.csv) reading with header detection,
-# automatic column normalization (names + monetary conversion) for Clients,
-# simplified Files tab, enhanced Dashboard (date range, search, KPIs, safe Plotly fallback).
+# Full Streamlit app with robust Excel/.csv reading, automatic column normalization for Clients,
+# simplified Files tab and enhanced Dashboard (date range, search, KPIs, interactive charts).
 #
 # Usage: streamlit run app.py
 #
-# Notes:
-# - Requires pandas, openpyxl. Optionally plotly for richer charts.
-# - This file includes automatic normalization of uploaded Clients files (renaming columns
-#   heuristically and converting money strings to floats).
+# Requirements: pandas, openpyxl; optional: plotly for interactive charts.
 
 import os
 import json
@@ -31,7 +27,35 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# Helper drawing functions: use Plotly if available, otherwise Streamlit builtins
+# =========================
+# Constantes et configuration
+# =========================
+APP_TITLE = "🛂 Visa Manager"
+
+COLS_CLIENTS = [
+    "ID_Client", "Dossier N", "Nom", "Date",
+    "Categories", "Sous-categorie", "Visa",
+    "Montant honoraires (US $)", "Autres frais (US $)",
+    "Payé", "Solde", "Acompte 1", "Acompte 2",
+    "RFE", "Dossiers envoyé", "Dossier approuvé",
+    "Dossier refusé", "Dossier Annulé", "Commentaires"
+]
+
+MEMO_FILE = "_vmemory.json"
+SHEET_CLIENTS = "Clients"
+SHEET_VISA = "Visa"
+SID = "vmgr"
+
+# -------------------------
+# IMPORTANT: define skey early so it's available when UI code references it
+# -------------------------
+def skey(*parts: str) -> str:
+    """Session key helper"""
+    return f"{SID}_" + "_".join([p for p in parts if p])
+
+# =========================
+# Helper plotting (plotly safe)
+# =========================
 def plot_pie(df_counts, names_col: str = "Categorie", value_col: str = "Nombre", title: str = ""):
     if HAS_PLOTLY and px is not None:
         fig = px.pie(df_counts, names=names_col, values=value_col, hole=0.45, title=title)
@@ -62,25 +86,6 @@ def plot_line(df_line, x: str, y: str, title: str = "", x_title: str = "", y_tit
             st.line_chart(df_line.set_index(x)[y])
 
 # =========================
-# Constantes et configuration
-# =========================
-APP_TITLE = "🛂 Visa Manager"
-
-COLS_CLIENTS = [
-    "ID_Client", "Dossier N", "Nom", "Date",
-    "Categories", "Sous-categorie", "Visa",
-    "Montant honoraires (US $)", "Autres frais (US $)",
-    "Payé", "Solde", "Acompte 1", "Acompte 2",
-    "RFE", "Dossiers envoyé", "Dossier approuvé",
-    "Dossier refusé", "Dossier Annulé", "Commentaires"
-]
-
-MEMO_FILE = "_vmemory.json"
-SHEET_CLIENTS = "Clients"
-SHEET_VISA = "Visa"
-SID = "vmgr"
-
-# =========================
 # Utilitaires de normalisation (noms de colonnes & montants)
 # =========================
 
@@ -94,25 +99,20 @@ def normalize_header_text(s: str) -> str:
     if s is None:
         return ""
     s = str(s).strip()
-    # remove leading/trailing quotes/spaces and collapse multiple spaces
     s = re.sub(r'^\s+|\s+$', '', s)
     s = re.sub(r"\s+", " ", s)
     return s
 
 def canonical_key(s: str) -> str:
-    """Return simplified lowercase key without accents and punctuation for matching."""
     if s is None:
         return ""
     s2 = normalize_header_text(s).lower()
-    # remove accents (simple replacements)
     s2 = s2.replace("é", "e").replace("è", "e").replace("ê", "e").replace("à", "a").replace("ç", "c").replace("ô","o").replace("ù","u")
-    # remove punctuation
     s2 = re.sub(r"[^a-z0-9 ]", "", s2)
     s2 = s2.replace("_", " ").replace("-", " ").strip()
     s2 = re.sub(r"\s+", " ", s2)
     return s2
 
-# Heuristic mapping from canonical substrings to standard column names
 COL_CANDIDATES = {
     "id client": "ID_Client",
     "idclient": "ID_Client",
@@ -139,11 +139,8 @@ COL_CANDIDATES = {
     "acompte 2": "Acompte 2",
     "acompte2": "Acompte 2",
     "dossier envoye": "Dossiers envoyé",
-    "dossier envoye": "Dossiers envoyé",
-    "dossier approuve": "Dossier approuvé",
     "dossier approuve": "Dossier approuvé",
     "dossier refuse": "Dossier refusé",
-    "dossier refusee": "Dossier refusé",
     "rfe": "RFE",
     "commentaires": "Commentaires"
 }
@@ -160,26 +157,20 @@ NUMERIC_TARGETS = [
 ]
 
 def map_columns_heuristic(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str,str]]:
-    """Rename columns using heuristic mapping. Returns new df and mapping dict origin->new."""
     mapping: Dict[str,str] = {}
     for c in list(df.columns):
         key = canonical_key(c)
         mapped = None
-        # exact match in candidates
         if key in COL_CANDIDATES:
             mapped = COL_CANDIDATES[key]
         else:
-            # try substring matches with sensible priority (longer keys first)
             for cand_key, std in sorted(COL_CANDIDATES.items(), key=lambda t: -len(t[0])):
                 if cand_key in key:
                     mapped = std
                     break
         if mapped is None:
-            # fallback: keep original trimmed header
             mapped = normalize_header_text(c)
         mapping[c] = mapped
-    # apply rename but keep uniqueness
-    # if duplicates arise, append suffix to keep columns unique
     new_names = {}
     seen = {}
     for orig, new in mapping.items():
@@ -196,39 +187,30 @@ def map_columns_heuristic(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str,str]
     return df, new_names
 
 def money_to_float(x: Any) -> float:
-    """Convert money strings like '$2 500,00' or '1,234.56' to float value (US-style decimal)."""
     if pd.isna(x):
         return 0.0
     s = str(x).strip()
     if s == "" or s in ["-", "—", "–", "NA", "N/A"]:
         return 0.0
-    # remove currency symbols and letters, keep digits, comma, dot and minus
     s = re.sub(r"[^\d,.\-]", "", s)
     if s == "":
         return 0.0
-    # If both comma and dot present, decide decimal separator by last occurrence
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
-            # comma is decimal, remove dots (thousands)
             s = s.replace(".", "").replace(",", ".")
         else:
-            # dot is decimal, remove commas
             s = s.replace(",", "")
     else:
-        # only commas: assume comma is decimal separator when there are 1 or 2 decimals
         if "," in s and s.count(",") == 1:
-            # if length after comma is 2 -> decimal
             if len(s.split(",")[-1]) == 2:
                 s = s.replace(",", ".")
             else:
                 s = s.replace(",", "")
         else:
-            # replace any remaining commas with dot (safe)
             s = s.replace(",", ".")
     try:
         return float(s)
     except Exception:
-        # fallback remove all non-digit except dot and try
         s2 = re.sub(r"[^0-9.\-]", "", s)
         try:
             return float(s2)
@@ -236,7 +218,7 @@ def money_to_float(x: Any) -> float:
             return 0.0
 
 # =========================
-# Utilitaires existants (normalisation, time features, etc.)
+# Normalization / Time features / numeric helpers
 # =========================
 
 def _to_num(x: Any) -> float:
@@ -277,7 +259,6 @@ def _normalize_clients_numeric(df: pd.DataFrame) -> pd.DataFrame:
     for c in NUMERIC_TARGETS:
         if c in df.columns:
             df[c] = df[c].apply(_to_num)
-    # recompute Solde if possible
     if "Montant honoraires (US $)" in df.columns and "Autres frais (US $)" in df.columns:
         total = df["Montant honoraires (US $)"].fillna(0) + df["Autres frais (US $)"].fillna(0)
         if "Payé" in df.columns:
@@ -298,9 +279,7 @@ def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=COLS_CLIENTS)
     df = df.copy()
-    # apply heuristic mapping
     df, mapping = map_columns_heuristic(df)
-    # ensure key columns and types
     if "Date" in df.columns:
         try:
             df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
@@ -309,7 +288,6 @@ def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df = _ensure_columns(df, COLS_CLIENTS)
     df = _normalize_clients_numeric(df)
     df = _normalize_status(df)
-    # ensure strings
     for c in ["Nom", "Categories", "Sous-categorie", "Visa", "Commentaires"]:
         if c in df.columns:
             df[c] = df[c].astype(str).fillna("")
@@ -345,6 +323,25 @@ def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
             df["Mois"] = ""
     return df
 
+# Safe rerun wrapper (handles environments missing experimental_rerun)
+def safe_rerun():
+    try:
+        rerun_fn = getattr(st, "experimental_rerun", None)
+        if callable(rerun_fn):
+            rerun_fn()
+            return
+        rerun_fn2 = getattr(st, "rerun", None)
+        if callable(rerun_fn2):
+            rerun_fn2()
+            return
+    except Exception:
+        pass
+    try:
+        st.sidebar.info("Rerun non disponible dans cette version de Streamlit ; mise à jour session_state.")
+        st.session_state.setdefault("_need_rerun", True)
+    except Exception:
+        pass
+
 # =========================
 # I/O robust reading (Excel/CSV)
 # =========================
@@ -358,8 +355,6 @@ def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Opt
             st.sidebar.info(f"Excel file detected; sheets: {sheets}")
         except Exception:
             pass
-
-        # Build candidate list: requested sheet, known names, then workbook order
         candidates: List[str] = []
         if sheet_name and sheet_name in sheets:
             candidates.append(sheet_name)
@@ -369,11 +364,9 @@ def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Opt
         for s in sheets:
             if s not in candidates:
                 candidates.append(s)
-
         best_df: Optional[pd.DataFrame] = None
         best_non_null = -1
         HEADER_SCAN_ROWS = 8
-
         for cand in candidates:
             try:
                 bio2 = BytesIO(b)
@@ -426,12 +419,9 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
             st.sidebar.info(f"{debug_prefix}{msg}")
         except Exception:
             pass
-
     if src is None:
         _log("read_any_table: src is None")
         return None
-
-    # bytes / bytearray
     if isinstance(src, (bytes, bytearray)):
         _log("read_any_table: src is raw bytes")
         df = try_read_excel_from_bytes(bytes(src), sheet)
@@ -441,8 +431,6 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
             return pd.read_csv(BytesIO(src), sep=";", encoding="utf-8")
         except Exception:
             return None
-
-    # BytesIO
     if isinstance(src, (io.BytesIO, BytesIO)):
         try:
             b = src.getvalue()
@@ -462,8 +450,6 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
             return pd.read_csv(BytesIO(b), sep=";", encoding="utf-8")
         except Exception:
             return None
-
-    # UploadedFile or file-like
     if hasattr(src, "read") and hasattr(src, "name"):
         name = getattr(src, "name", "")
         _log(f"Uploaded file name: {name}")
@@ -488,7 +474,6 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
                     return pd.read_csv(BytesIO(data), sep=";", encoding="latin1", on_bad_lines="skip")
                 except Exception:
                     return None
-        # else try excel
         df = try_read_excel_from_bytes(data, sheet)
         if df is not None:
             return df
@@ -496,8 +481,6 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
             return pd.read_csv(BytesIO(data), sep=";", encoding="utf-8", on_bad_lines="skip")
         except Exception:
             return None
-
-    # Path
     if isinstance(src, (str, os.PathLike)):
         p = str(src)
         if not os.path.exists(p):
@@ -526,12 +509,11 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
                 return pd.read_csv(p, sep=";", encoding="utf-8", on_bad_lines="skip")
             except Exception:
                 return None
-
     _log("read_any_table: unsupported src type")
     return None
 
 # =========================
-# App UI
+# UI
 # =========================
 
 st.set_page_config(page_title="Visa Manager", layout="wide")
@@ -657,11 +639,9 @@ mapping_applied = {}
 if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
     try:
         df_clients_raw, mapping_applied = map_columns_heuristic(df_clients_raw)
-        # convert numeric columns
         for col in NUMERIC_TARGETS:
             if col in df_clients_raw.columns:
                 df_clients_raw[col] = df_clients_raw[col].apply(money_to_float)
-        # parse dates where possible
         if "Date" in df_clients_raw.columns:
             try:
                 df_clients_raw["Date"] = pd.to_datetime(df_clients_raw["Date"], dayfirst=True, errors="coerce")
@@ -673,7 +653,6 @@ if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
 
 # Ensure we have a usable df_all and initialize session_state safely
 try:
-    # Attempt to recover if df_clients_raw is not a DataFrame
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
             tmp = read_any_table(df_clients_raw, sheet=SHEET_CLIENTS)
@@ -709,11 +688,9 @@ except Exception as e_top:
 # Persist working copy in session_state (update when files produced non-empty df_all)
 DF_LIVE_KEY = skey("df_live")
 
-# If df_all was successfully produced and is non-empty, update session_state so Dashboard shows it.
 if isinstance(df_all, pd.DataFrame) and not df_all.empty:
     st.session_state[DF_LIVE_KEY] = df_all.copy()
 else:
-    # If no df_all but session key absent, create empty DF to avoid later crashes
     if DF_LIVE_KEY not in st.session_state or st.session_state[DF_LIVE_KEY] is None:
         st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
@@ -723,22 +700,10 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# Tabs
-tabs = st.tabs([
-    "📄 Fichiers",
-    "📊 Dashboard",
-    "📈 Analyses",
-    "🏦 Escrow",
-    "👤 Compte client",
-    "🧾 Gestion",
-    "📄 Visa (aperçu)",
-    "💾 Export",
-])
-
 # -----------------------
 # FICHIERS - Simplified: show only Clients and Visa previews
 # -----------------------
-with tabs[0]:
+with st.container():
     st.header("📂 Fichiers")
     colA, colB = st.columns(2)
 
@@ -766,7 +731,6 @@ with tabs[0]:
                 st.write("Aperçu indisponible pour ce format de fichier.")
             if mapping_applied:
                 st.caption("Mapping colonnes appliqué (extrait):")
-                # show small mapping preview
                 try:
                     items_show = list(mapping_applied.items())[:12]
                     for o,n in items_show:
@@ -801,7 +765,6 @@ with tabs[0]:
                 st.write("Aperçu Visa indisponible pour ce format de fichier.")
 
     st.markdown("---")
-    # Small actions
     a1, a2 = st.columns([1,1])
     with a1:
         if st.button("Réinitialiser la mémoire (annuler modifications en mémoire)"):
@@ -816,15 +779,13 @@ with tabs[0]:
 # -----------------------
 # DASHBOARD - Enhanced (date range, search, KPIs, Plotly charts, Top clients, export)
 # -----------------------
-with tabs[1]:
+with st.container():
     st.subheader("📊 Dashboard")
     df_all_current = _get_df_live()
 
-    # If no data, show message
     if df_all_current is None or df_all_current.empty:
         st.info("Aucune donnée cliente en mémoire. Chargez le fichier Clients dans l'onglet Fichiers.")
     else:
-        # TOP FILTERS row: date range, search, dossier number
         today = date.today()
         min_date = df_all_current["Date"].min() if "Date" in df_all_current.columns else pd.Timestamp(today - timedelta(days=365))
         max_date = df_all_current["Date"].max() if "Date" in df_all_current.columns else pd.Timestamp(today)
@@ -839,51 +800,39 @@ with tabs[1]:
 
         with st.expander("Filtres (afficher / masquer)", expanded=True):
             fcol1, fcol2, fcol3, fcol4 = st.columns([2,2,2,2])
-            # date range
             with fcol1:
                 date_from = st.date_input("Date de", value=min_date, key=skey("filter", "date_from"))
                 date_to = st.date_input("Date à", value=max_date, key=skey("filter", "date_to"))
-            # search text
             with fcol2:
                 search_text = st.text_input("Recherche (Nom / Partie du nom)", value="", key=skey("filter", "search"))
-            # dossier exact
             with fcol3:
                 dossier_search = st.text_input("Dossier N (exact)", value="", key=skey("filter", "dossier"))
-            # quick KPI scope checkbox
             with fcol4:
                 scope_period = st.checkbox("KPIs sur la période filtrée", value=True, key=skey("filter", "scope_period"))
                 top_n = st.number_input("Top clients (N)", min_value=3, max_value=100, value=10, step=1, key=skey("filter", "top_n"))
 
-        # Apply filters
         view = df_all_current.copy()
-        # date filter if Date exists
         if "Date" in view.columns:
             try:
-                # convert inputs to timestamps
                 dt_from = pd.to_datetime(date_from)
                 dt_to = pd.to_datetime(date_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
                 view = view[(pd.to_datetime(view["Date"], errors="coerce") >= dt_from) & (pd.to_datetime(view["Date"], errors="coerce") <= dt_to)]
             except Exception:
                 pass
 
-        # text search on Nom
         if search_text and "Nom" in view.columns:
             q = search_text.strip().lower()
             view = view[view["Nom"].str.lower().str.contains(q, na=False)]
-
-        # dossier exact
         if dossier_search:
             col = "Dossier N"
             if col in view.columns:
                 view = view[view][view[col].astype(str).str.strip() == dossier_search.strip()]
 
-        # aggregated Total_US and clean needed columns
         if "Montant honoraires (US $)" in view.columns and "Autres frais (US $)" in view.columns:
             view["Total_US"] = view["Montant honoraires (US $)"].apply(_to_num) + view["Autres frais (US $)"].apply(_to_num)
         else:
             view["Total_US"] = 0.0
 
-        # KPIs calculation (either on filtered view or full depending on scope_period)
         kview = view if scope_period else df_all_current.copy()
         if "Total_US" not in kview.columns:
             if "Montant honoraires (US $)" in kview.columns and "Autres frais (US $)" in kview.columns:
@@ -899,7 +848,6 @@ with tabs[1]:
         taux_envoye = (kview["Dossiers envoyé"].apply(_to_num).clip(0,1).sum() / total_count * 100) if ("Dossiers envoyé" in kview.columns and total_count) else 0.0
         n_refus = int(kview["Dossier refusé"].apply(_to_num).sum()) if "Dossier refusé" in kview.columns else 0
 
-        # KPI display
         k1, k2, k3, k4, k5, k6 = st.columns([1,1,1,1,1,1])
         k1.metric("Dossiers", f"{total_count:,}")
         k2.metric("Total facturé", _fmt_money(total_facture))
@@ -911,7 +859,6 @@ with tabs[1]:
 
         st.markdown("---")
 
-        # Charts area using safe plot helpers
         chart1, chart2 = st.columns([1,2])
         with chart1:
             st.subheader("Répartition par Catégorie")
@@ -924,7 +871,7 @@ with tabs[1]:
             else:
                 st.info("Colonne 'Categories' introuvable.")
 
-            st.write("")  # spacing
+            st.write("")
             st.subheader("Top Sous-catégories")
             if "Sous-categorie" in view.columns:
                 sub_counts = view["Sous-categorie"].value_counts().head(10).reset_index()
@@ -955,7 +902,6 @@ with tabs[1]:
 
         st.markdown("---")
 
-        # Top clients by total facturé
         st.subheader(f"Top {int(top_n)} clients par Total facturé")
         if "ID_Client" in view.columns or "Nom" in view.columns:
             grp = view.groupby(["ID_Client", "Nom"], dropna=False).agg({
@@ -964,7 +910,6 @@ with tabs[1]:
             }).reset_index().rename(columns={"Dossier N": "Nb_dossiers"})
             grp_sorted = grp.sort_values("Total_US", ascending=False).head(int(top_n))
             if not grp_sorted.empty:
-                # safe bar horizontal
                 if HAS_PLOTLY and px is not None:
                     fig_top = px.bar(grp_sorted, x="Total_US", y="Nom", orientation="h", title=f"Top {int(top_n)} clients", text="Nb_dossiers")
                     fig_top.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Total facturé (US$)")
@@ -979,7 +924,6 @@ with tabs[1]:
 
         st.markdown("---")
 
-        # Detailed table with column selection and pagination
         st.subheader("Table détaillée")
         available_cols = [c for c in [
             "Dossier N", "ID_Client", "Nom", "Date", "Categories", "Sous-categorie", "Visa",
@@ -1020,5 +964,3 @@ with tabs[1]:
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 view.to_excel(writer, index=False, sheet_name="Filtered")
             st.download_button("⬇️ Export XLSX (vue filtrée)", data=buf.getvalue(), file_name="Clients_filtered.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=skey("export", "xlsx"))
-
-# End of app.py
