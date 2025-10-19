@@ -1,6 +1,7 @@
 # Visa Manager - app.py
 # Streamlit app: robust Excel/CSV reading, automatic column normalization for Clients,
-# simplified Files tab, Dashboard (KPIs & table) and Analyses tab (charts).
+# simplified Files tab, Dashboard (compact KPIs & table), Analyses tab (charts),
+# and a new "Ajouter / Modifier / Supprimer" management tab.
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl; optional: plotly for interactive charts.
@@ -698,7 +699,7 @@ def debug_show_columns_preview(df, name="Data"):
         st.sidebar.write(f"DEBUG erreur: {e}")
 
 # =========================
-# App UI: Tabs - Files, Dashboard, Analyses, Export
+# App UI: Tabs - Files, Dashboard, Analyses, Gestion (Add/Edit/Delete), Export
 # =========================
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title(APP_TITLE)
@@ -871,11 +872,14 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
+# -----------------------
 # Tabs
+# -----------------------
 tabs = st.tabs([
     "📄 Fichiers",
     "📊 Dashboard",
     "📈 Analyses",
+    "➕ / ✏️ / 🗑️ Ajouter / Modifier / Supprimer",
     "💾 Export",
 ])
 
@@ -942,7 +946,7 @@ with tabs[0]:
             safe_rerun()
 
 # -----------------------
-# Dashboard tab: KPIs + recent table (no charts)
+# Dashboard tab: compact KPIs + recent table (no big metrics)
 # -----------------------
 with tabs[1]:
     st.subheader("📊 Dashboard")
@@ -950,16 +954,18 @@ with tabs[1]:
     if df_all_current is None or df_all_current.empty:
         st.info("Aucune donnée cliente en mémoire. Chargez le fichier Clients dans l'onglet Fichiers.")
     else:
+        # Filters row
         cats = sorted(df_all_current["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all_current.columns else []
         subs = sorted(df_all_current["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all_current.columns else []
         visas = sorted(df_all_current["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all_current.columns else []
         years = sorted(pd.to_numeric(df_all_current["_Année_"], errors="coerce").dropna().astype(int).unique().tolist()) if "_Année_" in df_all_current.columns else []
 
-        f1, f2, f3, f4 = st.columns([1,1,1,1])
-        sel_cat = f1.multiselect("Catégories", cats, default=[], key=skey("dash","cats"))
-        sel_sub = f2.multiselect("Sous-catégories", subs, default=[], key=skey("dash","subs"))
-        sel_visa = f3.multiselect("Visa", visas, default=[], key=skey("dash","visas"))
-        sel_year = f4.multiselect("Année", years, default=[], key=skey("dash","years"))
+        with st.container():
+            f1, f2, f3, f4 = st.columns([1,1,1,1])
+            sel_cat = f1.multiselect("Catégories", cats, default=[], key=skey("dash","cats"))
+            sel_sub = f2.multiselect("Sous-catégories", subs, default=[], key=skey("dash","subs"))
+            sel_visa = f3.multiselect("Visa", visas, default=[], key=skey("dash","visas"))
+            sel_year = f4.multiselect("Année", years, default=[], key=skey("dash","years"))
 
         view = df_all_current.copy()
         if sel_cat:
@@ -971,16 +977,33 @@ with tabs[1]:
         if sel_year:
             view = view[view["_Année_"].isin(sel_year)]
 
+        # Compact KPI row (smaller font using HTML)
         total = (view.get("Montant honoraires (US $)", 0).apply(_to_num) + view.get("Autres frais (US $)", 0).apply(_to_num)).sum()
         paye = view.get("Payé", 0).apply(_to_num).sum() if "Payé" in view.columns else 0.0
         solde = view.get("Solde", 0).apply(_to_num).sum() if "Solde" in view.columns else 0.0
-        k1, k2, k3, k4, k5 = st.columns([1,1,1,1,1])
-        k1.metric("Dossiers", f"{len(view):,}")
-        k2.metric("Honoraires+Frais", _fmt_money(total))
-        k3.metric("Payé", _fmt_money(paye))
-        k4.metric("Solde", _fmt_money(solde))
         avg = (total / len(view)) if len(view) else 0.0
-        k5.metric("Moyenne / dossier", _fmt_money(avg))
+        n_dossiers = len(view)
+
+        # Render KPIs with smaller size
+        kcols = st.columns([1,1,1,1])
+        def small_metric(col, label, value, sub=None):
+            with col:
+                st.markdown(f"<div style='font-size:16px; font-weight:600; margin-bottom:2px;'>{label}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:18px; color:#0A6EBD; font-weight:700;'>{value}</div>", unsafe_allow_html=True)
+                if sub:
+                    st.markdown(f"<div style='font-size:12px; color:#6c757d;'>{sub}</div>", unsafe_allow_html=True)
+
+        small_metric(kcols[0], "Dossiers", f"{n_dossiers:,}")
+        small_metric(kcols[1], "Total facturé", _fmt_money(total))
+        small_metric(kcols[2], "Total reçu", _fmt_money(paye))
+        small_metric(kcols[3], "Solde total", _fmt_money(solde))
+
+        # secondary row with two smaller metrics
+        s1, s2 = st.columns([1,1])
+        small_metric(s1, "Moyenne / dossier", _fmt_money(avg))
+        # compute taux_envoye
+        taux_envoye = (view["Dossiers envoyé"].apply(_to_num).clip(0,1).sum() / n_dossiers * 100) if ("Dossiers envoyé" in view.columns and n_dossiers) else 0.0
+        small_metric(s2, "Taux envoyés (%)", f"{taux_envoye:.0f}%")
 
         st.markdown("---")
         st.subheader("Aperçu récent des dossiers")
@@ -1000,7 +1023,7 @@ with tabs[1]:
         st.dataframe(recent[display_cols].reset_index(drop=True), use_container_width=True)
 
 # -----------------------
-# Analyses tab: charts (moved here)
+# Analyses tab: charts
 # -----------------------
 with tabs[2]:
     st.subheader("📈 Analyses")
@@ -1058,9 +1081,129 @@ with tabs[2]:
             st.info("Colonnes client introuvables (ID_Client/Nom).")
 
 # -----------------------
-# Export tab
+# Gestion tab: Ajouter / Modifier / Supprimer
 # -----------------------
 with tabs[3]:
+    st.subheader("➕ / ✏️ / 🗑️ Ajouter / Modifier / Supprimer")
+    df_live = _get_df_live()
+
+    if df_live is None:
+        df_live = pd.DataFrame(columns=COLS_CLIENTS)
+    # Ensure expected columns exist
+    for c in COLS_CLIENTS:
+        if c not in df_live.columns:
+            df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
+
+    st.markdown("### Ajouter un dossier")
+    with st.form(key=skey("form_add")):
+        col_a1, col_a2, col_a3 = st.columns(3)
+        with col_a1:
+            add_id = st.text_input("ID_Client", value="", key=skey("add","id"))
+            add_dossier = st.text_input("Dossier N", value="", key=skey("add","dossier"))
+            add_nom = st.text_input("Nom", value="", key=skey("add","nom"))
+        with col_a2:
+            add_date = st.date_input("Date", value=date.today(), key=skey("add","date"))
+            add_cat = st.text_input("Categories", value="", key=skey("add","cat"))
+            add_sub = st.text_input("Sous-categorie", value="", key=skey("add","sub"))
+        with col_a3:
+            add_visa = st.text_input("Visa", value="", key=skey("add","visa"))
+            add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("add","montant"))
+            add_autres = st.text_input("Autres frais (US $)", value="0", key=skey("add","autres"))
+        add_comments = st.text_area("Commentaires", value="", key=skey("add","comments"))
+        submitted = st.form_submit_button("Ajouter")
+        if submitted:
+            try:
+                new_row = {c: "" for c in df_live.columns}
+                new_row["ID_Client"] = add_id
+                new_row["Dossier N"] = add_dossier
+                new_row["Nom"] = add_nom
+                new_row["Date"] = pd.to_datetime(add_date)
+                new_row["Categories"] = add_cat
+                new_row["Sous-categorie"] = add_sub
+                new_row["Visa"] = add_visa
+                new_row["Montant honoraires (US $)"] = money_to_float(add_montant)
+                new_row["Autres frais (US $)"] = money_to_float(add_autres)
+                new_row["Payé"] = 0.0
+                new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"]
+                new_row["Commentaires"] = add_comments
+                df_live = df_live.append(new_row, ignore_index=True)
+                _set_df_live(df_live)
+                st.success("Dossier ajouté.")
+            except Exception as e:
+                st.error(f"Erreur ajout: {e}")
+
+    st.markdown("---")
+    st.markdown("### Modifier un dossier")
+    if df_live is None or df_live.empty:
+        st.info("Aucun dossier en mémoire à modifier.")
+    else:
+        # choose by index or Dossier N
+        identifiers = df_live["Dossier N"].astype(str).replace("nan","").tolist()
+        # create mapping index->display
+        choices = [f"{i} | {df_live.at[i,'Dossier N'] if 'Dossier N' in df_live.columns else ''} | {df_live.at[i,'Nom'] if 'Nom' in df_live.columns else ''}" for i in range(len(df_live))]
+        sel = st.selectbox("Sélectionnez la ligne à modifier", options=[""] + choices, key=skey("edit","select"))
+        if sel:
+            idx = int(sel.split("|")[0].strip())
+            row = df_live.loc[idx].copy()
+            with st.form(key=skey("form_edit")):
+                ecol1, ecol2 = st.columns(2)
+                with ecol1:
+                    e_id = st.text_input("ID_Client", value=str(row.get("ID_Client","")), key=skey("edit","id"))
+                    e_dossier = st.text_input("Dossier N", value=str(row.get("Dossier N","")), key=skey("edit","dossier"))
+                    e_nom = st.text_input("Nom", value=str(row.get("Nom","")), key=skey("edit","nom"))
+                with ecol2:
+                    e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
+                    e_cat = st.text_input("Categories", value=str(row.get("Categories","")), key=skey("edit","cat"))
+                    e_sub = st.text_input("Sous-categorie", value=str(row.get("Sous-categorie","")), key=skey("edit","sub"))
+                e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa_2"))
+                e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
+                e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)",0)), key=skey("edit","autres"))
+                e_paye = st.text_input("Payé", value=str(row.get("Payé",0)), key=skey("edit","paye"))
+                e_comments = st.text_area("Commentaires", value=str(row.get("Commentaires","")), key=skey("edit","comments"))
+                save = st.form_submit_button("Enregistrer modifications")
+                if save:
+                    try:
+                        df_live.at[idx, "ID_Client"] = e_id
+                        df_live.at[idx, "Dossier N"] = e_dossier
+                        df_live.at[idx, "Nom"] = e_nom
+                        df_live.at[idx, "Date"] = pd.to_datetime(e_date)
+                        df_live.at[idx, "Categories"] = e_cat
+                        df_live.at[idx, "Sous-categorie"] = e_sub
+                        df_live.at[idx, "Visa"] = e_visa
+                        df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
+                        df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres)
+                        df_live.at[idx, "Payé"] = money_to_float(e_paye)
+                        # recompute Solde
+                        df_live.at[idx, "Solde"] = _to_num(df_live.at[idx, "Montant honoraires (US $)"]) + _to_num(df_live.at[idx, "Autres frais (US $)"]) - _to_num(df_live.at[idx, "Payé"])
+                        df_live.at[idx, "Commentaires"] = e_comments
+                        _set_df_live(df_live)
+                        st.success("Modifications enregistrées.")
+                    except Exception as e:
+                        st.error(f"Erreur enregistrement: {e}")
+
+    st.markdown("---")
+    st.markdown("### Supprimer des dossiers")
+    if df_live is None or df_live.empty:
+        st.info("Aucun dossier en mémoire à supprimer.")
+    else:
+        choices_del = [f"{i} | {df_live.at[i,'Dossier N'] if 'Dossier N' in df_live.columns else ''} | {df_live.at[i,'Nom'] if 'Nom' in df_live.columns else ''}" for i in range(len(df_live))]
+        selected_to_del = st.multiselect("Sélectionnez les lignes à supprimer", options=choices_del, key=skey("del","select"))
+        if st.button("Supprimer sélection"):
+            if selected_to_del:
+                idxs = [int(s.split("|")[0].strip()) for s in selected_to_del]
+                try:
+                    df_live = df_live.drop(index=idxs).reset_index(drop=True)
+                    _set_df_live(df_live)
+                    st.success(f"{len(idxs)} ligne(s) supprimée(s).")
+                except Exception as e:
+                    st.error(f"Erreur suppression: {e}")
+            else:
+                st.warning("Aucune sélection pour suppression.")
+
+# -----------------------
+# Export tab
+# -----------------------
+with tabs[4]:
     st.header("💾 Export")
     df_live = _get_df_live()
     if df_live is None or df_live.empty:
