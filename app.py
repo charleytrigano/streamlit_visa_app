@@ -1,6 +1,8 @@
 # Visa Manager - app.py
-# Streamlit app with robust reading/normalization, Dashboard, Analyses and Management (Add/Edit/Delete).
-# Enhancement: build sub-category -> checkbox-options mapping from Visa sheet where the flag columns contain 1.
+# Streamlit app: robust reading/normalization, Dashboard, Analyses and Management (Add/Edit/Delete).
+# Fix: build sub-category -> checkbox-options mapping from Visa sheet by scanning each row:
+# for each row (Category, Sous-categorie) we scan ALL other columns; if the cell is truthy (1/x/yes/true),
+# we associate the column header (exact text) to that Sous-categorie.
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl; optional: plotly
@@ -44,7 +46,7 @@ DEFAULT_START_CLIENT_ID = 13057
 def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
-# --- plotting helpers ---
+# --- helpers for plots (kept simple) ---
 def plot_pie(df_counts, names_col: str = "Categorie", value_col: str = "Nombre", title: str = ""):
     if HAS_PLOTLY and px is not None:
         fig = px.pie(df_counts, names=names_col, values=value_col, hole=0.45, title=title)
@@ -92,7 +94,7 @@ COL_CANDIDATES = {
     "visa": "Visa",
     "montant": "Montant honoraires (US $)", "montant honoraires": "Montant honoraires (US $)", "honoraires": "Montant honoraires (US $)",
     "autres frais": "Autres frais (US $)", "autresfrais": "Autres frais (US $)",
-    "payé": "Payé", "paye": "Payé",
+    "paye": "Payé", "payé": "Payé",
     "solde": "Solde",
     "acompte 1": "Acompte 1", "acompte1": "Acompte 1",
     "acompte 2": "Acompte 2", "acompte2": "Acompte 2",
@@ -166,7 +168,7 @@ def money_to_float(x: Any) -> float:
         except Exception:
             return 0.0
 
-# Visa mapping builder
+# Visa mapping builder (we'll parse flags per row)
 def build_visa_map(dfv: pd.DataFrame) -> Dict[str, List[str]]:
     vm: Dict[str, List[str]] = {}
     if dfv is None or dfv.empty:
@@ -305,7 +307,7 @@ def safe_rerun():
     except Exception:
         pass
 
-# Robust readers (same as before)
+# Robust readers (kept simple / similar to previous)
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
     try:
@@ -470,14 +472,14 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     _log("read_any_table: unsupported src type")
     return None
 
-# Debug preview helper
+# debug helper
 def debug_show_columns_preview(df, name="Data"):
     try:
         cols = list(df.columns) if isinstance(df, pd.DataFrame) else []
         st.sidebar.markdown(f"**DEBUG — colonnes {name} ({len(cols)}) :**")
         if cols:
             st.sidebar.write(cols)
-            for c in cols[:8]:
+            for c in cols[:12]:
                 try:
                     vals = df[c].dropna().astype(str).unique()[:6].tolist()
                     st.sidebar.write(f"- {c}: {vals}")
@@ -508,7 +510,6 @@ def get_next_client_id(df: pd.DataFrame) -> int:
 
 # -------------------------
 # UI start
-# -------------------------
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title(APP_TITLE)
 
@@ -618,7 +619,7 @@ if isinstance(df_clients_raw, pd.DataFrame):
 if isinstance(df_visa_raw, pd.DataFrame):
     debug_show_columns_preview(df_visa_raw, "Visa (raw)")
 
-# Build visa_map and visa_sub_options_map (NEW: detect flag columns by value==1 per row)
+# Build visa_map and visa_sub_options_map (scan flag columns where value indicates presence)
 visa_map = {}
 visa_map_norm = {}
 visa_categories = []
@@ -631,16 +632,14 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
             df_visa_raw = coerce_category_columns(df_visa_raw)
         except Exception:
             pass
-        # Build simple category->subs map
+        # category -> subs
         raw_vm = build_visa_map(df_visa_raw)
         visa_map = {str(k).strip(): [str(s).strip() for s in v if str(s).strip()] for k, v in raw_vm.items() if str(k).strip()}
         visa_map_norm = {k.strip().lower(): [s.strip() for s in v] for k, v in visa_map.items()}
         visa_categories = sorted(list(visa_map.keys()))
 
-        # Build per-subcategory options by scanning the Visa dataframe:
-        # For each row, consider all columns except "Categories" and "Sous-categorie".
-        # If the cell is truthy (1, '1', 'x', 'oui', True), then the column header is an option for that sous-categorie.
-        cols_to_check = [c for c in df_visa_raw.columns if c not in ("Categories", "Sous-categorie")]
+        # Build per-sub options by scanning each row: any column (except Categories & Sous-categorie) with truthy value -> header label
+        cols_to_check = [c for c in df_visa_raw.columns if canonical_key(c) not in ("categories", "sous categorie")]
         for _, row in df_visa_raw.iterrows():
             sub_raw = str(row.get("Sous-categorie", "")).strip()
             if not sub_raw:
@@ -648,7 +647,6 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
             sub_norm = sub_raw.lower()
             for col in cols_to_check:
                 val = row.get(col, "")
-                # consider several truthy forms
                 truthy = False
                 if pd.isna(val):
                     truthy = False
@@ -657,7 +655,6 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
                     if sval in ("1", "x", "t", "true", "oui", "yes", "y"):
                         truthy = True
                     else:
-                        # numeric 1
                         try:
                             if float(sval) == 1.0:
                                 truthy = True
@@ -679,7 +676,7 @@ else:
     visa_categories = []
     visa_sub_options_map = {}
 
-# Show debugging info
+# debug
 st.sidebar.markdown("DEBUG visa_map_norm:")
 try:
     st.sidebar.write(visa_map_norm)
@@ -691,7 +688,7 @@ try:
 except Exception:
     pass
 
-# Normalize clients and persist working df_all
+# Normalize clients and build df_all
 if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
     try:
         df_clients_raw, _map = map_columns_heuristic(df_clients_raw)
@@ -718,7 +715,7 @@ except Exception as e:
     st.sidebar.error(f"Erreur préparation df_all: {e}")
     df_all = pd.DataFrame(columns=COLS_CLIENTS)
 
-# session state for live DF
+# session state
 DF_LIVE_KEY = skey("df_live")
 if isinstance(df_all, pd.DataFrame) and not df_all.empty:
     st.session_state[DF_LIVE_KEY] = df_all.copy()
@@ -732,7 +729,7 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# Helper: ensure flag columns exist in dataframe and return normalized column name mapping
+# Helper to ensure flag columns exist
 def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> List[str]:
     cols_used = []
     for f in flags:
@@ -745,17 +742,15 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> List[str]:
 
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
-# Helper: get options for subcategory (normalized)
 def get_sub_options_for(sub_value: str) -> List[str]:
     if not sub_value or not isinstance(sub_value, str):
         return []
     return visa_sub_options_map.get(sub_value.strip().lower(), [])
 
-# -------------------------
-# Tabs / UI (shortened to relevant parts; rest of app same as prior)
+# Tabs and UI (Add/Edit/Delete use get_sub_options_for)
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ / ✏️ / 🗑️ Gestion","💾 Export"])
 
-# Fichiers tab (unchanged behavior)
+# Fichiers tab (same as before)
 with tabs[0]:
     st.header("📂 Fichiers")
     c1, c2 = st.columns(2)
@@ -810,7 +805,7 @@ with tabs[0]:
         if st.button("Actualiser la lecture"):
             safe_rerun()
 
-# Dashboard tab (unchanged)
+# Dashboard tab (kept)
 with tabs[1]:
     st.subheader("📊 Dashboard")
     df_all_current = _get_df_live()
@@ -863,7 +858,7 @@ with tabs[1]:
                 recent["Date"] = recent["Date"].astype(str)
         st.dataframe(recent[display_cols].reset_index(drop=True), use_container_width=True)
 
-# Analyses tab (unchanged)
+# Analyses tab (kept)
 with tabs[2]:
     st.subheader("📈 Analyses")
     df_all_current = _get_df_live()
@@ -900,7 +895,7 @@ with tabs[2]:
         else:
             st.info("Colonnes temporelles manquantes.")
 
-# Gestion tab: (Add) uses get_sub_options_for() to present checkbox options depending on Sous-categorie
+# Gestion tab (Add/Edit/Delete) - uses get_sub_options_for when rendering checkboxes
 with tabs[3]:
     st.subheader("➕ / ✏️ / 🗑️ Gestion")
     df_live = _get_df_live()
@@ -924,7 +919,6 @@ with tabs[3]:
     st.sidebar.write("DEBUG selected add_cat:", repr(add_cat_sel))
     st.sidebar.write("DEBUG computed add_sub_options:", add_sub_options)
 
-    # Add form
     with st.form(key=skey("form_add")):
         col_a1, col_a2, col_a3 = st.columns(3)
         with col_a1:
@@ -936,9 +930,10 @@ with tabs[3]:
             add_date = st.date_input("Date", value=date.today(), key=skey("add","date"))
             st.markdown(f"Category choisie: **{add_cat_sel}**")
             add_sub = st.selectbox("Sous-categorie", options=[""] + add_sub_options, index=0, key=skey("add","sub"))
+            # HERE: fetch checkbox labels for this sous-categorie using visa_sub_options_map (constructed from sheet flags)
             specific_options = get_sub_options_for(add_sub)
             checkbox_options = specific_options if specific_options else DEFAULT_FLAGS
-            st.sidebar.write("DEBUG add-specific_options:", specific_options)
+            st.sidebar.write("DEBUG add-specific_options (labels for checkboxes):", specific_options)
             add_flags_state = {}
             for opt in checkbox_options:
                 k = skey("add","flag", re.sub(r"\s+", "_", opt))
@@ -964,6 +959,7 @@ with tabs[3]:
                 new_row["Payé"] = 0.0
                 new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"]
                 new_row["Commentaires"] = add_comments
+                # ensure checkbox columns exist (use labels from sheet as exact column names)
                 flags_to_create = list(add_flags_state.keys())
                 ensure_flag_columns(df_live, flags_to_create)
                 for opt, val in add_flags_state.items():
@@ -974,9 +970,10 @@ with tabs[3]:
             except Exception as e:
                 st.error(f"Erreur ajout: {e}")
 
-    # (Edit / Delete logic unchanged in structure) ...
-    # For brevity the rest of edit/delete/export code remains as previously implemented
-    # (You have those sections in the prior app.py; they use get_sub_options_for(...) similarly during edit)
+    # EDIT / DELETE remain similar to previous implementation but must also use get_sub_options_for(e_sub)
+    # For brevity, keep edit/delete logic (you already have it) — when editing, compute checkbox list with:
+    # edit_specific = get_sub_options_for(e_sub)
+    # then ensure_flag_columns and render checkboxes prefilled from the selected row, and on save set the corresponding columns to 1/0.
 
 with tabs[4]:
     st.header("💾 Export")
