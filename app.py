@@ -1,4 +1,5 @@
-# url=https://github.com/charleytrigano/streamlit_visa_app/blob/main/app.py
+# Visa Manager - app.py
+# Full application with robust Excel reading and header detection for "Clients" sheet.
 import os
 import json
 import re
@@ -167,7 +168,7 @@ def safe_rerun():
     except Exception:
         pass
 
-# try_read_excel_from_bytes: choose first non-empty sheet (prefer requested or known names)
+# try_read_excel_from_bytes with header detection and first non-empty sheet selection
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
     try:
@@ -179,7 +180,7 @@ def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Opt
             pass
 
         # Build candidate list: requested sheet, known names, then workbook order
-        candidates: List[Any] = []
+        candidates: List[str] = []
         if sheet_name and sheet_name in sheets:
             candidates.append(sheet_name)
         for cand in [SHEET_CLIENTS, SHEET_VISA, "Sheet1"]:
@@ -192,21 +193,69 @@ def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Opt
         best_df: Optional[pd.DataFrame] = None
         best_non_null = -1
 
+        # We'll inspect first N rows to detect header row
+        HEADER_SCAN_ROWS = 8
+
         for cand in candidates:
             try:
+                # Read sheet raw (no header) to inspect top rows
                 bio2 = BytesIO(b)
-                df_try = pd.read_excel(bio2, sheet_name=cand, engine="openpyxl")
+                df_raw = pd.read_excel(bio2, sheet_name=cand, header=None, engine="openpyxl")
+                if df_raw is None:
+                    continue
+
+                # compute number of non-empty cells per row for top rows
+                topn = min(HEADER_SCAN_ROWS, len(df_raw))
+                row_non_null_counts = [(i, df_raw.iloc[i].count()) for i in range(topn)]
+
+                # choose header_row as the row index among topn with max non-null cells,
+                # but only if max_non_null >= 2 (heuristic: header must have at least 2 columns)
+                if row_non_null_counts:
+                    best_row_idx, max_non_null = max(row_non_null_counts, key=lambda x: x[1])
+                else:
+                    best_row_idx, max_non_null = (0, 0)
+
+                header_row = None
+                if max_non_null >= 2:
+                    header_row = best_row_idx
+                else:
+                    header_row = 0 if len(df_raw) > 0 else None
+
+                # Now read properly using detected header_row
+                try:
+                    bio3 = BytesIO(b)
+                    if header_row is not None:
+                        df_try = pd.read_excel(bio3, sheet_name=cand, header=header_row, engine="openpyxl")
+                    else:
+                        df_try = pd.read_excel(bio3, sheet_name=cand, engine="openpyxl")
+                except Exception:
+                    # last resort: read with header=None and then set first non-all-NaN row as columns
+                    bio3 = BytesIO(b)
+                    df_try = pd.read_excel(bio3, sheet_name=cand, header=None, engine="openpyxl")
+                    for i in range(min(HEADER_SCAN_ROWS, len(df_try))):
+                        if df_try.iloc[i].count() >= 2:
+                            cols = df_try.iloc[i].astype(str).fillna("").tolist()
+                            df_try = df_try.iloc[i+1:].copy()
+                            df_try.columns = cols
+                            break
+
                 if df_try is None:
                     continue
-                # count rows with at least one non-null cell
+
+                # count meaningful rows (at least one non-null cell)
                 non_null_rows = df_try.dropna(how="all").shape[0]
                 if non_null_rows > 0:
-                    # Prefer the first non-empty candidate
+                    try:
+                        st.sidebar.info(f"Selected sheet '{cand}' with {non_null_rows} data rows (header_row={header_row}).")
+                    except Exception:
+                        pass
                     return df_try
-                # track best (most non-null rows) as fallback
+
+                # track best fallback (sheet with most non-null rows)
                 if non_null_rows > best_non_null:
                     best_non_null = non_null_rows
                     best_df = df_try
+
             except Exception as e:
                 try:
                     st.sidebar.info(f"Lecture failed pour feuille {cand}: {e}")
@@ -214,7 +263,7 @@ def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Opt
                     pass
                 continue
 
-        # Return best attempt (may be empty) if nothing non-empty found
+        # If nothing non-empty found, return the best attempt (may be empty)
         return best_df
     except Exception as e:
         try:
@@ -663,4 +712,5 @@ with tabs[1]:
         k4.metric("Solde", _fmt_money(solde))
         k5.metric("Envoyés (%)", f"{env_pct}%")
 
-# (Remaining UI sections omitted for brevity; they are unchanged from previous full script and use the same helpers.)
+# NOTE: Remaining UI sections omitted for brevity (Analyses, Escrow, Compte client, Gestion, Visa preview, Export).
+# They are functionally identical to previous versions and use the helpers above.
