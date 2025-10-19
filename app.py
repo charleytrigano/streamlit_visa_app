@@ -649,6 +649,54 @@ def robust_read_clients(src) -> Optional[pd.DataFrame]:
     st.sidebar.info("[Clients] Aucune tentative n'a retourné suffisamment de lignes; retour de la tentative initiale.")
     return df
 
+# -----------------------
+# Smart coercion for category columns (fix when mapping missed them)
+# -----------------------
+def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    cols = list(df.columns)
+    rename_map = {}
+    def _ck(x): 
+        return canonical_key(str(x))
+    # detect presence
+    has_cat = any(_ck(c) in ("categories","categorie") for c in cols)
+    has_sub = any("sous" in _ck(c) and "categorie" in _ck(c) for c in cols) or any("souscategorie" in _ck(c) for c in cols)
+    for c in cols:
+        k = _ck(c)
+        if ("sous" in k and "categorie" in k) or ("souscategorie" in k):
+            if "Sous-categorie" not in df.columns:
+                rename_map[c] = "Sous-categorie"
+        elif ("categorie" in k or "categories" in k) and "sous" not in k:
+            if "Categories" not in df.columns:
+                rename_map[c] = "Categories"
+    if rename_map:
+        try:
+            df = df.rename(columns=rename_map)
+        except Exception:
+            pass
+    return df
+
+# -----------------------
+# Debug helper to show columns & samples in sidebar
+# -----------------------
+def debug_show_columns_preview(df, name="Data"):
+    try:
+        cols = list(df.columns) if isinstance(df, pd.DataFrame) else []
+        st.sidebar.markdown(f"**DEBUG — colonnes {name} ({len(cols)}) :**")
+        if cols:
+            st.sidebar.write(cols)
+            for c in cols[:8]:
+                try:
+                    vals = df[c].dropna().astype(str).unique()[:6].tolist()
+                    st.sidebar.write(f"- {c}: {vals}")
+                except Exception:
+                    pass
+        else:
+            st.sidebar.write("Aucune colonne détectée.")
+    except Exception as e:
+        st.sidebar.write(f"DEBUG erreur: {e}")
+
 # =========================
 # App UI: Tabs - Files, Dashboard, Analyses, Export
 # =========================
@@ -767,6 +815,10 @@ if df_visa_raw is None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
+# Debug: show raw columns preview
+if isinstance(df_clients_raw, pd.DataFrame):
+    debug_show_columns_preview(df_clients_raw, "Clients (raw)")
+
 # Apply heuristic mapping & numeric conversion automatically (no mapping print)
 if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
     try:
@@ -792,11 +844,15 @@ try:
                 df_clients_raw = tmp
         except Exception:
             pass
+    # Normalize + ensure time features
+    df_all = _ensure_time_features(normalize_clients(df_clients_raw))
+    # Coerce category columns if normalization missed them
     try:
-        df_all = _ensure_time_features(normalize_clients(df_clients_raw))
-    except Exception as e_norm:
-        st.sidebar.error(f"Erreur normalization: {e_norm}")
-        df_all = pd.DataFrame(columns=COLS_CLIENTS)
+        df_all = coerce_category_columns(df_all)
+    except Exception:
+        pass
+    # Debug show normalized columns
+    debug_show_columns_preview(df_all, "Clients (normalized)")
 except Exception as e_top:
     st.sidebar.error(f"Erreur inattendue préparation données: {e_top}")
     df_all = pd.DataFrame(columns=COLS_CLIENTS)
@@ -877,6 +933,7 @@ with tabs[0]:
     with a1:
         if st.button("Réinitialiser la mémoire (recharger depuis fichiers)"):
             df_all = _ensure_time_features(normalize_clients(df_clients_raw))
+            df_all = coerce_category_columns(df_all)
             _set_df_live(df_all)
             st.success("Mémoire réinitialisée.")
             safe_rerun()
@@ -908,7 +965,7 @@ with tabs[1]:
         if sel_cat:
             view = view[view["Categories"].astype(str).isin(sel_cat)]
         if sel_sub:
-            view = view[view["Sous-catégorie"].astype(str).isin(sel_sub)]
+            view = view[view["Sous-categorie"].astype(str).isin(sel_sub)]
         if sel_visa:
             view = view[view["Visa"].astype(str).isin(sel_visa)]
         if sel_year:
