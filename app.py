@@ -502,8 +502,155 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     _log("read_any_table: unsupported src type")
     return None
 
+# -----------------------
+# Extra: robust CSV/Excel reading for Clients (diagnostics + fallbacks)
+# -----------------------
+def _show_raw_preview_of_source(src, max_lines=120):
+    try:
+        if src is None:
+            st.sidebar.info("Preview raw: source None")
+            return None
+        b = None
+        if isinstance(src, (bytes, bytearray)):
+            b = bytes(src)
+        elif isinstance(src, (io.BytesIO, BytesIO)):
+            try:
+                b = src.getvalue()
+            except Exception:
+                try:
+                    src.seek(0); b = src.read()
+                except Exception:
+                    b = None
+        elif hasattr(src, "read") and hasattr(src, "name"):
+            try:
+                b = src.getvalue()
+            except Exception:
+                try:
+                    src.seek(0); b = src.read()
+                except Exception:
+                    b = None
+        elif isinstance(src, (str, os.PathLike)):
+            try:
+                with open(src, "rb") as f:
+                    b = f.read()
+            except Exception:
+                b = None
+        if not b:
+            st.sidebar.info("Preview raw: impossible d'extraire des octets")
+            return None
+        for enc in ("utf-8", "latin1"):
+            try:
+                txt = b.decode(enc, errors="replace")
+                lines = txt.splitlines()
+                st.sidebar.info(f"[raw preview - {enc}] {len(lines)} lignes (affiché {min(len(lines), max_lines)})")
+                for ln in lines[:max_lines]:
+                    st.sidebar.text(ln)
+                return txt
+            except Exception:
+                continue
+        return None
+    except Exception as e:
+        try:
+            st.sidebar.error(f"Erreur preview raw: {e}")
+        except Exception:
+            pass
+        return None
+
+def robust_read_clients(src) -> Optional[pd.DataFrame]:
+    """Try multiple reads for Clients source to maximize rows read and provide diagnostics."""
+    df = None
+    try:
+        df = read_any_table(src, sheet=SHEET_CLIENTS, debug_prefix="[Clients primary] ")
+        if isinstance(df, pd.DataFrame) and df.shape[0] > 6:
+            st.sidebar.info(f"[Clients] lecture primaire réussie: {df.shape[0]} lignes")
+            return df
+    except Exception as e:
+        st.sidebar.info(f"[Clients] primary read failed: {e}")
+
+    raw = _show_raw_preview_of_source(src, max_lines=120)
+    n_raw_lines = 0
+    if raw:
+        n_raw_lines = sum(1 for l in raw.splitlines() if l.strip() != "")
+    st.sidebar.info(f"[Clients] raw non-empty lines: {n_raw_lines}")
+
+    csv_attempts = [
+        {"sep": ";", "engine": "python", "encoding": "utf-8", "on_bad_lines": "skip"},
+        {"sep": ";", "engine": "python", "encoding": "latin1", "on_bad_lines": "skip"},
+        {"sep": ",", "engine": "python", "encoding": "utf-8", "on_bad_lines": "skip"},
+        {"sep": ";", "engine": "c", "encoding": "utf-8", "on_bad_lines": "skip"},
+    ]
+
+    if raw and ";" in raw and raw.count(";") > raw.count(","):
+        preferred = csv_attempts
+    else:
+        preferred = csv_attempts[::-1]
+
+    def _get_bytes(s):
+        if s is None:
+            return None
+        if isinstance(s, (bytes, bytearray)):
+            return bytes(s)
+        if isinstance(s, (io.BytesIO, BytesIO)):
+            try:
+                return s.getvalue()
+            except Exception:
+                try:
+                    s.seek(0); return s.read()
+                except Exception:
+                    return None
+        if hasattr(s, "read") and hasattr(s, "name"):
+            try:
+                return s.getvalue()
+            except Exception:
+                try:
+                    s.seek(0); return s.read()
+                except Exception:
+                    return None
+        if isinstance(s, (str, os.PathLike)):
+            try:
+                with open(s, "rb") as f:
+                    return f.read()
+            except Exception:
+                return None
+        return None
+
+    b = _get_bytes(src)
+    if b is None:
+        st.sidebar.info("[Clients] Pas d'octets disponibles pour tentatives CSV.")
+        return df
+
+    for params in preferred:
+        try:
+            st.sidebar.info(f"[Clients] tentative read_csv sep={params.get('sep')} enc={params.get('encoding')} engine={params.get('engine')}")
+            df_try = pd.read_csv(BytesIO(b), **params)
+            df_try = df_try.dropna(how="all")
+            nrows = df_try.shape[0]
+            st.sidebar.info(f"[Clients] read_csv tentative -> {nrows} lignes, {df_try.shape[1]} colonnes")
+            if nrows >= max(10, n_raw_lines//10, 6):
+                return df_try
+            if nrows <= 6:
+                try:
+                    df_nohdr = pd.read_csv(BytesIO(b), header=None, **{k:v for k,v in params.items() if k!="header"})
+                    for i in range(0, min(8, len(df_nohdr))):
+                        if df_nohdr.iloc[i].count() >= 2:
+                            cols = df_nohdr.iloc[i].astype(str).tolist()
+                            df_follow = df_nohdr.iloc[i+1:].copy()
+                            df_follow.columns = cols
+                            df_follow = df_follow.dropna(how="all")
+                            if df_follow.shape[0] > nrows:
+                                st.sidebar.info(f"[Clients] detected header at row {i}, got {df_follow.shape[0]} data rows")
+                                return df_follow
+                except Exception:
+                    pass
+        except Exception as e:
+            st.sidebar.info(f"[Clients] read_csv attempt failed: {e}")
+            continue
+
+    st.sidebar.info("[Clients] Aucune tentative n'a retourné suffisamment de lignes; retour de la tentative initiale.")
+    return df
+
 # =========================
-# App UI: Tabs - Files, Dashboard, Analyses
+# App UI: Tabs - Files, Dashboard, Analyses, Export
 # =========================
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title(APP_TITLE)
@@ -592,13 +739,13 @@ if mode == "Deux fichiers (Clients & Visa)":
 else:
     visa_src_for_read = clients_src_for_read
 
-# Read tables
+# Read tables with robust clients reader
 df_clients_raw = None
 df_visa_raw = None
 try:
-    df_clients_raw = read_any_table(clients_src_for_read, sheet=SHEET_CLIENTS, debug_prefix="[Clients] ")
+    df_clients_raw = robust_read_clients(clients_src_for_read)
 except Exception as e:
-    st.sidebar.error(f"[Clients] Exception during read_any_table: {e}")
+    st.sidebar.error(f"[Clients] Exception robust_read_clients: {e}")
 
 if df_clients_raw is None:
     try:
@@ -746,7 +893,6 @@ with tabs[1]:
     if df_all_current is None or df_all_current.empty:
         st.info("Aucune donnée cliente en mémoire. Chargez le fichier Clients dans l'onglet Fichiers.")
     else:
-        # Filters: categories, sous, visa, years (compact)
         cats = sorted(df_all_current["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all_current.columns else []
         subs = sorted(df_all_current["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all_current.columns else []
         visas = sorted(df_all_current["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all_current.columns else []
@@ -762,13 +908,12 @@ with tabs[1]:
         if sel_cat:
             view = view[view["Categories"].astype(str).isin(sel_cat)]
         if sel_sub:
-            view = view[view["Sous-categorie"].astype(str).isin(sel_sub)]
+            view = view[view["Sous-catégorie"].astype(str).isin(sel_sub)]
         if sel_visa:
             view = view[view["Visa"].astype(str).isin(sel_visa)]
         if sel_year:
             view = view[view["_Année_"].isin(sel_year)]
 
-        # KPIs
         total = (view.get("Montant honoraires (US $)", 0).apply(_to_num) + view.get("Autres frais (US $)", 0).apply(_to_num)).sum()
         paye = view.get("Payé", 0).apply(_to_num).sum() if "Payé" in view.columns else 0.0
         solde = view.get("Solde", 0).apply(_to_num).sum() if "Solde" in view.columns else 0.0
@@ -806,7 +951,6 @@ with tabs[2]:
     if df_all_current is None or df_all_current.empty:
         st.info("Aucune donnée pour les analyses. Chargez les fichiers d'abord.")
     else:
-        # Category distribution
         st.markdown("### Répartition par Catégorie")
         if "Categories" in df_all_current.columns:
             cat_counts = df_all_current["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
@@ -816,9 +960,7 @@ with tabs[2]:
                 st.info("Pas de catégories à afficher.")
         else:
             st.info("Colonne 'Categories' introuvable.")
-
         st.markdown("---")
-        # Monthly trend
         st.markdown("### Évolution Mensuelle (Total US)")
         tmp = df_all_current.copy()
         if "Montant honoraires (US $)" in tmp.columns and "Autres frais (US $)" in tmp.columns:
@@ -838,9 +980,7 @@ with tabs[2]:
                 st.info("Pas de données temporelles.")
         else:
             st.info("Colonnes temporelles manquantes (_Année_/Mois).")
-
         st.markdown("---")
-        # Top clients
         st.markdown("### Top clients par chiffre d'affaires")
         if "ID_Client" in df_all_current.columns or "Nom" in df_all_current.columns:
             grp = df_all_current.groupby(["ID_Client", "Nom"], dropna=False).agg({
