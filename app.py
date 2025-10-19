@@ -1,18 +1,19 @@
 # Visa Manager - app.py
 # Full application with robust Excel reading, header detection for "Clients" sheet,
-# simplified Files tab and improved Dashboard presentation.
+# simplified Files tab and enhanced Dashboard (date range, search, KPIs, Plotly charts, Top clients, export).
 import os
 import json
 import re
 import io
 from io import BytesIO
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Tuple, Dict, Any, List, Optional
 from pathlib import Path
 
 import pandas as pd
 import numpy as np
 import streamlit as st
+import plotly.express as px
 
 # =========================
 # Constantes et configuration
@@ -700,106 +701,212 @@ with tabs[0]:
             safe_rerun()
 
 # -----------------------
-# Dashboard - redesigned presentation
+# DASHBOARD - Enhanced (date range, search, KPIs, Plotly charts, Top clients, export)
 # -----------------------
 with tabs[1]:
     st.subheader("📊 Dashboard")
     df_all_current = _get_df_live()
 
-    # FILTERS area (top) - compact and consistent
-    with st.container():
-        f1, f2, f3, f4 = st.columns([2,2,2,3])
-        cats = sorted(df_all_current["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all_current.columns else []
-        subs = sorted(df_all_current["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all_current.columns else []
-        visas = sorted(df_all_current["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all_current.columns else []
-        years = sorted(pd.to_numeric(df_all_current["_Année_"], errors="coerce").dropna().astype(int).unique().tolist()) if "_Année_" in df_all_current.columns else []
-
-        sel_cat = f1.multiselect("Catégories", options=cats, default=[], key=skey("dash", "cats"))
-        sel_sub = f2.multiselect("Sous-catégories", options=subs, default=[], key=skey("dash", "subs"))
-        sel_visa = f3.multiselect("Visa", options=visas, default=[], key=skey("dash", "visas"))
-        sel_year = f4.multiselect("Années", options=years, default=[], key=skey("dash", "years"))
-
-    # Apply filters
-    view = df_all_current.copy() if df_all_current is not None else pd.DataFrame()
-    if sel_cat:
-        view = view[view["Categories"].astype(str).isin(sel_cat)]
-    if sel_sub:
-        view = view[view["Sous-categorie"].astype(str).isin(sel_sub)]
-    if sel_visa:
-        view = view[view["Visa"].astype(str).isin(sel_visa)]
-    if sel_year:
-        view = view[view["_Année_"].isin(sel_year)]
-
-    if view is None or view.empty:
-        st.warning("Aucune donnée correspondant aux filtres.")
+    # If no data, show message
+    if df_all_current is None or df_all_current.empty:
+        st.info("Aucune donnée cliente en mémoire. Chargez le fichier Clients dans l'onglet Fichiers.")
     else:
-        # KPIs row
-        total_clients = len(view)
-        total_honoraires = (view["Montant honoraires (US $)"].apply(_to_num) + view["Autres frais (US $)"].apply(_to_num)).sum()
-        total_paye = view["Payé"].apply(_to_num).sum()
-        total_solde = view["Solde"].apply(_to_num).sum()
+        # TOP FILTERS row: date range, search, dossier number
+        today = date.today()
+        min_date = df_all_current["Date"].min() if "Date" in df_all_current.columns else pd.Timestamp(today - timedelta(days=365))
+        max_date = df_all_current["Date"].max() if "Date" in df_all_current.columns else pd.Timestamp(today)
+        try:
+            min_date = _date_for_widget(min_date)
+        except Exception:
+            min_date = today - timedelta(days=365)
+        try:
+            max_date = _date_for_widget(max_date)
+        except Exception:
+            max_date = today
 
-        kcol1, kcol2, kcol3, kcol4 = st.columns([1.4,1.4,1.4,1.4])
-        kcol1.metric("Dossiers", f"{total_clients:,}")
-        kcol2.metric("Total Facturé", _fmt_money(total_honoraires))
-        kcol3.metric("Total Reçu", _fmt_money(total_paye))
-        kcol4.metric("Solde Total", _fmt_money(total_solde))
+        with st.expander("Filtres (afficher / masquer)", expanded=True):
+            fcol1, fcol2, fcol3, fcol4 = st.columns([2,2,2,2])
+            # date range
+            with fcol1:
+                date_from = st.date_input("Date de", value=min_date, key=skey("filter", "date_from"))
+                date_to = st.date_input("Date à", value=max_date, key=skey("filter", "date_to"))
+            # search text
+            with fcol2:
+                search_text = st.text_input("Recherche (Nom / Partie du nom)", value="", key=skey("filter", "search"))
+            # dossier exact
+            with fcol3:
+                dossier_search = st.text_input("Dossier N (exact)", value="", key=skey("filter", "dossier"))
+            # quick KPI scope checkbox
+            with fcol4:
+                scope_period = st.checkbox("KPIs sur la période filtrée", value=True, key=skey("filter", "scope_period"))
+                top_n = st.number_input("Top clients (N)", min_value=3, max_value=100, value=10, step=1, key=skey("filter", "top_n"))
+
+        # Apply filters
+        view = df_all_current.copy()
+        # date filter if Date exists
+        if "Date" in view.columns:
+            try:
+                # convert inputs to timestamps
+                dt_from = pd.to_datetime(date_from)
+                dt_to = pd.to_datetime(date_to) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                view = view[(pd.to_datetime(view["Date"], errors="coerce") >= dt_from) & (pd.to_datetime(view["Date"], errors="coerce") <= dt_to)]
+            except Exception:
+                pass
+
+        # text search on Nom
+        if search_text and "Nom" in view.columns:
+            q = search_text.strip().lower()
+            view = view[view["Nom"].str.lower().str.contains(q, na=False)]
+
+        # dossier exact
+        if dossier_search:
+            col = "Dossier N"
+            if col in view.columns:
+                view = view[view][view[col].astype(str).str.strip() == dossier_search.strip()]
+
+        # aggregated Total_US and clean needed columns
+        if "Montant honoraires (US $)" in view.columns and "Autres frais (US $)" in view.columns:
+            view["Total_US"] = view["Montant honoraires (US $)"].apply(_to_num) + view["Autres frais (US $)"].apply(_to_num)
+        else:
+            view["Total_US"] = 0.0
+
+        # KPIs calculation (either on filtered view or full depending on scope_period)
+        kview = view if scope_period else df_all_current.copy()
+        kview["Total_US"] = kview.get("Total_US", (kview.get("Montant honoraires (US $)", 0).apply(_to_num) if "Montant honoraires (US $)" in kview.columns else 0) + (kview.get("Autres frais (US $)", 0).apply(_to_num) if "Autres frais (US $)" in kview.columns else 0))
+
+        total_count = len(kview)
+        total_facture = kview["Total_US"].sum() if "Total_US" in kview.columns else 0.0
+        total_recu = kview["Payé"].apply(_to_num).sum() if "Payé" in kview.columns else 0.0
+        total_solde = kview["Solde"].apply(_to_num).sum() if "Solde" in kview.columns else 0.0
+        avg_per_dossier = (total_facture / total_count) if total_count else 0.0
+        taux_envoye = (kview["Dossiers envoyé"].apply(_to_num).clip(0,1).sum() / total_count * 100) if ("Dossiers envoyé" in kview.columns and total_count) else 0.0
+        n_refus = int(kview["Dossier refusé"].apply(_to_num).sum()) if "Dossier refusé" in kview.columns else 0
+
+        # KPI display
+        k1, k2, k3, k4, k5, k6 = st.columns([1,1,1,1,1,1])
+        k1.metric("Dossiers", f"{total_count:,}")
+        k2.metric("Total facturé", _fmt_money(total_facture))
+        k3.metric("Total reçu", _fmt_money(total_recu))
+        k4.metric("Solde total", _fmt_money(total_solde))
+        k5.metric("Moyenne / dossier", _fmt_money(avg_per_dossier))
+        k6.metric("Taux envoyés (%)", f"{taux_envoye:.0f}%")
+        st.markdown(f"Nombre de refus (période): **{n_refus}**")
 
         st.markdown("---")
 
-        # Charts row
-        c1, c2 = st.columns([1, 2])
-        with c1:
+        # Charts area using Plotly
+        chart1, chart2 = st.columns([1,2])
+        with chart1:
             st.subheader("Répartition par Catégorie")
             if "Categories" in view.columns:
                 cat_counts = view["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
                 if not cat_counts.empty:
-                    st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
+                    fig_cat = px.pie(cat_counts, names="Categorie", values="Nombre", hole=0.45, title="Catégories")
+                    st.plotly_chart(fig_cat, use_container_width=True)
                 else:
                     st.info("Pas de catégories à afficher.")
             else:
                 st.info("Colonne 'Categories' introuvable.")
 
-            st.subheader("Top 10 Sous-catégories")
+            st.write("")  # spacing
+            st.subheader("Top Sous-catégories")
             if "Sous-categorie" in view.columns:
-                sub_counts = view["Sous-categorie"].value_counts().head(10)
-                st.bar_chart(sub_counts)
+                sub_counts = view["Sous-categorie"].value_counts().head(10).reset_index()
+                sub_counts.columns = ["Sous-categorie", "Nombre"]
+                if not sub_counts.empty:
+                    fig_sub = px.bar(sub_counts, x="Nombre", y="Sous-categorie", orientation="h", title="Top Sous-catégories")
+                    st.plotly_chart(fig_sub, use_container_width=True)
+                else:
+                    st.info("Pas de sous-catégories à afficher.")
             else:
                 st.info("Colonne 'Sous-categorie' introuvable.")
 
-        with c2:
-            st.subheader("Évolution Mensuelle (Honoraires + Frais)")
+        with chart2:
+            st.subheader("Évolution Mensuelle (Total US)")
             tmp = view.copy()
-            tmp["Total_US"] = tmp["Montant honoraires (US $)"].apply(_to_num) + tmp["Autres frais (US $)"].apply(_to_num)
             if "_Année_" in tmp.columns and "Mois" in tmp.columns:
-                tmp["YearMonth"] = tmp["_Année_"].astype(str) + "-" + tmp["Mois"].astype(str)
-                g = tmp.groupby("YearMonth", as_index=False)["Total_US"].sum().sort_values("YearMonth")
-                if not g.empty:
-                    g = g.set_index("YearMonth")
-                    st.line_chart(g)
+                tmp = tmp.dropna(subset=["_Année_", "Mois"])
+                if not tmp.empty:
+                    tmp["YearMonth"] = tmp["_Année_"].astype(int).astype(str) + "-" + tmp["Mois"].astype(str)
+                    g = tmp.groupby("YearMonth", as_index=False)["Total_US"].sum().sort_values("YearMonth")
+                    if not g.empty:
+                        fig_line = px.line(g, x="YearMonth", y="Total_US", markers=True, title="Évolution Mensuelle")
+                        fig_line.update_layout(xaxis_title="Période", yaxis_title="Montant (US$)")
+                        st.plotly_chart(fig_line, use_container_width=True)
+                    else:
+                        st.info("Pas assez de données mensuelles.")
                 else:
-                    st.info("Pas assez de données mensuelles.")
+                    st.info("Pas de données temporelles pour la période sélectionnée.")
             else:
                 st.info("Colonnes temporelles manquantes (_Année_/Mois).")
 
         st.markdown("---")
 
-        # Recent table
-        st.subheader("Aperçu récent des dossiers")
-        recent = view.sort_values(by=["_Année_", "_MoisNum_"], ascending=[False, False]).head(20).copy()
-        display_cols = [c for c in [
+        # Top clients by total facturé
+        st.subheader(f"Top {int(top_n)} clients par Total facturé")
+        if "ID_Client" in view.columns or "Nom" in view.columns:
+            grp = view.groupby(["ID_Client", "Nom"], dropna=False).agg({
+                "Total_US": "sum",
+                "Dossier N": "count"
+            }).reset_index().rename(columns={"Dossier N": "Nb_dossiers"})
+            grp_sorted = grp.sort_values("Total_US", ascending=False).head(int(top_n))
+            if not grp_sorted.empty:
+                fig_top = px.bar(grp_sorted, x="Total_US", y="Nom", orientation="h", title=f"Top {int(top_n)} clients", text="Nb_dossiers")
+                fig_top.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Total facturé (US$)")
+                st.plotly_chart(fig_top, use_container_width=True)
+                st.dataframe(grp_sorted.assign(Total_US=lambda d: d["Total_US"].map(lambda v: _fmt_money(v))).reset_index(drop=True), use_container_width=True)
+            else:
+                st.info("Pas de clients à afficher.")
+        else:
+            st.info("Colonnes client introuvables (ID_Client/Nom).")
+
+        st.markdown("---")
+
+        # Detailed table with column selection and pagination
+        st.subheader("Table détaillée")
+        available_cols = [c for c in [
             "Dossier N", "ID_Client", "Nom", "Date", "Categories", "Sous-categorie", "Visa",
-            "Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"
-        ] if c in recent.columns]
-        for col in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"]:
-            if col in recent.columns:
-                recent[col] = recent[col].apply(lambda x: _fmt_money(_to_num(x)))
-        if "Date" in recent.columns:
+            "Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde", "Total_US"
+        ] if c in view.columns]
+        # default selected columns
+        default_cols = [c for c in ["Dossier N", "Nom", "Date", "Categories", "Total_US", "Payé", "Solde"] if c in available_cols]
+        cols_selected = st.multiselect("Colonnes à afficher", options=available_cols, default=default_cols, key=skey("table", "cols"))
+
+        # Pagination controls
+        page_size = st.selectbox("Lignes par page", options=[10, 25, 50, 100], index=1, key=skey("table", "page_size"))
+        total_rows = len(view)
+        total_pages = max(1, int(np.ceil(total_rows / page_size)))
+        page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1, key=skey("table", "page_num"))
+
+        start = (page - 1) * page_size
+        end = start + page_size
+        display_df = view.sort_values(by=["_Année_", "_MoisNum_"], ascending=[False, False]).iloc[start:end].copy()
+
+        # format money/date
+        for col in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde", "Total_US"]:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].apply(lambda x: _fmt_money(_to_num(x)))
+        if "Date" in display_df.columns:
             try:
-                recent["Date"] = pd.to_datetime(recent["Date"], errors="coerce").dt.date.astype(str)
+                display_df["Date"] = pd.to_datetime(display_df["Date"], errors="coerce").dt.date.astype(str)
             except Exception:
-                recent["Date"] = recent["Date"].astype(str)
-        st.dataframe(recent[display_cols].reset_index(drop=True), use_container_width=True)
+                display_df["Date"] = display_df["Date"].astype(str)
+
+        if cols_selected:
+            st.dataframe(display_df[cols_selected].reset_index(drop=True), use_container_width=True)
+        else:
+            st.dataframe(display_df.reset_index(drop=True), use_container_width=True)
+
+        # Export filtered view CSV / XLSX
+        col1, col2 = st.columns(2)
+        with col1:
+            csv_bytes = view.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Export CSV (vue filtrée)", data=csv_bytes, file_name="Clients_filtered.csv", mime="text/csv", key=skey("export", "csv"))
+        with col2:
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                view.to_excel(writer, index=False, sheet_name="Filtered")
+            st.download_button("⬇️ Export XLSX (vue filtrée)", data=buf.getvalue(), file_name="Clients_filtered.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=skey("export", "xlsx"))
 
 # NOTE: Remaining UI sections (Analyses, Escrow, Compte client, Gestion, Visa preview, Export)
-# can be added or expanded as needed; they are intentionally omitted for brevity in this file.
+# are intentionally omitted in this response for brevity but can be added similarly with improved UX.
