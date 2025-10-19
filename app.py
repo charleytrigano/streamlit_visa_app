@@ -1,6 +1,8 @@
 # Visa Manager - app.py
 # Full application with robust Excel reading, header detection for "Clients" sheet,
-# simplified Files tab and enhanced Dashboard (date range, search, KPIs, Plotly charts, Top clients, export).
+# simplified Files tab and enhanced Dashboard (date range, search, KPIs, interactive charts).
+# Plotly import is done safely with fallback to Streamlit built-in charts if plotly is absent.
+
 import os
 import json
 import re
@@ -13,7 +15,45 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import streamlit as st
-import plotly.express as px
+
+# Safe import of plotly with graceful fallback to Streamlit charts
+try:
+    import plotly.express as px
+    HAS_PLOTLY = True
+except Exception:
+    px = None
+    HAS_PLOTLY = False
+
+# Helper drawing functions: use Plotly if available, otherwise Streamlit builtins
+def plot_pie(df_counts, names_col: str = "Categorie", value_col: str = "Nombre", title: str = ""):
+    if HAS_PLOTLY and px is not None:
+        fig = px.pie(df_counts, names=names_col, values=value_col, hole=0.45, title=title)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.write(title)
+        if value_col in df_counts.columns and names_col in df_counts.columns:
+            st.bar_chart(df_counts.set_index(names_col)[value_col])
+
+def plot_barh(df_bar, x: str, y: str, title: str = ""):
+    if HAS_PLOTLY and px is not None:
+        fig = px.bar(df_bar, x=x, y=y, orientation="h", title=title, text=x)
+        fig.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.write(title)
+        if x in df_bar.columns and y in df_bar.columns:
+            # fallback: plotly-like horizontal via bar_chart (index needs to be y)
+            st.bar_chart(df_bar.set_index(y)[x])
+
+def plot_line(df_line, x: str, y: str, title: str = "", x_title: str = "", y_title: str = ""):
+    if HAS_PLOTLY and px is not None:
+        fig = px.line(df_line, x=x, y=y, markers=True, title=title)
+        fig.update_layout(xaxis_title=x_title, yaxis_title=y_title)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.write(title)
+        if x in df_line.columns and y in df_line.columns:
+            st.line_chart(df_line.set_index(x)[y])
 
 # =========================
 # Constantes et configuration
@@ -772,7 +812,11 @@ with tabs[1]:
 
         # KPIs calculation (either on filtered view or full depending on scope_period)
         kview = view if scope_period else df_all_current.copy()
-        kview["Total_US"] = kview.get("Total_US", (kview.get("Montant honoraires (US $)", 0).apply(_to_num) if "Montant honoraires (US $)" in kview.columns else 0) + (kview.get("Autres frais (US $)", 0).apply(_to_num) if "Autres frais (US $)" in kview.columns else 0))
+        if "Total_US" not in kview.columns:
+            if "Montant honoraires (US $)" in kview.columns and "Autres frais (US $)" in kview.columns:
+                kview["Total_US"] = kview["Montant honoraires (US $)"].apply(_to_num) + kview["Autres frais (US $)"].apply(_to_num)
+            else:
+                kview["Total_US"] = 0.0
 
         total_count = len(kview)
         total_facture = kview["Total_US"].sum() if "Total_US" in kview.columns else 0.0
@@ -794,15 +838,14 @@ with tabs[1]:
 
         st.markdown("---")
 
-        # Charts area using Plotly
+        # Charts area using safe plot helpers
         chart1, chart2 = st.columns([1,2])
         with chart1:
             st.subheader("Répartition par Catégorie")
             if "Categories" in view.columns:
                 cat_counts = view["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
                 if not cat_counts.empty:
-                    fig_cat = px.pie(cat_counts, names="Categorie", values="Nombre", hole=0.45, title="Catégories")
-                    st.plotly_chart(fig_cat, use_container_width=True)
+                    plot_pie(cat_counts, names_col="Categorie", value_col="Nombre", title="Catégories")
                 else:
                     st.info("Pas de catégories à afficher.")
             else:
@@ -814,8 +857,7 @@ with tabs[1]:
                 sub_counts = view["Sous-categorie"].value_counts().head(10).reset_index()
                 sub_counts.columns = ["Sous-categorie", "Nombre"]
                 if not sub_counts.empty:
-                    fig_sub = px.bar(sub_counts, x="Nombre", y="Sous-categorie", orientation="h", title="Top Sous-catégories")
-                    st.plotly_chart(fig_sub, use_container_width=True)
+                    plot_barh(sub_counts, x="Nombre", y="Sous-categorie", title="Top Sous-catégories")
                 else:
                     st.info("Pas de sous-catégories à afficher.")
             else:
@@ -830,9 +872,7 @@ with tabs[1]:
                     tmp["YearMonth"] = tmp["_Année_"].astype(int).astype(str) + "-" + tmp["Mois"].astype(str)
                     g = tmp.groupby("YearMonth", as_index=False)["Total_US"].sum().sort_values("YearMonth")
                     if not g.empty:
-                        fig_line = px.line(g, x="YearMonth", y="Total_US", markers=True, title="Évolution Mensuelle")
-                        fig_line.update_layout(xaxis_title="Période", yaxis_title="Montant (US$)")
-                        st.plotly_chart(fig_line, use_container_width=True)
+                        plot_line(g, x="YearMonth", y="Total_US", title="Évolution Mensuelle", x_title="Période", y_title="Montant (US$)")
                     else:
                         st.info("Pas assez de données mensuelles.")
                 else:
@@ -851,10 +891,14 @@ with tabs[1]:
             }).reset_index().rename(columns={"Dossier N": "Nb_dossiers"})
             grp_sorted = grp.sort_values("Total_US", ascending=False).head(int(top_n))
             if not grp_sorted.empty:
-                fig_top = px.bar(grp_sorted, x="Total_US", y="Nom", orientation="h", title=f"Top {int(top_n)} clients", text="Nb_dossiers")
-                fig_top.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Total facturé (US$)")
-                st.plotly_chart(fig_top, use_container_width=True)
-                st.dataframe(grp_sorted.assign(Total_US=lambda d: d["Total_US"].map(lambda v: _fmt_money(v))).reset_index(drop=True), use_container_width=True)
+                # safe bar horizontal
+                if HAS_PLOTLY and px is not None:
+                    fig_top = px.bar(grp_sorted, x="Total_US", y="Nom", orientation="h", title=f"Top {int(top_n)} clients", text="Nb_dossiers")
+                    fig_top.update_layout(yaxis={'categoryorder':'total ascending'}, xaxis_title="Total facturé (US$)")
+                    st.plotly_chart(fig_top, use_container_width=True)
+                else:
+                    st.write(f"Top {int(top_n)} clients")
+                    st.dataframe(grp_sorted.assign(Total_US=lambda d: d["Total_US"].map(lambda v: _fmt_money(v))).reset_index(drop=True), use_container_width=True)
             else:
                 st.info("Pas de clients à afficher.")
         else:
@@ -909,4 +953,4 @@ with tabs[1]:
             st.download_button("⬇️ Export XLSX (vue filtrée)", data=buf.getvalue(), file_name="Clients_filtered.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=skey("export", "xlsx"))
 
 # NOTE: Remaining UI sections (Analyses, Escrow, Compte client, Gestion, Visa preview, Export)
-# are intentionally omitted in this response for brevity but can be added similarly with improved UX.
+# are intentionally omitted in this file for brevity but can be added similarly with improved UX.
