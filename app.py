@@ -1,7 +1,10 @@
 # Visa Manager - app.py
 # Streamlit app: robust Excel/CSV reading, automatic column normalization for Clients,
 # simplified Files tab, Dashboard (compact KPIs & table), Analyses tab (charts),
-# and a new "Ajouter / Modifier / Supprimer" management tab.
+# Gestion tab (Add/Edit/Delete) with:
+# - automatic ID_Client generation starting at 13057
+# - Categories dropdown populated from Visa file
+# - Sous-categories dependent on selected Category (from Visa mapping)
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl; optional: plotly for interactive charts.
@@ -45,6 +48,7 @@ MEMO_FILE = "_vmemory.json"
 SHEET_CLIENTS = "Clients"
 SHEET_VISA = "Visa"
 SID = "vmgr"
+DEFAULT_START_CLIENT_ID = 13057
 
 # -------------------------
 # skey helper must be defined early (used as widget keys)
@@ -209,6 +213,33 @@ def money_to_float(x: Any) -> float:
             return float(s2)
         except Exception:
             return 0.0
+
+# =========================
+# Visa mapping utilities
+# =========================
+def build_visa_map(dfv: pd.DataFrame) -> Dict[str, List[str]]:
+    """
+    Build a mapping Category -> list of sub-categories from the Visa sheet.
+    Expects dfv columns to include 'Categories' and 'Sous-categorie' (after heuristic mapping).
+    """
+    vm: Dict[str, List[str]] = {}
+    if dfv is None or dfv.empty:
+        return vm
+    df = dfv.copy()
+    # normalize column names if needed
+    if "Categories" not in df.columns and "Categorie" in df.columns:
+        df = df.rename(columns={"Categorie": "Categories"})
+    if "Sous-categorie" not in df.columns and "Sous-categorie" in df.columns:
+        pass
+    for _, row in df.iterrows():
+        cat = str(row.get("Categories", "")).strip()
+        sub = str(row.get("Sous-categorie", "")).strip()
+        if not cat:
+            continue
+        vm.setdefault(cat, [])
+        if sub and sub not in vm[cat]:
+            vm[cat].append(sub)
+    return vm
 
 # =========================
 # Normalization / features
@@ -658,11 +689,8 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
         return df
     cols = list(df.columns)
     rename_map = {}
-    def _ck(x): 
+    def _ck(x):
         return canonical_key(str(x))
-    # detect presence
-    has_cat = any(_ck(c) in ("categories","categorie") for c in cols)
-    has_sub = any("sous" in _ck(c) and "categorie" in _ck(c) for c in cols) or any("souscategorie" in _ck(c) for c in cols)
     for c in cols:
         k = _ck(c)
         if ("sous" in k and "categorie" in k) or ("souscategorie" in k):
@@ -820,6 +848,20 @@ if df_visa_raw is None:
 if isinstance(df_clients_raw, pd.DataFrame):
     debug_show_columns_preview(df_clients_raw, "Clients (raw)")
 
+# Normalize visa sheet and build visa mapping for categories/subcategories
+visa_map = {}
+visa_categories = []
+if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
+    try:
+        df_visa_raw, _vm = map_columns_heuristic(df_visa_raw)
+        # coerce category columns
+        df_visa_raw = coerce_category_columns(df_visa_raw)
+        visa_map = build_visa_map(df_visa_raw)
+        visa_categories = sorted(list(visa_map.keys()))
+    except Exception:
+        visa_map = {}
+        visa_categories = []
+
 # Apply heuristic mapping & numeric conversion automatically (no mapping print)
 if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
     try:
@@ -873,7 +915,31 @@ def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
 # -----------------------
-# Tabs
+# Helper: compute next client id
+# -----------------------
+def get_next_client_id(df: pd.DataFrame) -> int:
+    """
+    Determine next numeric client ID. Start from DEFAULT_START_CLIENT_ID if none found.
+    Accepts ID_Client with numeric content; extracts digits.
+    """
+    if df is None or df.empty:
+        return DEFAULT_START_CLIENT_ID
+    vals = df.get("ID_Client", pd.Series([], dtype="object"))
+    nums = []
+    for v in vals.dropna().astype(str):
+        m = re.search(r"(\d+)", v)
+        if m:
+            try:
+                nums.append(int(m.group(1)))
+            except Exception:
+                pass
+    if not nums:
+        return DEFAULT_START_CLIENT_ID
+    mx = max(nums)
+    return max(DEFAULT_START_CLIENT_ID, mx) + 1
+
+# -----------------------
+# Tabs (already defined earlier list)
 # -----------------------
 tabs = st.tabs([
     "📄 Fichiers",
@@ -946,7 +1012,7 @@ with tabs[0]:
             safe_rerun()
 
 # -----------------------
-# Dashboard tab: compact KPIs + recent table (no big metrics)
+# Dashboard tab: compact KPIs + recent table (no charts)
 # -----------------------
 with tabs[1]:
     st.subheader("📊 Dashboard")
@@ -988,10 +1054,10 @@ with tabs[1]:
         kcols = st.columns([1,1,1,1])
         def small_metric(col, label, value, sub=None):
             with col:
-                st.markdown(f"<div style='font-size:16px; font-weight:600; margin-bottom:2px;'>{label}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:18px; color:#0A6EBD; font-weight:700;'>{value}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:14px; font-weight:600; margin-bottom:1px;'>{label}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='font-size:16px; color:#0A6EBD; font-weight:700;'>{value}</div>", unsafe_allow_html=True)
                 if sub:
-                    st.markdown(f"<div style='font-size:12px; color:#6c757d;'>{sub}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='font-size:11px; color:#6c757d;'>{sub}</div>", unsafe_allow_html=True)
 
         small_metric(kcols[0], "Dossiers", f"{n_dossiers:,}")
         small_metric(kcols[1], "Total facturé", _fmt_money(total))
@@ -1001,7 +1067,6 @@ with tabs[1]:
         # secondary row with two smaller metrics
         s1, s2 = st.columns([1,1])
         small_metric(s1, "Moyenne / dossier", _fmt_money(avg))
-        # compute taux_envoye
         taux_envoye = (view["Dossiers envoyé"].apply(_to_num).clip(0,1).sum() / n_dossiers * 100) if ("Dossiers envoyé" in view.columns and n_dossiers) else 0.0
         small_metric(s2, "Taux envoyés (%)", f"{taux_envoye:.0f}%")
 
@@ -1094,17 +1159,30 @@ with tabs[3]:
         if c not in df_live.columns:
             df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
 
+    # Determine categories source: from visa_map if available otherwise from existing clients
+    categories_options = visa_categories if visa_categories else sorted(df_live["Categories"].dropna().astype(str).unique().tolist())
+
     st.markdown("### Ajouter un dossier")
     with st.form(key=skey("form_add")):
+        # auto-generate client id
+        next_id = get_next_client_id(df_live)
+        st.markdown(f"**ID_Client (généré automatiquement) :** {next_id}")
         col_a1, col_a2, col_a3 = st.columns(3)
         with col_a1:
-            add_id = st.text_input("ID_Client", value="", key=skey("add","id"))
             add_dossier = st.text_input("Dossier N", value="", key=skey("add","dossier"))
             add_nom = st.text_input("Nom", value="", key=skey("add","nom"))
         with col_a2:
             add_date = st.date_input("Date", value=date.today(), key=skey("add","date"))
-            add_cat = st.text_input("Categories", value="", key=skey("add","cat"))
-            add_sub = st.text_input("Sous-categorie", value="", key=skey("add","sub"))
+            # Categories dropdown from Visa file
+            add_cat = st.selectbox("Categories", options=[""] + categories_options, index=0, key=skey("add","cat"))
+            # Sous-categories depend on selected category via visa_map
+            sub_options = []
+            if add_cat and visa_map:
+                sub_options = visa_map.get(add_cat, [])
+            # fallback to existing values if no visa_map
+            if not sub_options:
+                sub_options = sorted(df_live["Sous-categorie"].dropna().astype(str).unique().tolist())
+            add_sub = st.selectbox("Sous-categorie", options=[""] + sub_options, index=0, key=skey("add","sub"))
         with col_a3:
             add_visa = st.text_input("Visa", value="", key=skey("add","visa"))
             add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("add","montant"))
@@ -1114,7 +1192,7 @@ with tabs[3]:
         if submitted:
             try:
                 new_row = {c: "" for c in df_live.columns}
-                new_row["ID_Client"] = add_id
+                new_row["ID_Client"] = str(next_id)
                 new_row["Dossier N"] = add_dossier
                 new_row["Nom"] = add_nom
                 new_row["Date"] = pd.to_datetime(add_date)
@@ -1137,8 +1215,6 @@ with tabs[3]:
     if df_live is None or df_live.empty:
         st.info("Aucun dossier en mémoire à modifier.")
     else:
-        # choose by index or Dossier N
-        identifiers = df_live["Dossier N"].astype(str).replace("nan","").tolist()
         # create mapping index->display
         choices = [f"{i} | {df_live.at[i,'Dossier N'] if 'Dossier N' in df_live.columns else ''} | {df_live.at[i,'Nom'] if 'Nom' in df_live.columns else ''}" for i in range(len(df_live))]
         sel = st.selectbox("Sélectionnez la ligne à modifier", options=[""] + choices, key=skey("edit","select"))
@@ -1148,13 +1224,27 @@ with tabs[3]:
             with st.form(key=skey("form_edit")):
                 ecol1, ecol2 = st.columns(2)
                 with ecol1:
-                    e_id = st.text_input("ID_Client", value=str(row.get("ID_Client","")), key=skey("edit","id"))
+                    e_id_display = st.markdown(f"**ID_Client :** {row.get('ID_Client','')}")
                     e_dossier = st.text_input("Dossier N", value=str(row.get("Dossier N","")), key=skey("edit","dossier"))
                     e_nom = st.text_input("Nom", value=str(row.get("Nom","")), key=skey("edit","nom"))
                 with ecol2:
                     e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
-                    e_cat = st.text_input("Categories", value=str(row.get("Categories","")), key=skey("edit","cat"))
-                    e_sub = st.text_input("Sous-categorie", value=str(row.get("Sous-categorie","")), key=skey("edit","sub"))
+                    # categories selectbox: prefer visa categories
+                    edit_cat_options = categories_options if categories_options else sorted(df_live["Categories"].dropna().astype(str).unique().tolist())
+                    try:
+                        init_cat = row.get("Categories","")
+                        idx_cat = edit_cat_options.index(init_cat) if init_cat in edit_cat_options else 0
+                    except Exception:
+                        idx_cat = 0
+                    e_cat = st.selectbox("Categories", options=[""] + edit_cat_options, index=idx_cat, key=skey("edit","cat"))
+                    # sub options depend on e_cat
+                    edit_sub_options = visa_map.get(e_cat, []) if visa_map else sorted(df_live["Sous-categorie"].dropna().astype(str).unique().tolist())
+                    try:
+                        init_sub = row.get("Sous-categorie","")
+                        idx_sub = edit_sub_options.index(init_sub) if init_sub in edit_sub_options else 0
+                    except Exception:
+                        idx_sub = 0
+                    e_sub = st.selectbox("Sous-categorie", options=[""] + edit_sub_options, index=idx_sub, key=skey("edit","sub"))
                 e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa_2"))
                 e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
                 e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)",0)), key=skey("edit","autres"))
@@ -1163,7 +1253,6 @@ with tabs[3]:
                 save = st.form_submit_button("Enregistrer modifications")
                 if save:
                     try:
-                        df_live.at[idx, "ID_Client"] = e_id
                         df_live.at[idx, "Dossier N"] = e_dossier
                         df_live.at[idx, "Nom"] = e_nom
                         df_live.at[idx, "Date"] = pd.to_datetime(e_date)
