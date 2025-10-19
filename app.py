@@ -1,7 +1,6 @@
-# url=https://github.com/charleytrigano/streamlit_visa_app/blob/main/app.py
 # Visa Manager - app.py
-# Full application with robust Excel reading and header detection for "Clients" sheet.
-# Fichiers tab simplified: only shows Clients and Visa read / previews.
+# Full application with robust Excel reading, header detection for "Clients" sheet,
+# simplified Files tab and improved Dashboard presentation.
 import os
 import json
 import re
@@ -144,6 +143,27 @@ def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         df["_Année_"] = 0
         df["_MoisNum_"] = 0
         df["Mois"] = ""
+    return df
+
+def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    if "Date" in df.columns:
+        try:
+            dd = pd.to_datetime(df["Date"], errors="coerce")
+        except Exception:
+            dd = pd.to_datetime(pd.Series([], dtype="datetime64[ns]"))
+        df["_Année_"] = dd.dt.year
+        df["_MoisNum_"] = dd.dt.month
+        df["Mois"] = dd.dt.month.apply(lambda m: f"{int(m):02d}" if pd.notna(m) else "")
+    else:
+        if "_Année_" not in df.columns:
+            df["_Année_"] = pd.NA
+        if "_MoisNum_" not in df.columns:
+            df["_MoisNum_"] = pd.NA
+        if "Mois" not in df.columns:
+            df["Mois"] = ""
     return df
 
 # Safe rerun wrapper (handles environments missing experimental_rerun)
@@ -448,7 +468,7 @@ def build_visa_map(dfv: pd.DataFrame) -> Dict[str, Dict[str, Dict[str, Any]]]:
 st.set_page_config(page_title="Visa Manager", layout="wide")
 st.title(APP_TITLE)
 
-# Sidebar (keep file upload controls here for convenience)
+# Sidebar (file upload controls)
 st.sidebar.header("📂 Fichiers")
 last_clients, last_visa, last_save_dir = load_last_paths()
 
@@ -459,7 +479,6 @@ mode = st.sidebar.radio(
     key=skey("mode")
 )
 
-# Keep uploaders in sidebar; Fichiers tab will only show read previews
 up_clients = st.sidebar.file_uploader(
     "Clients (xlsx/csv)", type=["xlsx", "xls", "csv"], key=skey("up_clients")
 )
@@ -553,10 +572,44 @@ if df_visa_raw is None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# Persist working copy in session_state
+# Ensure we have a usable df_all and initialize session_state safely
+try:
+    # Attempt to recover if df_clients_raw is not a DataFrame
+    if not isinstance(df_clients_raw, pd.DataFrame):
+        try:
+            tmp = read_any_table(df_clients_raw, sheet=SHEET_CLIENTS)
+            if isinstance(tmp, pd.DataFrame):
+                df_clients_raw = tmp
+        except Exception:
+            pass
+
+    try:
+        df_all = _ensure_time_features(normalize_clients(df_clients_raw))
+    except Exception as e_norm:
+        try:
+            st.sidebar.error(f"Erreur lors de la normalisation des clients : {e_norm}")
+            st.sidebar.exception(e_norm)
+            st.sidebar.write("Type de df_clients_raw:", type(df_clients_raw))
+            try:
+                sr = repr(df_clients_raw)
+                st.sidebar.write("Repr (truncated):", sr[:1000] + ("..." if len(sr) > 1000 else ""))
+            except Exception:
+                pass
+        except Exception:
+            pass
+        df_all = pd.DataFrame(columns=COLS_CLIENTS)
+
+except Exception as e_top:
+    try:
+        st.sidebar.error(f"Erreur inattendue lors de la préparation des données clients : {e_top}")
+        st.sidebar.exception(e_top)
+    except Exception:
+        pass
+    df_all = pd.DataFrame(columns=COLS_CLIENTS)
+
+# Persist working copy in session_state (always define it)
 DF_LIVE_KEY = skey("df_live")
 if DF_LIVE_KEY not in st.session_state or st.session_state[DF_LIVE_KEY] is None:
-    df_all = _ensure_time_features(normalize_clients(df_clients_raw))
     st.session_state[DF_LIVE_KEY] = df_all.copy() if (df_all is not None) else pd.DataFrame()
 
 def _get_df_live() -> pd.DataFrame:
@@ -602,7 +655,6 @@ with tabs[0]:
             st.warning("Lecture Clients : aucun tableau trouvé ou DataFrame vide.")
         else:
             st.success(f"Clients lus ({df_clients_raw.shape[0]} lignes, {df_clients_raw.shape[1]} colonnes)")
-            # show compact preview (first 8 rows) and let user expand to see full head if needed
             try:
                 st.dataframe(df_clients_raw.head(8), use_container_width=True, height=220)
             except Exception:
@@ -639,18 +691,16 @@ with tabs[0]:
     a1, a2 = st.columns([1,1])
     with a1:
         if st.button("Réinitialiser la mémoire (annuler modifications en mémoire)"):
-            # reset session df_live to current read
             df_all = _ensure_time_features(normalize_clients(df_clients_raw))
             _set_df_live(df_all)
             st.success("Mémoire réinitialisée à partir des fichiers chargés.")
             safe_rerun()
     with a2:
         if st.button("Actualiser la lecture"):
-            # re-run read (simple feedback)
-            st.experimental_rerun()
+            safe_rerun()
 
 # -----------------------
-# Dashboard (unchanged structure, improved presentation)
+# Dashboard - redesigned presentation
 # -----------------------
 with tabs[1]:
     st.subheader("📊 Dashboard")
@@ -751,4 +801,5 @@ with tabs[1]:
                 recent["Date"] = recent["Date"].astype(str)
         st.dataframe(recent[display_cols].reset_index(drop=True), use_container_width=True)
 
-# NOTE: Remaining UI sections omitted for brevity; unchanged.
+# NOTE: Remaining UI sections (Analyses, Escrow, Compte client, Gestion, Visa preview, Export)
+# can be added or expanded as needed; they are intentionally omitted for brevity in this file.
