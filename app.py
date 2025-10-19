@@ -1,3 +1,4 @@
+# url=https://github.com/charleytrigano/streamlit_visa_app/blob/main/app.py
 import os
 import json
 import re
@@ -160,14 +161,69 @@ def safe_rerun():
         except Exception:
             pass
         return
-    # Fallback: set a flag so UI can react if needed
     try:
         st.sidebar.info("Rerun non disponible dans cette version de Streamlit ; mise à jour session_state.")
         st.session_state.setdefault("_need_rerun", True)
     except Exception:
         pass
 
-# Robust read_any_table (fixed truthiness issues and improved diagnostics)
+# try_read_excel_from_bytes: choose first non-empty sheet (prefer requested or known names)
+def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
+    bio = BytesIO(b)
+    try:
+        xls = pd.ExcelFile(bio, engine="openpyxl")
+        sheets = xls.sheet_names
+        try:
+            st.sidebar.info(f"Excel file detected; sheets: {sheets}")
+        except Exception:
+            pass
+
+        # Build candidate list: requested sheet, known names, then workbook order
+        candidates: List[Any] = []
+        if sheet_name and sheet_name in sheets:
+            candidates.append(sheet_name)
+        for cand in [SHEET_CLIENTS, SHEET_VISA, "Sheet1"]:
+            if cand in sheets and cand not in candidates:
+                candidates.append(cand)
+        for s in sheets:
+            if s not in candidates:
+                candidates.append(s)
+
+        best_df: Optional[pd.DataFrame] = None
+        best_non_null = -1
+
+        for cand in candidates:
+            try:
+                bio2 = BytesIO(b)
+                df_try = pd.read_excel(bio2, sheet_name=cand, engine="openpyxl")
+                if df_try is None:
+                    continue
+                # count rows with at least one non-null cell
+                non_null_rows = df_try.dropna(how="all").shape[0]
+                if non_null_rows > 0:
+                    # Prefer the first non-empty candidate
+                    return df_try
+                # track best (most non-null rows) as fallback
+                if non_null_rows > best_non_null:
+                    best_non_null = non_null_rows
+                    best_df = df_try
+            except Exception as e:
+                try:
+                    st.sidebar.info(f"Lecture failed pour feuille {cand}: {e}")
+                except Exception:
+                    pass
+                continue
+
+        # Return best attempt (may be empty) if nothing non-empty found
+        return best_df
+    except Exception as e:
+        try:
+            st.sidebar.info(f"try_read_excel_from_bytes failed: {e}")
+        except Exception:
+            pass
+        return None
+
+# Robust read_any_table (uses try_read_excel_from_bytes)
 def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = "") -> Optional[pd.DataFrame]:
     def _log(msg: str):
         try:
@@ -178,25 +234,6 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     if src is None:
         _log("read_any_table: src is None")
         return None
-
-    def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
-        bio = BytesIO(b)
-        try:
-            xls = pd.ExcelFile(bio, engine="openpyxl")
-            sheets = xls.sheet_names
-            _log(f"Excel file detected; sheets: {sheets}")
-            if sheet_name and sheet_name in sheets:
-                bio2 = BytesIO(b)
-                return pd.read_excel(bio2, sheet_name=sheet_name, engine="openpyxl")
-            for candidate in [SHEET_CLIENTS, SHEET_VISA, "Sheet1"]:
-                if isinstance(candidate, str) and candidate in sheets:
-                    bio2 = BytesIO(b)
-                    return pd.read_excel(bio2, sheet_name=candidate, engine="openpyxl")
-            bio2 = BytesIO(b)
-            return pd.read_excel(bio2, sheet_name=0, engine="openpyxl")
-        except Exception as e:
-            _log(f"try_read_excel_from_bytes failed: {repr(e)}")
-            return None
 
     # bytes / bytearray
     if isinstance(src, (bytes, bytearray)):
@@ -626,6 +663,4 @@ with tabs[1]:
         k4.metric("Solde", _fmt_money(solde))
         k5.metric("Envoyés (%)", f"{env_pct}%")
 
-# NOTE: The rest of UI (Analyses, Escrow, Compte client, Gestion, Visa preview, Export)
-# follows exactly the same logic as previously included and uses _get_df_live/_set_df_live.
-# If you want the remaining sections pasted verbatim, tell me and I'll include them too.
+# (Remaining UI sections omitted for brevity; they are unchanged from previous full script and use the same helpers.)
