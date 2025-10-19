@@ -1,7 +1,7 @@
 # Visa Manager - app.py
-# (Même application que précédemment) Correction : auto-sélection de la première Sous-categorie si disponible
-# et affichage des cases à cocher correspondantes immédiatement après sélection de la catégorie.
-# (Conserver les autres fonctionnalités inchangées.)
+# Version : présentation améliorée (UI soignée, cases à cocher en grille, expander debug)
+# Usage: streamlit run app.py
+# Requis: pandas, openpyxl, streamlit
 
 import os
 import json
@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional: plotly
+# Optional: plotly (si installé)
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -22,8 +22,10 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
+# =========================
+# Configuration
+# =========================
 APP_TITLE = "🛂 Visa Manager"
-
 COLS_CLIENTS = [
     "ID_Client", "Dossier N", "Nom", "Date",
     "Categories", "Sous-categorie", "Visa",
@@ -32,7 +34,6 @@ COLS_CLIENTS = [
     "RFE", "Dossiers envoyé", "Dossier approuvé",
     "Dossier refusé", "Dossier Annulé", "Commentaires"
 ]
-
 MEMO_FILE = "_vmemory.json"
 SHEET_CLIENTS = "Clients"
 SHEET_VISA = "Visa"
@@ -42,7 +43,9 @@ DEFAULT_START_CLIENT_ID = 13057
 def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
-# ---------- Helpers (normalization etc.) ----------
+# =========================
+# Small helpers (normalization / formatting)
+# =========================
 def normalize_header_text(s: str) -> str:
     if s is None:
         return ""
@@ -71,92 +74,6 @@ def canonical_key(s: str) -> str:
     s2 = re.sub(r"[^a-z0-9 ]", " ", s2)
     s2 = re.sub(r"\s+", " ", s2).strip()
     return s2
-
-COL_CANDIDATES = {
-    "id client": "ID_Client",
-    "idclient": "ID_Client",
-    "dossier n": "Dossier N",
-    "dossier": "Dossier N",
-    "nom": "Nom",
-    "date": "Date",
-    "categories": "Categories",
-    "categorie": "Categories",
-    "sous categorie": "Sous-categorie",
-    "sous-categorie": "Sous-categorie",
-    "souscategorie": "Sous-categorie",
-    "visa": "Visa",
-    "montant": "Montant honoraires (US $)",
-    "montant honoraires": "Montant honoraires (US $)",
-    "honoraires": "Montant honoraires (US $)",
-    "autres frais": "Autres frais (US $)",
-    "autresfrais": "Autres frais (US $)",
-    "payé": "Payé",
-    "paye": "Payé",
-    "solde": "Solde",
-    "acompte 1": "Acompte 1",
-    "acompte1": "Acompte 1",
-    "acompte 2": "Acompte 2",
-    "acompte2": "Acompte 2",
-    "dossier envoye": "Dossiers envoyé",
-    "dossier approuve": "Dossier approuvé",
-    "dossier refuse": "Dossier refusé",
-    "rfe": "RFE",
-    "commentaires": "Commentaires"
-}
-
-NUMERIC_TARGETS = [
-    "Montant honoraires (US $)",
-    "Autres frais (US $)",
-    "Payé",
-    "Solde",
-    "Acompte 1",
-    "Acompte 2",
-    "Acompte 3",
-    "Acompte 4"
-]
-
-def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str, str]]:
-    if not isinstance(df, pd.DataFrame):
-        try:
-            st.sidebar.warning("map_columns_heuristic: input is not a DataFrame — returning empty DataFrame.")
-        except Exception:
-            pass
-        return pd.DataFrame(), {}
-    mapping: Dict[str, str] = {}
-    for c in list(df.columns):
-        key = canonical_key(c)
-        mapped = None
-        if key in COL_CANDIDATES:
-            mapped = COL_CANDIDATES[key]
-        else:
-            for cand_key, std in sorted(COL_CANDIDATES.items(), key=lambda t: -len(t[0])):
-                if cand_key in key:
-                    mapped = std
-                    break
-        if mapped is None:
-            mapped = normalize_header_text(c)
-        mapping[c] = mapped
-    new_names = {}
-    seen = {}
-    for orig, new in mapping.items():
-        base = new
-        cnt = seen.get(base, 0)
-        if cnt:
-            new_name = f"{base}_{cnt+1}"
-            seen[base] = cnt + 1
-        else:
-            new_name = base
-            seen[base] = 1
-        new_names[orig] = new_name
-    try:
-        df = df.rename(columns=new_names)
-    except Exception:
-        try:
-            st.sidebar.error("map_columns_heuristic: rename failed, returning original DataFrame.")
-        except Exception:
-            pass
-        return df, new_names
-    return df, new_names
 
 def money_to_float(x: Any) -> float:
     if pd.isna(x):
@@ -210,32 +127,88 @@ def _date_for_widget(val: Any) -> date:
     except Exception:
         return date.today()
 
-def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    out = df.copy()
-    for c in cols:
-        if c not in out.columns:
-            if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"]:
-                out[c] = 0.0
-            elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
-                out[c] = 0
-            else:
-                out[c] = ""
-    return out[cols]
+# =========================
+# Column heuristics & helpers
+# =========================
+COL_CANDIDATES = {
+    "id client": "ID_Client", "idclient": "ID_Client",
+    "dossier n": "Dossier N", "dossier": "Dossier N",
+    "nom": "Nom", "date": "Date",
+    "categories": "Categories", "categorie": "Categories",
+    "sous categorie": "Sous-categorie", "sous-categorie": "Sous-categorie", "souscategorie": "Sous-categorie",
+    "visa": "Visa",
+    "montant": "Montant honoraires (US $)", "montant honoraires": "Montant honoraires (US $)", "honoraires": "Montant honoraires (US $)",
+    "autres frais": "Autres frais (US $)", "autresfrais": "Autres frais (US $)",
+    "payé": "Payé", "paye": "Payé",
+    "solde": "Solde",
+    "acompte 1": "Acompte 1", "acompte1": "Acompte 1",
+    "acompte 2": "Acompte 2", "acompte2": "Acompte 2",
+    "dossier envoye": "Dossiers envoyé", "dossier approuve": "Dossier approuvé", "dossier refuse": "Dossier refusé",
+    "rfe": "RFE", "commentaires": "Commentaires"
+}
 
-def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
-    for c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
-        if c in df.columns:
-            df[c] = df[c].apply(lambda x: 1 if str(x).strip().lower() in ["1", "true", "oui", "o", "x", "yes"] else 0)
+NUMERIC_TARGETS = [
+    "Montant honoraires (US $)",
+    "Autres frais (US $)",
+    "Payé",
+    "Solde",
+    "Acompte 1",
+    "Acompte 2",
+    "Acompte 3",
+    "Acompte 4"
+]
+
+def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
+    if not isinstance(df, pd.DataFrame):
+        try:
+            st.sidebar.warning("map_columns_heuristic: input is not a DataFrame — returning empty DataFrame.")
+        except Exception:
+            pass
+        return pd.DataFrame(), {}
+    mapping: Dict[str,str] = {}
+    for c in list(df.columns):
+        key = canonical_key(c)
+        mapped = None
+        if key in COL_CANDIDATES:
+            mapped = COL_CANDIDATES[key]
         else:
-            df[c] = 0
-    return df
+            for cand_key, std in sorted(COL_CANDIDATES.items(), key=lambda t: -len(t[0])):
+                if cand_key in key:
+                    mapped = std
+                    break
+        if mapped is None:
+            mapped = normalize_header_text(c)
+        mapping[c] = mapped
+    # ensure unique names
+    new_names = {}
+    seen = {}
+    for orig, new in mapping.items():
+        base = new
+        cnt = seen.get(base, 0)
+        if cnt:
+            new_name = f"{base}_{cnt+1}"
+            seen[base] = cnt+1
+        else:
+            new_name = base
+            seen[base] = 1
+        new_names[orig] = new_name
+    try:
+        df = df.rename(columns=new_names)
+    except Exception:
+        try:
+            st.sidebar.error("map_columns_heuristic: rename failed, returning original DataFrame.")
+        except Exception:
+            pass
+        return df, new_names
+    return df, new_names
 
 def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     cols = list(df.columns)
     rename_map = {}
-    def _ck(x): return canonical_key(str(x))
+    def _ck(x):
+        return canonical_key(str(x))
     for c in cols:
         k = _ck(c)
         if ("sous" in k and "categorie" in k) or ("souscategorie" in k):
@@ -251,7 +224,9 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
             pass
     return df
 
-# ---------- I/O helpers ----------
+# =========================
+# I/O helpers
+# =========================
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
     try:
@@ -349,7 +324,9 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     _log("read_any_table: unsupported src type")
     return None
 
-# ---------- Visa mapping ----------
+# =========================
+# Visa mapping utilities
+# =========================
 def build_visa_map(dfv: pd.DataFrame) -> Dict[str, List[str]]:
     vm: Dict[str, List[str]] = {}
     if dfv is None or dfv.empty:
@@ -408,15 +385,13 @@ def get_sub_options_for(sub_value: str, visa_sub_options_map: Dict[str, List[str
     s_can = canonical_key(s_raw)
     s_lower = s_raw.lower()
     s_noacc = remove_accents(s_raw).lower()
-    # try canonical
     if s_can in visa_sub_options_map:
         return visa_sub_options_map[s_can][:]
-    # try lower / noacc
     if s_lower in visa_sub_options_map:
         return visa_sub_options_map[s_lower][:]
     if s_noacc in visa_sub_options_map:
         return visa_sub_options_map[s_noacc][:]
-    # fallback contains
+    # fallback contains match
     s_match = remove_accents(s_raw).lower()
     candidates = []
     for k in visa_sub_options_map.keys():
@@ -435,7 +410,9 @@ def get_sub_options_for(sub_value: str, visa_sub_options_map: Dict[str, List[str
         pass
     return []
 
-# ---------- Normalize clients wrapper ----------
+# =========================
+# Client normalization wrapper
+# =========================
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
@@ -514,19 +491,20 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
-# ---------- UI start ----------
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.title(APP_TITLE)
+# =========================
+# Read files and build maps
+# =========================
+clients_bytes = None
+visa_bytes = None
 
+# Sidebar file controls
 st.sidebar.header("📂 Fichiers")
 last_clients, last_visa, last_save_dir = ("", "", "")
 try:
     if os.path.exists(MEMO_FILE):
         with open(MEMO_FILE, "r", encoding="utf-8") as f:
             d = json.load(f)
-            last_clients = d.get("clients","")
-            last_visa = d.get("visa","")
-            last_save_dir = d.get("save_dir","")
+            last_clients = d.get("clients",""); last_visa = d.get("visa",""); last_save_dir = d.get("save_dir","")
 except Exception:
     pass
 
@@ -536,9 +514,9 @@ up_visa = None
 if mode == "Deux fichiers (Clients & Visa)":
     up_visa = st.sidebar.file_uploader("Visa (xlsx/csv)", type=["xlsx","xls","csv"], key=skey("up_visa"))
 
-clients_path_in = st.sidebar.text_input("ou chemin local Clients (laisser vide si upload)", value=last_clients, key=skey("cli_path"))
-visa_path_in = st.sidebar.text_input("ou chemin local Visa (laisser vide si upload)", value=(last_visa if mode!="Un fichier (Clients)" else ""), key=skey("vis_path"))
-save_dir_in = st.sidebar.text_input("Dossier de sauvegarde (optionnel)", value=last_save_dir, key=skey("save_dir"))
+clients_path_in = st.sidebar.text_input("ou chemin local Clients", value=last_clients or "", key=skey("cli_path"))
+visa_path_in = st.sidebar.text_input("ou chemin local Visa", value=last_visa or "", key=skey("vis_path"))
+save_dir_in = st.sidebar.text_input("Dossier de sauvegarde (optionnel)", value=last_save_dir or "", key=skey("save_dir"))
 
 if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     try:
@@ -548,8 +526,6 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
-clients_bytes = None
-visa_bytes = None
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
@@ -608,48 +584,36 @@ if df_visa_raw is None and visa_src_for_read is not None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# Show debug previews
-if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
-    try:
-        st.sidebar.markdown("DEBUG — Clients raw columns & sample")
-        st.sidebar.write(list(df_clients_raw.columns)[:40])
-    except Exception:
-        pass
-if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
-    try:
-        st.sidebar.markdown("DEBUG — Visa raw columns & sample")
-        st.sidebar.write(list(df_visa_raw.columns)[:80])
-    except Exception:
-        pass
-
-# Build visa maps
-visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
-if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
-    try:
-        df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
+# Debug expander (sidebar) to avoid clutter
+with st.sidebar.expander("DEBUG Visa / Maps", expanded=False):
+    if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
+        st.markdown("**Visa raw columns (preview):**")
+        st.write(list(df_visa_raw.columns)[:80])
+    else:
+        st.write("Aucun Visa chargé.")
+    # build visa maps
+    visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
+    if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         try:
-            df_visa_mapped = coerce_category_columns(df_visa_mapped)
-        except Exception:
-            pass
-        raw_vm = build_visa_map(df_visa_mapped)
-        visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
-        visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
-        visa_categories = sorted(list(visa_map.keys()))
-        visa_sub_options_map = build_sub_options_map_from_flags(df_visa_mapped)
-    except Exception as e:
-        st.sidebar.error(f"Erreur build visa maps: {e}")
-        visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
+            df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
+            try:
+                df_visa_mapped = coerce_category_columns(df_visa_mapped)
+            except Exception:
+                pass
+            raw_vm = build_visa_map(df_visa_mapped)
+            visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
+            visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
+            visa_categories = sorted(list(visa_map.keys()))
+            visa_sub_options_map = build_sub_options_map_from_flags(df_visa_mapped)
+        except Exception as e:
+            st.write("Erreur build maps:", e)
+    st.markdown("**visa_map_norm (category key -> subs)**")
+    st.write(visa_map_norm)
+    st.markdown("**visa_sub_options_map (sous_key -> checkbox labels)**")
+    st.write(visa_sub_options_map)
 
-try:
-    st.sidebar.markdown("DEBUG visa_map_norm (category key -> raw subs)")
-    st.sidebar.write(visa_map_norm)
-    st.sidebar.markdown("DEBUG visa_sub_options_map (sous_key -> checkbox labels)")
-    st.sidebar.write(visa_sub_options_map)
-except Exception:
-    pass
-
+# Build live df
 df_all = normalize_clients_for_live(df_clients_raw)
-
 DF_LIVE_KEY = skey("df_live")
 if isinstance(df_all, pd.DataFrame) and not df_all.empty:
     st.session_state[DF_LIVE_KEY] = df_all.copy()
@@ -663,60 +627,73 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# Tabs UI (kept as before) - focus on Add section with auto-select change
-tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ / ✏️ / 🗑️ Gestion","💾 Export"])
+# =========================
+# Tabs: Files / Dashboard / Analyses / Gestion / Export
+# =========================
+tabs = st.tabs(["📄 Fichiers", "📊 Dashboard", "📈 Analyses", "➕ / ✏️ / 🗑️ Gestion", "💾 Export"])
 
+# ---- Files tab ----
 with tabs[0]:
     st.header("📂 Fichiers")
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Clients")
         if up_clients is not None:
-            st.write("Upload:", getattr(up_clients, "name", ""))
+            st.text(f"Upload: {getattr(up_clients,'name','')}")
         elif isinstance(clients_src_for_read, str) and clients_src_for_read:
-            st.write("Chargé depuis chemin local:", clients_src_for_read)
+            st.text(f"Chargé depuis: {clients_src_for_read}")
         if df_clients_raw is None or df_clients_raw.empty:
-            st.warning("Lecture Clients : aucun tableau trouvé ou DataFrame vide.")
+            st.warning("Aucun fichier Clients detecté.")
         else:
-            st.success(f"Clients lus ({df_clients_raw.shape[0]} lignes, {df_clients_raw.shape[1]} colonnes)")
-            st.dataframe(df_clients_raw.head(8), use_container_width=True, height=220)
+            st.success(f"Clients lus: {df_clients_raw.shape[0]} lignes")
+            st.dataframe(df_clients_raw.head(8), use_container_width=True, height=240)
     with c2:
         st.subheader("Visa")
         if mode == "Deux fichiers (Clients & Visa)":
             if up_visa is not None:
-                st.write("Upload:", getattr(up_visa, "name", ""))
+                st.text(f"Upload: {getattr(up_visa,'name','')}")
             elif isinstance(visa_src_for_read, str) and visa_src_for_read:
-                st.write("Chargé depuis chemin local:", visa_src_for_read)
+                st.text(f"Chargé depuis: {visa_src_for_read}")
         else:
-            st.write("Mode 'Un fichier' : Visa sera lu depuis le même fichier Clients si présent.")
+            st.info("Mode 'Un fichier' : Visa sera lu depuis le fichier Clients si présent.")
         if df_visa_raw is None or df_visa_raw.empty:
-            st.warning("Lecture Visa : aucun tableau trouvé ou DataFrame vide.")
+            st.warning("Aucun fichier Visa detecté.")
         else:
-            st.success(f"Visa lu ({df_visa_raw.shape[0]} lignes, {df_visa_raw.shape[1]} colonnes)")
-            st.dataframe(df_visa_raw.head(8), use_container_width=True, height=220)
+            st.success(f"Visa lu: {df_visa_raw.shape[0]} lignes, {df_visa_raw.shape[1]} colonnes")
+            st.dataframe(df_visa_raw.head(8), use_container_width=True, height=240)
     st.markdown("---")
-    if st.button("Réinitialiser la mémoire (recharger depuis fichiers)"):
-        df_all2 = normalize_clients_for_live(df_clients_raw)
-        _set_df_live(df_all2)
-        st.success("Mémoire réinitialisée.")
-        try:
-            st.experimental_rerun()
-        except Exception:
-            pass
+    col_a, col_b = st.columns([1,1])
+    with col_a:
+        if st.button("Réinitialiser mémoire (recharger)"):
+            df_all2 = normalize_clients_for_live(df_clients_raw)
+            _set_df_live(df_all2)
+            st.success("Mémoire réinitialisée.")
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
+    with col_b:
+        if st.button("Actualiser la lecture"):
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
 
+# ---- Dashboard tab ----
 with tabs[1]:
     st.subheader("📊 Dashboard")
     df_live_view = _get_df_live()
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
     else:
+        # filters
         cats = sorted(df_live_view["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_live_view.columns else []
         subs = sorted(df_live_view["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_live_view.columns else []
         years = sorted(pd.to_numeric(df_live_view["_Année_"], errors="coerce").dropna().astype(int).unique().tolist()) if "_Année_" in df_live_view.columns else []
         f1, f2, f3 = st.columns([1,1,1])
-        sel_cat = f1.selectbox("Catégorie (filtre)", options=[""]+cats, index=0, key=skey("dash","cat"))
-        sel_sub = f2.selectbox("Sous-catégorie (filtre)", options=[""]+subs, index=0, key=skey("dash","sub"))
-        sel_year = f3.selectbox("Année (filtre)", options=[""]+ [str(y) for y in years], index=0, key=skey("dash","year"))
+        sel_cat = f1.selectbox("Catégorie", options=[""]+cats, index=0, key=skey("dash","cat"))
+        sel_sub = f2.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=skey("dash","sub"))
+        sel_year = f3.selectbox("Année", options=[""]+[str(y) for y in years], index=0, key=skey("dash","year"))
         view = df_live_view.copy()
         if sel_cat:
             view = view[view["Categories"].astype(str)==sel_cat]
@@ -727,32 +704,39 @@ with tabs[1]:
         total = (view.get("Montant honoraires (US $)",0).apply(_to_num) + view.get("Autres frais (US $)",0).apply(_to_num)).sum()
         paye = view.get("Payé",0).apply(_to_num).sum() if "Payé" in view.columns else 0.0
         solde = view.get("Solde",0).apply(_to_num).sum() if "Solde" in view.columns else 0.0
-        kcols = st.columns([1,1,1])
-        def small_metric(col, label, value):
-            with col:
-                st.markdown(f"<div style='font-size:14px;font-weight:600'>{label}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:16px;color:#0A6EBD;font-weight:700'>{value}</div>", unsafe_allow_html=True)
-        small_metric(kcols[0], "Dossiers", f"{len(view):,}")
-        small_metric(kcols[1], "Total facturé", f"${total:,.2f}")
-        small_metric(kcols[2], "Solde total", f"${solde:,.2f}")
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Dossiers", f"{len(view):,}")
+        k2.metric("Total facturé", _fmt_money(total))
+        k3.metric("Solde total", _fmt_money(solde))
         st.markdown("---")
-        st.subheader("Aperçu récent des dossiers")
+        st.subheader("Aperçu récent")
         recent = view.sort_values(by=["_Année_","_MoisNum_"], ascending=[False,False]).head(20).copy()
-        display_cols = [c for c in ["Dossier N","ID_Client","Nom","Date","Categories","Sous-categorie","Visa","Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"] if c in recent.columns]
+        # format money columns for display
         for col in ["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]:
             if col in recent.columns:
-                recent[col] = recent[col].apply(lambda x: f"${_to_num(x):,.2f}")
+                recent[col] = recent[col].apply(lambda x: _fmt_money(_to_num(x)))
         if "Date" in recent.columns:
             try:
                 recent["Date"] = pd.to_datetime(recent["Date"], errors="coerce").dt.date.astype(str)
             except Exception:
                 recent["Date"] = recent["Date"].astype(str)
-        st.dataframe(recent[display_cols].reset_index(drop=True), use_container_width=True)
+        st.dataframe(recent.reset_index(drop=True), use_container_width=True, height=360)
 
+# ---- Analyses tab ----
 with tabs[2]:
     st.subheader("📈 Analyses")
-    st.info("Analyses disponibles (historiques, graphiques)...")
+    st.info("Graphiques et analyses (basics).")
+    # small sample: distribution by category
+    df_ = _get_df_live()
+    if isinstance(df_, pd.DataFrame) and not df_.empty and "Categories" in df_.columns:
+        cat_counts = df_["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
+        if HAS_PLOTLY and px is not None:
+            fig = px.pie(cat_counts, names="Categorie", values="Nombre", hole=0.4, title="Répartition par catégorie")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
+# ---- Gestion tab (Add / Edit / Delete) ----
 with tabs[3]:
     st.subheader("➕ / ✏️ / 🗑️ Gestion")
     df_live = _get_df_live()
@@ -760,9 +744,9 @@ with tabs[3]:
         if c not in df_live.columns:
             df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
 
-    categories_options = visa_categories if visa_categories else sorted({str(x).strip() for x in df_live["Categories"].dropna().astype(str).tolist()})
+    categories_options = visa_categories if 'visa_categories' in globals() and visa_categories else sorted({str(x).strip() for x in df_live["Categories"].dropna().astype(str).tolist()})
     st.markdown("### Ajouter un dossier")
-    st.write("Sélectionnez la catégorie (réactif) :")
+    st.write("Choisissez la catégorie :")
     categories_local = [""] + [c.strip() for c in categories_options]
     add_cat_sel = st.selectbox("Categories (réactif)", options=categories_local, index=0, key=skey("add","cat_sel"))
 
@@ -776,32 +760,33 @@ with tabs[3]:
                 add_sub_options = visa_map.get(add_cat_sel, [])[:]
     if not add_sub_options:
         add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
-    st.sidebar.write("DEBUG selected category:", repr(add_cat_sel))
-    st.sidebar.write("DEBUG computed sous-categories:", add_sub_options)
+
+    # If there are sub-options, auto-select first (for better UX)
+    default_sub_index = 1 if add_sub_options else 0
 
     with st.form(key=skey("form_add")):
-        col1, col2, col3 = st.columns(3)
-        with col1:
+        left, mid, right = st.columns([1.2,1.4,1])
+        with left:
             next_id = get_next_client_id(df_live)
             st.markdown(f"**ID_Client (automatique)**: {next_id}")
             add_dossier = st.text_input("Dossier N", value="", key=skey("add","dossier"))
             add_nom = st.text_input("Nom", value="", key=skey("add","nom"))
-        with col2:
+        with mid:
             add_date = st.date_input("Date", value=date.today(), key=skey("add","date"))
-            st.markdown(f"Catégorie choisie: **{add_cat_sel}**")
-            # Auto-select first sous-categorie if available: index=1 (0 is empty string)
-            default_sub_index = 1 if add_sub_options else 0
+            st.markdown(f"**Catégorie**: {add_cat_sel or '—'}")
             add_sub = st.selectbox("Sous-categorie", options=[""] + add_sub_options, index=default_sub_index, key=skey("add","sub"))
-            # get checkbox options for selected sub
+            # determine checkbox options for sub
             specific_options = get_sub_options_for(add_sub, visa_sub_options_map)
             checkbox_options = specific_options if specific_options else DEFAULT_FLAGS
-            st.sidebar.write("DEBUG add_sub selection:", repr(add_sub))
-            st.sidebar.write("DEBUG options for selected sub:", specific_options)
+            # render checkboxes as grid (2 columns)
+            ncols = 2
+            cols_chk = st.columns(ncols)
             add_flags_state = {}
-            for opt in checkbox_options:
+            for i, opt in enumerate(checkbox_options):
+                col_i = cols_chk[i % ncols]
                 k = skey("add","flag", re.sub(r"\s+","_", opt))
-                add_flags_state[opt] = st.checkbox(opt, value=False, key=k)
-        with col3:
+                add_flags_state[opt] = col_i.checkbox(opt, value=False, key=k)
+        with right:
             add_visa = st.text_input("Visa", value="", key=skey("add","visa"))
             add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("add","montant"))
             add_autres = st.text_input("Autres frais (US $)", value="0", key=skey("add","autres"))
@@ -860,8 +845,6 @@ with tabs[3]:
                         edit_sub_options = visa_map.get(e_cat_sel, [])[:]
             if not edit_sub_options:
                 edit_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
-            st.sidebar.write("DEBUG edit selected cat:", repr(e_cat_sel))
-            st.sidebar.write("DEBUG edit_sub_options:", edit_sub_options)
             with st.form(key=skey("form_edit")):
                 ecol1, ecol2 = st.columns(2)
                 with ecol1:
@@ -872,7 +855,6 @@ with tabs[3]:
                     e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
                     st.markdown(f"Category choisie: **{e_cat_sel}**")
                     init_sub = str(row.get("Sous-categorie","")).strip()
-                    # if no init_sub but options exist, default to first available
                     if init_sub == "" and edit_sub_options:
                         init_sub_index = 1
                     else:
@@ -884,11 +866,13 @@ with tabs[3]:
                     edit_specific = get_sub_options_for(e_sub, visa_sub_options_map)
                     checkbox_options_edit = edit_specific if edit_specific else DEFAULT_FLAGS
                     ensure_flag_columns(df_live, checkbox_options_edit)
+                    cols_chk = st.columns(2)
                     edit_flags_state = {}
-                    for opt in checkbox_options_edit:
+                    for i, opt in enumerate(checkbox_options_edit):
+                        col_i = cols_chk[i % 2]
                         initial_val = True if (opt in df_live.columns and _to_num(row.get(opt, 0))>0) else False
                         k = skey("edit","flag", re.sub(r"\s+","_", opt), str(idx))
-                        edit_flags_state[opt] = st.checkbox(opt, value=initial_val, key=k)
+                        edit_flags_state[opt] = col_i.checkbox(opt, value=initial_val, key=k)
                 e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa"))
                 e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
                 e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)",0)), key=skey("edit","autres"))
@@ -934,6 +918,7 @@ with tabs[3]:
             else:
                 st.warning("Aucune sélection pour suppression.")
 
+# ---- Export tab ----
 with tabs[4]:
     st.header("💾 Export")
     df_live = _get_df_live()
