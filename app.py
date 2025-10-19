@@ -1,9 +1,14 @@
 # Visa Manager - app.py
-# Streamlit app with robust Visa mapping: category -> sous-categories -> checkbox options
-# Improved normalization and robust lookup for sous-categorie -> checkbox headers.
+# Streamlit app: robust Excel/CSV reading, automatic column normalization for Clients,
+# Dashboard, Analyses and Management (Add/Edit/Delete).
+# - Automatic ID_Client generation starting at 13057
+# - Categories dropdown populated from Visa file
+# - Sous-categories dependent on selected Category
+# - For each Sous-categorie, build checkbox options from Visa sheet columns where cell==1 (or equivalent)
+# - Robust normalization and defensive checks to avoid the traceback you reported
 #
 # Usage: streamlit run app.py
-# Requirements: pandas, openpyxl
+# Requirements: pandas, openpyxl; optional: plotly for interactive charts.
 
 import os
 import json
@@ -16,7 +21,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Try plotly (optional)
+# Optional: plotly
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -24,10 +29,11 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# -------------------------
-# Config
-# -------------------------
+# =========================
+# Config / constants
+# =========================
 APP_TITLE = "🛂 Visa Manager"
+
 COLS_CLIENTS = [
     "ID_Client", "Dossier N", "Nom", "Date",
     "Categories", "Sous-categorie", "Visa",
@@ -36,6 +42,7 @@ COLS_CLIENTS = [
     "RFE", "Dossiers envoyé", "Dossier approuvé",
     "Dossier refusé", "Dossier Annulé", "Commentaires"
 ]
+
 MEMO_FILE = "_vmemory.json"
 SHEET_CLIENTS = "Clients"
 SHEET_VISA = "Visa"
@@ -45,9 +52,9 @@ DEFAULT_START_CLIENT_ID = 13057
 def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
-# -------------------------
-# Helpers (normalization, parsing)
-# -------------------------
+# =========================
+# Normalization helpers
+# =========================
 def normalize_header_text(s: str) -> str:
     if s is None:
         return ""
@@ -57,7 +64,6 @@ def normalize_header_text(s: str) -> str:
     return s
 
 def remove_accents(s: str) -> str:
-    # simple replacements for common accents (sufficient for headers in French)
     if s is None:
         return ""
     s2 = str(s)
@@ -77,6 +83,95 @@ def canonical_key(s: str) -> str:
     s2 = re.sub(r"[^a-z0-9 ]", " ", s2)
     s2 = re.sub(r"\s+", " ", s2).strip()
     return s2
+
+# Candidate mapping for heuristic rename
+COL_CANDIDATES = {
+    "id client": "ID_Client",
+    "idclient": "ID_Client",
+    "dossier n": "Dossier N",
+    "dossier": "Dossier N",
+    "nom": "Nom",
+    "date": "Date",
+    "categories": "Categories",
+    "categorie": "Categories",
+    "sous categorie": "Sous-categorie",
+    "sous-categorie": "Sous-categorie",
+    "souscategorie": "Sous-categorie",
+    "visa": "Visa",
+    "montant": "Montant honoraires (US $)",
+    "montant honoraires": "Montant honoraires (US $)",
+    "honoraires": "Montant honoraires (US $)",
+    "autres frais": "Autres frais (US $)",
+    "autresfrais": "Autres frais (US $)",
+    "payé": "Payé",
+    "paye": "Payé",
+    "solde": "Solde",
+    "acompte 1": "Acompte 1",
+    "acompte1": "Acompte 1",
+    "acompte 2": "Acompte 2",
+    "acompte2": "Acompte 2",
+    "dossier envoye": "Dossiers envoyé",
+    "dossier approuve": "Dossier approuvé",
+    "dossier refuse": "Dossier refusé",
+    "rfe": "RFE",
+    "commentaires": "Commentaires"
+}
+
+NUMERIC_TARGETS = [
+    "Montant honoraires (US $)",
+    "Autres frais (US $)",
+    "Payé",
+    "Solde",
+    "Acompte 1",
+    "Acompte 2",
+    "Acompte 3",
+    "Acompte 4"
+]
+
+# Robust map_columns_heuristic that tolerates non-DataFrame input
+def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str, str]]:
+    if not isinstance(df, pd.DataFrame):
+        try:
+            st.sidebar.warning("map_columns_heuristic: input is not a DataFrame — returning empty DataFrame.")
+        except Exception:
+            pass
+        return pd.DataFrame(), {}
+    mapping: Dict[str, str] = {}
+    for c in list(df.columns):
+        key = canonical_key(c)
+        mapped = None
+        if key in COL_CANDIDATES:
+            mapped = COL_CANDIDATES[key]
+        else:
+            for cand_key, std in sorted(COL_CANDIDATES.items(), key=lambda t: -len(t[0])):
+                if cand_key in key:
+                    mapped = std
+                    break
+        if mapped is None:
+            mapped = normalize_header_text(c)
+        mapping[c] = mapped
+    # ensure unique names
+    new_names = {}
+    seen = {}
+    for orig, new in mapping.items():
+        base = new
+        cnt = seen.get(base, 0)
+        if cnt:
+            new_name = f"{base}_{cnt+1}"
+            seen[base] = cnt + 1
+        else:
+            new_name = base
+            seen[base] = 1
+        new_names[orig] = new_name
+    try:
+        df = df.rename(columns=new_names)
+    except Exception:
+        try:
+            st.sidebar.error("map_columns_heuristic: rename failed, returning original DataFrame.")
+        except Exception:
+            pass
+        return df, new_names
+    return df, new_names
 
 def money_to_float(x: Any) -> float:
     if pd.isna(x):
@@ -108,115 +203,124 @@ def money_to_float(x: Any) -> float:
         except Exception:
             return 0.0
 
-# -------------------------
-# Visa mapping builder
-# -------------------------
-def build_visa_map(dfv: pd.DataFrame) -> Dict[str, List[str]]:
-    """
-    Build category -> list of sous-categories mapping from Visa sheet.
-    """
-    vm: Dict[str, List[str]] = {}
-    if dfv is None or dfv.empty:
-        return vm
-    df = dfv.copy()
-    # Accept 'Categorie' variant
-    if "Categories" not in df.columns and "Categorie" in df.columns:
-        df = df.rename(columns={"Categorie": "Categories"})
-    for _, row in df.iterrows():
-        cat = str(row.get("Categories", "")).strip()
-        sub = str(row.get("Sous-categorie", "")).strip()
-        if not cat:
-            continue
-        vm.setdefault(cat, [])
-        if sub and sub not in vm[cat]:
-            vm[cat].append(sub)
-    return vm
+def _to_num(x: Any) -> float:
+    return money_to_float(x) if not isinstance(x, (int, float)) else float(x)
 
-def build_sub_options_map_from_flags(dfv: pd.DataFrame) -> Dict[str, List[str]]:
-    """
-    For each row (Category, Sous-categorie), scan all other columns.
-    If a cell is truthy (1, '1', 'x', 'oui', etc.), associate the column header as an option for that sous-categorie.
-    Returns dict: sous_norm (lower, canonical) -> [option labels]
-    """
-    out: Dict[str, List[str]] = {}
-    if dfv is None or dfv.empty:
-        return out
-    df = dfv.copy()
-    # Normalize column names using current heuristic mapping if needed
-    # We'll keep option labels as the header text exactly (trimmed).
-    cols_to_skip = set(["Categories", "Categorie", "Sous-categorie"])
-    # Determine columns that are possible flags
-    cols_to_check = [c for c in df.columns if c not in cols_to_skip]
-    for _, row in df.iterrows():
-        sub_raw = str(row.get("Sous-categorie", "")).strip()
-        if not sub_raw:
-            continue
-        sub_norm = canonical_key(sub_raw)
-        for col in cols_to_check:
-            val = row.get(col, "")
-            truthy = False
-            if pd.isna(val):
-                truthy = False
-            else:
-                sval = str(val).strip().lower()
-                if sval in ("1", "x", "t", "true", "oui", "yes", "y"):
-                    truthy = True
-                else:
-                    # numeric values
-                    try:
-                        if float(sval) == 1.0:
-                            truthy = True
-                    except Exception:
-                        truthy = False
-            if truthy:
-                label = str(col).strip()
-                out.setdefault(sub_norm, [])
-                if label not in out[sub_norm]:
-                    out[sub_norm].append(label)
-    return out
-
-# -------------------------
-# small UI helpers
-# -------------------------
-def debug_show(df, name="Data"):
+def _fmt_money(v: float) -> str:
     try:
-        st.sidebar.markdown(f"**DEBUG — {name}**")
-        if isinstance(df, dict):
-            st.sidebar.write(df)
-        else:
-            st.sidebar.write(type(df))
+        return "${:,.2f}".format(float(v))
     except Exception:
-        pass
+        return "$0.00"
 
-# -------------------------
-# Reading helpers (robust)
-# -------------------------
+def _date_for_widget(val: Any) -> date:
+    if isinstance(val, date):
+        return val
+    if isinstance(val, datetime):
+        return val.date()
+    try:
+        d = pd.to_datetime(val, errors="coerce")
+        if pd.isna(d):
+            return date.today()
+        return d.date()
+    except Exception:
+        return date.today()
+
+def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"]:
+                out[c] = 0.0
+            elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
+                out[c] = 0
+            else:
+                out[c] = ""
+    return out[cols]
+
+def _normalize_clients_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    for c in NUMERIC_TARGETS:
+        if c in df.columns:
+            df[c] = df[c].apply(_to_num)
+    if "Montant honoraires (US $)" in df.columns and "Autres frais (US $)" in df.columns:
+        total = df["Montant honoraires (US $)"].fillna(0) + df["Autres frais (US $)"].fillna(0)
+        if "Payé" in df.columns:
+            df["Solde"] = (total - df["Payé"].fillna(0))
+        else:
+            df["Solde"] = total
+    return df
+
+def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
+    for c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
+        if c in df.columns:
+            df[c] = df[c].apply(lambda x: 1 if str(x).strip().lower() in ["1", "true", "oui", "o", "x", "yes"] else 0)
+        else:
+            df[c] = 0
+    return df
+
+def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    cols = list(df.columns)
+    rename_map = {}
+    def _ck(x): 
+        return canonical_key(str(x))
+    for c in cols:
+        k = _ck(c)
+        if ("sous" in k and "categorie" in k) or ("souscategorie" in k):
+            if "Sous-categorie" not in df.columns:
+                rename_map[c] = "Sous-categorie"
+        elif ("categorie" in k or "categories" in k) and "sous" not in k:
+            if "Categories" not in df.columns:
+                rename_map[c] = "Categories"
+    if rename_map:
+        try:
+            df = df.rename(columns=rename_map)
+        except Exception:
+            pass
+    return df
+
+# =========================
+# I/O helpers (robust)
+# =========================
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
     try:
         xls = pd.ExcelFile(bio, engine="openpyxl")
         sheets = xls.sheet_names
-        # choose sheet logic
         if sheet_name and sheet_name in sheets:
             return pd.read_excel(BytesIO(b), sheet_name=sheet_name, engine="openpyxl")
-        for cand in [SHEET_VISA, SHEET_CLIENTS, "Sheet1"]:
+        for cand in [SHEET_CLIENTS, SHEET_VISA, "Sheet1"]:
             if cand in sheets:
                 try:
                     return pd.read_excel(BytesIO(b), sheet_name=cand, engine="openpyxl")
                 except Exception:
                     continue
-        # fallback first sheet
         return pd.read_excel(BytesIO(b), sheet_name=0, engine="openpyxl")
     except Exception:
         return None
 
 def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = "") -> Optional[pd.DataFrame]:
+    def _log(msg: str):
+        try:
+            st.sidebar.info(f"{debug_prefix}{msg}")
+        except Exception:
+            pass
     if src is None:
+        _log("read_any_table: src is None")
         return None
     try:
-        # file-like
-        if hasattr(src, "read"):
-            b = None
+        if isinstance(src, (bytes, bytearray)):
+            df = try_read_excel_from_bytes(bytes(src), sheet)
+            if df is not None:
+                return df
+            try:
+                return pd.read_csv(BytesIO(src), sep=";", encoding="utf-8", on_bad_lines="skip")
+            except Exception:
+                try:
+                    return pd.read_csv(BytesIO(src), sep=",", encoding="utf-8", on_bad_lines="skip")
+                except Exception:
+                    return None
+        if isinstance(src, (BytesIO,)):
             try:
                 b = src.getvalue()
             except Exception:
@@ -235,10 +339,29 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
                         return pd.read_csv(BytesIO(b), sep=",", encoding="utf-8", on_bad_lines="skip")
                     except Exception:
                         return None
-        # path
+        if hasattr(src, "read") and hasattr(src, "name"):
+            try:
+                data = src.getvalue()
+            except Exception:
+                try:
+                    src.seek(0); data = src.read()
+                except Exception:
+                    data = None
+            if data:
+                df = try_read_excel_from_bytes(data, sheet)
+                if df is not None:
+                    return df
+                try:
+                    return pd.read_csv(BytesIO(data), sep=";", encoding="utf-8", on_bad_lines="skip")
+                except Exception:
+                    try:
+                        return pd.read_csv(BytesIO(data), sep=",", encoding="utf-8", on_bad_lines="skip")
+                    except Exception:
+                        return None
         if isinstance(src, (str, os.PathLike)):
             p = str(src)
             if not os.path.exists(p):
+                _log(f"path does not exist: {p}")
                 return None
             if p.lower().endswith(".csv"):
                 try:
@@ -250,17 +373,218 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
                     return pd.read_excel(p, sheet_name=sheet or 0, engine="openpyxl")
                 except Exception:
                     return None
-    except Exception:
+    except Exception as e:
+        _log(f"read_any_table exception: {e}")
         return None
+    _log("read_any_table: unsupported src type")
     return None
 
-# -------------------------
-# App start
-# -------------------------
-st.set_page_config(page_title="Visa Manager", layout="wide")
+# =========================
+# Visa mapping utilities
+# =========================
+def build_visa_map(dfv: pd.DataFrame) -> Dict[str, List[str]]:
+    vm: Dict[str, List[str]] = {}
+    if dfv is None or dfv.empty:
+        return vm
+    df = dfv.copy()
+    if "Categories" not in df.columns and "Categorie" in df.columns:
+        df = df.rename(columns={"Categorie": "Categories"})
+    for _, row in df.iterrows():
+        cat = str(row.get("Categories", "")).strip()
+        sub = str(row.get("Sous-categorie", "")).strip()
+        if not cat:
+            continue
+        vm.setdefault(cat, [])
+        if sub and sub not in vm[cat]:
+            vm[cat].append(sub)
+    return vm
+
+def build_sub_options_map_from_flags(dfv: pd.DataFrame) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    if dfv is None or dfv.empty:
+        return out
+    df = dfv.copy()
+    cols_to_skip = set(["Categories", "Categorie", "Sous-categorie"])
+    cols_to_check = [c for c in df.columns if c not in cols_to_skip]
+    for _, row in df.iterrows():
+        sub_raw = str(row.get("Sous-categorie", "")).strip()
+        if not sub_raw:
+            continue
+        sub_norm = canonical_key(sub_raw)
+        for col in cols_to_check:
+            val = row.get(col, "")
+            truthy = False
+            if pd.isna(val):
+                truthy = False
+            else:
+                sval = str(val).strip().lower()
+                if sval in ("1", "x", "t", "true", "oui", "yes", "y"):
+                    truthy = True
+                else:
+                    try:
+                        if float(sval) == 1.0:
+                            truthy = True
+                    except Exception:
+                        truthy = False
+            if truthy:
+                label = str(col).strip()
+                out.setdefault(sub_norm, [])
+                if label not in out[sub_norm]:
+                    out[sub_norm].append(label)
+    return out
+
+# Robust lookup for sub options (tries multiple normalizations + contains)
+def get_sub_options_for(sub_value: str, visa_sub_options_map: Dict[str, List[str]]) -> List[str]:
+    if not sub_value or not isinstance(sub_value, str):
+        return []
+    s_raw = sub_value.strip()
+    s_can = canonical_key(s_raw)
+    s_lower = s_raw.lower()
+    s_noacc = remove_accents(s_raw).lower()
+    tried = []
+    # exact canonical
+    tried.append(("canonical", s_can))
+    if s_can in visa_sub_options_map:
+        return visa_sub_options_map[s_can][:]
+    # exact lower
+    tried.append(("lower", s_lower))
+    if s_lower in visa_sub_options_map:
+        return visa_sub_options_map[s_lower][:]
+    # no accents
+    tried.append(("no_accents", s_noacc))
+    if s_noacc in visa_sub_options_map:
+        return visa_sub_options_map[s_noacc][:]
+    # contains match (accent-insensitive)
+    s_match = remove_accents(s_raw).lower()
+    candidates = []
+    for k in visa_sub_options_map.keys():
+        if s_match in remove_accents(k).lower() or remove_accents(k).lower() in s_match:
+            candidates.extend(visa_sub_options_map.get(k, []))
+    if candidates:
+        seen = set()
+        out = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c); out.append(c)
+        return out
+    # nothing found
+    try:
+        st.sidebar.markdown("DEBUG get_sub_options_for tries:")
+        st.sidebar.write(tried)
+    except Exception:
+        pass
+    return []
+
+# =========================
+# Client normalization wrapper (robust)
+# =========================
+def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
+    # attempt to convert non-DataFrame sources
+    if not isinstance(df_clients_raw, pd.DataFrame):
+        try:
+            if 'read_any_table' in globals() and callable(globals()['read_any_table']):
+                maybe_df = read_any_table(df_clients_raw, sheet=None, debug_prefix="[normalize_clients_for_live] ")
+                if isinstance(maybe_df, pd.DataFrame):
+                    df_clients_raw = maybe_df
+                    try:
+                        st.sidebar.info("normalize_clients_for_live: converted source to DataFrame via read_any_table.")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        st.sidebar.warning("normalize_clients_for_live: read_any_table did not return a DataFrame; using empty DataFrame.")
+                    except Exception:
+                        pass
+                    df_clients_raw = pd.DataFrame()
+            else:
+                # fallback for bytes
+                if isinstance(df_clients_raw, (bytes, bytearray)):
+                    df_try = try_read_excel_from_bytes(bytes(df_clients_raw))
+                    if isinstance(df_try, pd.DataFrame):
+                        df_clients_raw = df_try
+                        try:
+                            st.sidebar.info("normalize_clients_for_live: parsed bytes into DataFrame.")
+                        except Exception:
+                            pass
+                    else:
+                        df_clients_raw = pd.DataFrame()
+                else:
+                    df_clients_raw = pd.DataFrame()
+        except Exception:
+            df_clients_raw = pd.DataFrame()
+
+    if df_clients_raw is None or not isinstance(df_clients_raw, pd.DataFrame):
+        df_clients_raw = pd.DataFrame()
+
+    try:
+        df_mapped, _ = map_columns_heuristic(df_clients_raw)
+    except Exception as e:
+        try:
+            st.sidebar.error(f"normalize_clients_for_live: map_columns_heuristic failed: {e}")
+        except Exception:
+            pass
+        df_mapped = df_clients_raw.copy()
+
+    if "Date" in df_mapped.columns:
+        try:
+            df_mapped["Date"] = pd.to_datetime(df_mapped["Date"], dayfirst=True, errors="coerce")
+        except Exception:
+            pass
+
+    df = _ensure_columns(df_mapped, COLS_CLIENTS)
+
+    # numeric normalization
+    for col in NUMERIC_TARGETS:
+        if col in df.columns:
+            try:
+                df[col] = df[col].apply(lambda x: _to_num(x) if not isinstance(x, (int, float)) else float(x))
+            except Exception:
+                pass
+
+    df = _normalize_status(df)
+
+    for c in ["Nom", "Categories", "Sous-categorie", "Visa", "Commentaires"]:
+        if c in df.columns:
+            try:
+                df[c] = df[c].astype(str).fillna("")
+            except Exception:
+                df[c] = df[c].fillna("").astype(str)
+    try:
+        dser = pd.to_datetime(df["Date"], errors="coerce")
+        df["_Année_"] = dser.dt.year.fillna(0).astype(int)
+        df["_MoisNum_"] = dser.dt.month.fillna(0).astype(int)
+        df["Mois"] = df["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) and m>0 else "")
+    except Exception:
+        df["_Année_"] = 0; df["_MoisNum_"] = 0; df["Mois"] = ""
+    return df
+
+# =========================
+# Next ID helper
+# =========================
+def get_next_client_id(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return DEFAULT_START_CLIENT_ID
+    vals = df.get("ID_Client", pd.Series([], dtype="object"))
+    nums = []
+    for v in vals.dropna().astype(str):
+        m = re.search(r"(\d+)", v)
+        if m:
+            try:
+                nums.append(int(m.group(1)))
+            except Exception:
+                pass
+    if not nums:
+        return DEFAULT_START_CLIENT_ID
+    mx = max(nums)
+    return max(DEFAULT_START_CLIENT_ID, mx) + 1
+
+# =========================
+# UI start
+# =========================
+st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
-# Sidebar files input
+# Sidebar file controls
 st.sidebar.header("📂 Fichiers")
 last_clients, last_visa, last_save_dir = ("", "", "")
 try:
@@ -289,208 +613,126 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
             json.dump({"clients": clients_path_in or "", "visa": visa_path_in or "", "save_dir": save_dir_in or ""}, f, ensure_ascii=False, indent=2)
         st.sidebar.success("Chemins sauvegardés.")
     except Exception:
-        st.sidebar.error("Impossible de sauvegarder.")
+        st.sidebar.error("Impossible de sauvegarder les chemins.")
 
-# read files
-clients_src = None
-visa_src = None
+# Read uploaded files into bytes to avoid stream reuse issues
+clients_bytes = None
+visa_bytes = None
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
-        clients_src = BytesIO(clients_bytes)
     except Exception:
-        clients_src = up_clients
+        try:
+            up_clients.seek(0); clients_bytes = up_clients.read()
+        except Exception:
+            clients_bytes = None
+if up_visa is not None:
+    try:
+        visa_bytes = up_visa.getvalue()
+    except Exception:
+        try:
+            up_visa.seek(0); visa_bytes = up_visa.read()
+        except Exception:
+            visa_bytes = None
+
+# Determine sources
+if clients_bytes is not None:
+    clients_src_for_read = BytesIO(clients_bytes)
 elif clients_path_in:
-    clients_src = clients_path_in
+    clients_src_for_read = clients_path_in
 elif last_clients:
-    clients_src = last_clients
+    clients_src_for_read = last_clients
+else:
+    clients_src_for_read = None
 
 if mode == "Deux fichiers (Clients & Visa)":
-    if up_visa is not None:
-        try:
-            visa_bytes = up_visa.getvalue()
-            visa_src = BytesIO(visa_bytes)
-        except Exception:
-            visa_src = up_visa
+    if visa_bytes is not None:
+        visa_src_for_read = BytesIO(visa_bytes)
     elif visa_path_in:
-        visa_src = visa_path_in
+        visa_src_for_read = visa_path_in
     elif last_visa:
-        visa_src = last_visa
+        visa_src_for_read = last_visa
+    else:
+        visa_src_for_read = None
 else:
-    visa_src = clients_src
+    visa_src_for_read = clients_src_for_read
 
+# Read clients and visa sheets robustly
 df_clients_raw = None
 df_visa_raw = None
 try:
-    df_clients_raw = read_any_table(clients_src, sheet=SHEET_CLIENTS, debug_prefix="[Clients] ")
+    df_clients_raw = read_any_table(clients_src_for_read, sheet=SHEET_CLIENTS, debug_prefix="[Clients] ")
 except Exception:
     df_clients_raw = None
-if df_clients_raw is None and clients_src is not None:
-    df_clients_raw = read_any_table(clients_src, sheet=None, debug_prefix="[Clients fallback] ")
-
-try:
-    df_visa_raw = read_any_table(visa_src, sheet=SHEET_VISA, debug_prefix="[Visa] ")
-except Exception:
-    df_visa_raw = None
-if df_visa_raw is None and visa_src is not None:
-    df_visa_raw = read_any_table(visa_src, sheet=None, debug_prefix="[Visa fallback] ")
-
+if df_clients_raw is None and clients_src_for_read is not None:
+    df_clients_raw = read_any_table(clients_src_for_read, sheet=None, debug_prefix="[Clients fallback] ")
 if df_clients_raw is None:
     df_clients_raw = pd.DataFrame()
+
+try:
+    df_visa_raw = read_any_table(visa_src_for_read, sheet=SHEET_VISA, debug_prefix="[Visa] ")
+except Exception:
+    df_visa_raw = None
+if df_visa_raw is None and visa_src_for_read is not None:
+    df_visa_raw = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ")
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# show raw preview debug
+# Debug previews
 if isinstance(df_clients_raw, pd.DataFrame) and not df_clients_raw.empty:
-    debug_show(df_clients_raw.head(5).to_dict(), "Clients raw preview")
+    try:
+        st.sidebar.markdown("DEBUG — Clients raw columns & sample")
+        st.sidebar.write(list(df_clients_raw.columns)[:20])
+    except Exception:
+        pass
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
-    debug_show(df_visa_raw.head(8).to_dict(), "Visa raw preview")
+    try:
+        st.sidebar.markdown("DEBUG — Visa raw columns & sample")
+        st.sidebar.write(list(df_visa_raw.columns)[:40])
+    except Exception:
+        pass
 
-# -------------------------
-# Build visa maps (categories, sous-categories, per-sous options)
-# -------------------------
+# Build visa maps
 visa_map = {}
 visa_map_norm = {}
 visa_categories = []
-visa_sub_options_map = {}  # key: canonical_key(sous) -> list of option labels
+visa_sub_options_map = {}
 
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
-        # heuristic column mapping first (to ensure "Categories" and "Sous-categorie" recognized)
         df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
         try:
-            # coerce names if needed
-            df_visa_mapped = (df_visa_mapped.rename(columns={c:c for c in df_visa_mapped.columns}))
-            df_visa_mapped = df_visa_mapped.copy()
+            df_visa_mapped = coerce_category_columns(df_visa_mapped)
         except Exception:
             pass
-        # ensure we have desired columns names
-        if "Categories" not in df_visa_mapped.columns and "Categorie" in df_visa_mapped.columns:
-            df_visa_mapped = df_visa_mapped.rename(columns={"Categorie":"Categories"})
-        # build basic maps
         raw_vm = build_visa_map(df_visa_mapped)
         visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
         visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
         visa_categories = sorted(list(visa_map.keys()))
-        # build per-sub options map by scanning flag columns per row
         visa_sub_options_map = build_sub_options_map_from_flags(df_visa_mapped)
     except Exception as e:
         st.sidebar.error(f"Erreur build visa maps: {e}")
-        visa_map = {}
-        visa_map_norm = {}
-        visa_categories = []
-        visa_sub_options_map = {}
+        visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
+else:
+    visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 
-# Debug show maps
-st.sidebar.markdown("DEBUG visa_map_norm (category_key -> subs):")
+# Show visa map debug
 try:
+    st.sidebar.markdown("DEBUG visa_map_norm (category key -> raw subs)")
     st.sidebar.write(visa_map_norm)
-except Exception:
-    pass
-st.sidebar.markdown("DEBUG visa_sub_options_map (sous_key -> option headers):")
-try:
+    st.sidebar.markdown("DEBUG visa_sub_options_map (sous_key -> checkbox labels)")
     st.sidebar.write(visa_sub_options_map)
 except Exception:
     pass
 
-# -------------------------
-# Helpers to lookup options for a sous-categorie robustly
-# -------------------------
-def get_sub_options_for(sub_value: str) -> List[str]:
-    """
-    Robust lookup:
-    - try canonical_key(sub_value)
-    - try lower/strip
-    - try remove_accents + lower
-    - try contains match among keys
-    Returns the list of option labels (exact header text) or [].
-    """
-    if not sub_value or not isinstance(sub_value, str):
-        return []
-    tried = []
-    candidates = []
-    s_raw = sub_value.strip()
-    s1 = canonical_key(s_raw)
-    s2 = s_raw.strip().lower()
-    s3 = remove_accents(s_raw).strip().lower()
-    # try direct canonical key
-    tried.append(("canonical", s1))
-    if s1 in visa_sub_options_map:
-        return visa_sub_options_map[s1][:]
-    # try s2
-    tried.append(("lower", s2))
-    if s2 in visa_sub_options_map:
-        return visa_sub_options_map[s2][:]
-    # try s3
-    tried.append(("no_accents", s3))
-    if s3 in visa_sub_options_map:
-        return visa_sub_options_map[s3][:]
-    # try canonical of stored keys: iterate keys and compare canonical forms
-    for k in list(visa_sub_options_map.keys()):
-        if s1 == k:
-            return visa_sub_options_map[k][:]
-    # fallback: contains match (case-insensitive, accent-insensitive)
-    s_match = remove_accents(s_raw).strip().lower()
-    for k in visa_sub_options_map.keys():
-        if s_match in remove_accents(k).lower() or remove_accents(k).lower() in s_match:
-            candidates.extend(visa_sub_options_map.get(k, []))
-    if candidates:
-        # unique preserve order
-        seen = set()
-        out = []
-        for c in candidates:
-            if c not in seen:
-                seen.add(c); out.append(c)
-        tried.append(("contains_match", "found"))
-        return out
-    # debug: store tries in sidebar for investigation
-    st.sidebar.markdown("DEBUG get_sub_options_for tries:")
-    try:
-        st.sidebar.write(tried)
-    except Exception:
-        pass
-    return []
-
-# -------------------------
-# Normalize clients and prepare live DF
-# -------------------------
-def normalize_clients_for_live(df_clients_raw: pd.DataFrame) -> pd.DataFrame:
-    if df_clients_raw is None or df_clients_raw.empty:
-        return pd.DataFrame(columns=COLS_CLIENTS)
-    df, _ = map_columns_heuristic(df_clients_raw)
-    if "Date" in df.columns:
-        try:
-            df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-        except Exception:
-            pass
-    df = _ensure_columns(df, COLS_CLIENTS)
-    # numeric normalization
-    for col in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"]:
-        if col in df.columns:
-            df[col] = df[col].apply(money_to_float)
-    # status normalization
-    df = _normalize_status(df)
-    # text columns
-    for c in ["Nom", "Categories", "Sous-categorie", "Visa", "Commentaires"]:
-        if c in df.columns:
-            df[c] = df[c].astype(str).fillna("")
-    # time features
-    try:
-        dser = pd.to_datetime(df["Date"], errors="coerce")
-        df["_Année_"] = dser.dt.year.fillna(0).astype(int)
-        df["_MoisNum_"] = dser.dt.month.fillna(0).astype(int)
-        df["Mois"] = df["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) and m>0 else "")
-    except Exception:
-        df["_Année_"] = 0; df["_MoisNum_"] = 0; df["Mois"] = ""
-    return df
-
+# Prepare live df
 df_all = normalize_clients_for_live(df_clients_raw)
 
 DF_LIVE_KEY = skey("df_live")
 if isinstance(df_all, pd.DataFrame) and not df_all.empty:
     st.session_state[DF_LIVE_KEY] = df_all.copy()
 else:
-    if DF_LIVE_KEY not in st.session_state:
+    if DF_LIVE_KEY not in st.session_state or st.session_state[DF_LIVE_KEY] is None:
         st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 def _get_df_live() -> pd.DataFrame:
@@ -499,7 +741,7 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# ensure flag columns exist in DF when creating/updating
+# Ensure checkbox flag columns exist
 def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
     for f in flags:
         if f not in df.columns:
@@ -507,12 +749,12 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
-# -------------------------
-# UI - Tabs (Files / Dashboard / Analyses / Gestion / Export)
-# -------------------------
+# ------------------------
+# Tabs and UI
+# ------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ / ✏️ / 🗑️ Gestion","💾 Export"])
 
-# Fichiers tab
+# Files tab
 with tabs[0]:
     st.header("📂 Fichiers")
     c1, c2 = st.columns(2)
@@ -520,8 +762,8 @@ with tabs[0]:
         st.subheader("Clients")
         if up_clients is not None:
             st.write("Upload:", getattr(up_clients, "name", ""))
-        elif isinstance(clients_src, str) and clients_src:
-            st.write("Chargé depuis chemin local:", clients_src)
+        elif isinstance(clients_src_for_read, str) and clients_src_for_read:
+            st.write("Chargé depuis chemin local:", clients_src_for_read)
         if df_clients_raw is None or df_clients_raw.empty:
             st.warning("Lecture Clients : aucun tableau trouvé ou DataFrame vide.")
         else:
@@ -532,8 +774,8 @@ with tabs[0]:
         if mode == "Deux fichiers (Clients & Visa)":
             if up_visa is not None:
                 st.write("Upload:", getattr(up_visa, "name", ""))
-            elif isinstance(visa_src, str) and visa_src:
-                st.write("Chargé depuis chemin local:", visa_src)
+            elif isinstance(visa_src_for_read, str) and visa_src_for_read:
+                st.write("Chargé depuis chemin local:", visa_src_for_read)
         else:
             st.write("Mode 'Un fichier' : Visa sera lu depuis le même fichier Clients si présent.")
         if df_visa_raw is None or df_visa_raw.empty:
@@ -546,9 +788,12 @@ with tabs[0]:
         df_all2 = normalize_clients_for_live(df_clients_raw)
         _set_df_live(df_all2)
         st.success("Mémoire réinitialisée.")
-        st.experimental_rerun()
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
 
-# Dashboard tab (compact KPIs + recent)
+# Dashboard tab
 with tabs[1]:
     st.subheader("📊 Dashboard")
     df_live_view = _get_df_live()
@@ -581,7 +826,7 @@ with tabs[1]:
         small_metric(kcols[1], "Total facturé", f"${total:,.2f}")
         small_metric(kcols[2], "Solde total", f"${solde:,.2f}")
         st.markdown("---")
-        st.subheader("Aperçu récent")
+        st.subheader("Aperçu récent des dossiers")
         recent = view.sort_values(by=["_Année_","_MoisNum_"], ascending=[False,False]).head(20).copy()
         display_cols = [c for c in ["Dossier N","ID_Client","Nom","Date","Categories","Sous-categorie","Visa","Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"] if c in recent.columns]
         for col in ["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]:
@@ -594,37 +839,31 @@ with tabs[1]:
                 recent["Date"] = recent["Date"].astype(str)
         st.dataframe(recent[display_cols].reset_index(drop=True), use_container_width=True)
 
-# Analyses tab (kept simple)
+# Analyses tab (kept light)
 with tabs[2]:
     st.subheader("📈 Analyses")
-    st.info("Analyses disponibles dans la version complète.")
+    st.info("Analyses disponibles (historiques, graphiques)...")
 
-# Gestion tab: Add / Edit / Delete
+# Gestion tab (Add / Edit / Delete)
 with tabs[3]:
     st.subheader("➕ / ✏️ / 🗑️ Gestion")
     df_live = _get_df_live()
-    # ensure columns
     for c in COLS_CLIENTS:
         if c not in df_live.columns:
-            df_live[c] = "" if c not in ("Montant honoraires (US $)","Autres frais (US $)","Payé","Solde") else 0.0
+            df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
 
-    # categories source
     categories_options = visa_categories if visa_categories else sorted({str(x).strip() for x in df_live["Categories"].dropna().astype(str).tolist()})
     st.markdown("### Ajouter un dossier")
-    st.write("Sélectionnez la catégorie (réactif):")
+    st.write("Sélectionnez la catégorie (réactif) :")
     categories_local = [""] + [c.strip() for c in categories_options]
     add_cat_sel = st.selectbox("Categories (réactif)", options=categories_local, index=0, key=skey("add","cat_sel"))
 
-    # compute sous options for category
     add_sub_options = []
     if isinstance(add_cat_sel, str) and add_cat_sel.strip():
         cat_key = canonical_key(add_cat_sel)
-        # find subs via visa_map_norm (category_key -> subs) where visa_map_norm keys are canonical keys
-        # visa_map_norm was built earlier as canonical_key(category) -> subs (raw labels)
         if cat_key in visa_map_norm:
             add_sub_options = visa_map_norm.get(cat_key, [])[:]
         else:
-            # fallback: try direct visa_map lookup by raw category name
             if add_cat_sel in visa_map:
                 add_sub_options = visa_map.get(add_cat_sel, [])[:]
     if not add_sub_options:
@@ -632,7 +871,6 @@ with tabs[3]:
     st.sidebar.write("DEBUG selected category:", repr(add_cat_sel))
     st.sidebar.write("DEBUG computed sous-categories:", add_sub_options)
 
-    # Add form
     with st.form(key=skey("form_add")):
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -644,8 +882,7 @@ with tabs[3]:
             add_date = st.date_input("Date", value=date.today(), key=skey("add","date"))
             st.markdown(f"Catégorie choisie: **{add_cat_sel}**")
             add_sub = st.selectbox("Sous-categorie", options=[""] + add_sub_options, index=0, key=skey("add","sub"))
-            # robust lookup for checkbox labels
-            specific_options = get_sub_options_for(add_sub)
+            specific_options = get_sub_options_for(add_sub, visa_sub_options_map)
             checkbox_options = specific_options if specific_options else DEFAULT_FLAGS
             st.sidebar.write("DEBUG add_sub selection:", repr(add_sub))
             st.sidebar.write("DEBUG options for selected sub:", specific_options)
@@ -678,7 +915,6 @@ with tabs[3]:
                 ensure_flag_columns(df_live, flags_to_create)
                 for opt, val in add_flags_state.items():
                     new_row[opt] = 1 if val else 0
-                # append and persist
                 df_live = df_live.append(new_row, ignore_index=True)
                 _set_df_live(df_live)
                 st.success("Dossier ajouté.")
@@ -703,7 +939,6 @@ with tabs[3]:
             except Exception:
                 init_cat_index = 0
             e_cat_sel = st.selectbox("Categories (réactif)", options=edit_cat_options, index=init_cat_index, key=skey("edit","cat_sel"))
-            # compute sous options
             edit_sub_options = []
             if isinstance(e_cat_sel, str) and e_cat_sel.strip():
                 cat_key = canonical_key(e_cat_sel)
@@ -717,13 +952,13 @@ with tabs[3]:
             st.sidebar.write("DEBUG edit selected cat:", repr(e_cat_sel))
             st.sidebar.write("DEBUG edit_sub_options:", edit_sub_options)
             with st.form(key=skey("form_edit")):
-                e_col1, e_col2 = st.columns(2)
-                with e_col1:
+                ecol1, ecol2 = st.columns(2)
+                with ecol1:
                     st.markdown(f"**ID_Client :** {row.get('ID_Client','')}")
                     e_dossier = st.text_input("Dossier N", value=str(row.get("Dossier N","")), key=skey("edit","dossier"))
                     e_nom = st.text_input("Nom", value=str(row.get("Nom","")), key=skey("edit","nom"))
-                with e_col2:
-                    e_date = st.date_input("Date", value=date.today() if pd.isna(row.get("Date", pd.NaT)) else _date_for_widget(row.get("Date")), key=skey("edit","date"))
+                with ecol2:
+                    e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
                     st.markdown(f"Category choisie: **{e_cat_sel}**")
                     init_sub = str(row.get("Sous-categorie","")).strip()
                     try:
@@ -731,8 +966,7 @@ with tabs[3]:
                     except Exception:
                         init_sub_index = 0
                     e_sub = st.selectbox("Sous-categorie", options=[""] + edit_sub_options, index=init_sub_index, key=skey("edit","sub"))
-                    # compute checkbox options for this e_sub
-                    edit_specific = get_sub_options_for(e_sub)
+                    edit_specific = get_sub_options_for(e_sub, visa_sub_options_map)
                     checkbox_options_edit = edit_specific if edit_specific else DEFAULT_FLAGS
                     ensure_flag_columns(df_live, checkbox_options_edit)
                     edit_flags_state = {}
