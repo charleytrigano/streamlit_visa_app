@@ -2,7 +2,7 @@
 # Complete, cleaned, robust Streamlit app
 # - Read Clients & Visa (xlsx/csv), sanitize Visa sheet
 # - Build mapping Category -> Sous-categorie -> checkbox options (scan flag columns)
-# - Dashboard: recalculated totals (Montant honoraires, Autres frais, Total facturé, Montant payé, Solde)
+# - Dashboard: recalculated totals (Montant honoraires, Autres frais, Total facturé, Montant payé (Acomptes sum), Solde)
 # - Gestion: improved "Ajouter" layout (Dossier N | Nom | ID on same row; Category | Sub | Types next row)
 # - Add/Edit/Delete, Export
 #
@@ -37,6 +37,7 @@ COLS_CLIENTS = [
     "Categories", "Sous-categorie", "Visa",
     "Montant honoraires (US $)", "Autres frais (US $)",
     "Payé", "Solde", "Acompte 1", "Acompte 2",
+    "Acompte 3", "Acompte 4",
     "RFE", "Dossiers envoyé", "Dossier approuvé",
     "Dossier refusé", "Dossier Annulé", "Commentaires"
 ]
@@ -153,6 +154,8 @@ COL_CANDIDATES = {
     "solde": "Solde",
     "acompte 1": "Acompte 1", "acompte1": "Acompte 1",
     "acompte 2": "Acompte 2", "acompte2": "Acompte 2",
+    "acompte 3": "Acompte 3", "acompte3": "Acompte 3",
+    "acompte 4": "Acompte 4", "acompte4": "Acompte 4",
     "dossier envoye": "Dossiers envoyé", "dossier approuve": "Dossier approuvé", "dossier refuse": "Dossier refusé",
     "rfe": "RFE", "commentaires": "Commentaires"
 }
@@ -410,7 +413,7 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
         if c not in out.columns:
-            if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"]:
+            if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
                 out[c] = 0.0
             elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
                 out[c] = 0
@@ -424,7 +427,7 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
             if c in out.columns:
                 safe[c] = out[c]
             else:
-                safe[c] = 0.0 if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"] else ""
+                safe[c] = 0.0 if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"] else ""
         return safe
 
 def _normalize_status(df: Any) -> pd.DataFrame:
@@ -809,15 +812,29 @@ with tabs[1]:
             except Exception:
                 return 0.0
 
+        # Force numeric conversions for amounts and acomptes
         view["_Montant_num_"] = view.get("Montant honoraires (US $)", 0).apply(safe_num)
         view["_Autres_num_"] = view.get("Autres frais (US $)", 0).apply(safe_num)
-        view["_Paye_num_"] = view.get("Payé", 0).apply(safe_num)
+
+        # Sum acomptes columns to compute "Montant payé"
+        for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
+            if acc not in view.columns:
+                view[acc] = 0.0
+        view["_Acompte1_"] = view.get("Acompte 1", 0).apply(safe_num)
+        view["_Acompte2_"] = view.get("Acompte 2", 0).apply(safe_num)
+        view["_Acompte3_"] = view.get("Acompte 3", 0).apply(safe_num)
+        view["_Acompte4_"] = view.get("Acompte 4", 0).apply(safe_num)
+        view["_Acomptes_sum_"] = view["_Acompte1_"] + view["_Acompte2_"] + view["_Acompte3_"] + view["_Acompte4_"]
 
         total_honoraires = view["_Montant_num_"].sum()
         total_autres = view["_Autres_num_"].sum()
         total_facture_calc = total_honoraires + total_autres
-        total_paye = view["_Paye_num_"].sum()
-        view["_Solde_calc_"] = view["_Montant_num_"] + view["_Autres_num_"] - view["_Paye_num_"]
+
+        # Montant payé = sum of acomptes
+        total_paye = view["_Acomptes_sum_"].sum()
+
+        # Solde recalculé uses acomptes sum
+        view["_Solde_calc_"] = view["_Montant_num_"] + view["_Autres_num_"] - view["_Acomptes_sum_"]
         total_solde_calc = view["_Solde_calc_"].sum()
         total_solde_recorded = view.get("Solde", 0).apply(safe_num).sum()
 
@@ -828,7 +845,7 @@ with tabs[1]:
         k4.metric("Total facturé (recalc)", _fmt_money(total_facture_calc))
         st.markdown("---")
         k5, k6 = st.columns(2)
-        k5.metric("Montant payé", _fmt_money(total_paye))
+        k5.metric("Montant payé (acomptes)", _fmt_money(total_paye))
         k6.metric("Solde total (recalc)", _fmt_money(total_solde_calc))
 
         if abs(total_solde_calc - total_solde_recorded) > 0.005:
@@ -845,8 +862,8 @@ with tabs[1]:
                 st.write("Aucune anomalie détectée.")
             else:
                 display_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie",
-                                "Montant honoraires (US $)","Autres frais (US $)","Payé","Solde",
-                                "_Montant_num_","_Autres_num_","_Paye_num_","_Solde_calc_","écart_solde"]
+                                "Montant honoraires (US $)","Autres frais (US $)","Acompte 1","Acompte 2","Acompte 3","Acompte 4","Payé","Solde",
+                                "_Montant_num_","_Autres_num_","_Acomptes_sum_","_Solde_calc_","écart_solde"]
                 cols = [c for c in display_cols if c in anomalies.columns]
                 st.dataframe(anomalies[cols].reset_index(drop=True), use_container_width=True, height=300)
 
@@ -954,6 +971,7 @@ with tabs[3]:
                 new_row["Montant honoraires (US $)"] = money_to_float(add_montant)
                 new_row["Autres frais (US $)"] = money_to_float(add_autres)
                 new_row["Payé"] = 0.0
+                new_row["Acompte 1"] = 0.0; new_row["Acompte 2"] = 0.0; new_row["Acompte 3"] = 0.0; new_row["Acompte 4"] = 0.0
                 new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"]
                 new_row["Commentaires"] = add_comments
                 flags_to_create = list(add_flags_state.keys())
@@ -967,7 +985,7 @@ with tabs[3]:
                 st.error(f"Erreur ajout: {e}")
 
     st.markdown("---")
-    # Edit & Delete (kept same as before)
+    # Edit & Delete...
     st.markdown("### Modifier un dossier")
     if df_live is None or df_live.empty:
         st.info("Aucun dossier à modifier.")
@@ -1040,7 +1058,7 @@ with tabs[3]:
                         df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
                         df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres)
                         df_live.at[idx, "Payé"] = money_to_float(e_paye)
-                        df_live.at[idx, "Solde"] = _to_num(df_live.at[idx, "Montant honoraires (US $)"]) + _to_num(df_live.at[idx, "Autres frais (US $)"]) - _to_num(df_live.at[idx, "Payé"])
+                        df_live.at[idx, "Solde"] = _to_num(df_live.at[idx, "Montant honoraires (US $)"]) + _to_num(df_live.at[idx, "Autres frais (US $)"]) - (_to_num(df_live.at[idx, "Acompte 1"]) + _to_num(df_live.at[idx, "Acompte 2"]) + _to_num(df_live.at[idx, "Acompte 3"]) + _to_num(df_live.at[idx, "Acompte 4"]))
                         df_live.at[idx, "Commentaires"] = e_comments
                         for opt, val in edit_flags_state.items():
                             df_live.at[idx, opt] = 1 if val else 0
