@@ -1,5 +1,7 @@
 # Visa Manager - app.py
-# Version finale : interface soignée, robust I/O et mapping Visa -> Sous-catégorie -> cases à cocher
+# Version finale intégrée : interface soignée, robust I/O, mapping Visa -> Sous-catégorie -> cases à cocher,
+# et Dashboard avec diagnostics de totaux.
+#
 # Usage: streamlit run app.py
 # Requis: pandas, openpyxl, streamlit; optionnel: plotly
 
@@ -669,28 +671,33 @@ if df_visa_raw is None and visa_src_for_read is not None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# debug expander in sidebar
+# Build visa maps (make available globally for later use)
+visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
+if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
+    try:
+        df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
+        try:
+            df_visa_mapped = coerce_category_columns(df_visa_mapped)
+        except Exception:
+            pass
+        raw_vm = build_visa_map(df_visa_mapped)
+        visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
+        visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
+        visa_categories = sorted(list(visa_map.keys()))
+        visa_sub_options_map = build_sub_options_map_from_flags(df_visa_mapped)
+    except Exception as e:
+        st.sidebar.error(f"Erreur build visa maps: {e}")
+        visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
+else:
+    visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
+
+# Debug expander in sidebar (display maps but not required)
 with st.sidebar.expander("DEBUG Visa / Maps", expanded=False):
     if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         st.markdown("**Visa raw columns (preview):**")
         st.write(list(df_visa_raw.columns)[:80])
     else:
         st.write("Aucun Visa chargé.")
-    visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
-    if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
-        try:
-            df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
-            try:
-                df_visa_mapped = coerce_category_columns(df_visa_mapped)
-            except Exception:
-                pass
-            raw_vm = build_visa_map(df_visa_mapped)
-            visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
-            visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
-            visa_categories = sorted(list(visa_map.keys()))
-            visa_sub_options_map = build_sub_options_map_from_flags(df_visa_mapped)
-        except Exception as e:
-            st.write("Erreur build maps:", e)
     st.markdown("**visa_map_norm (category key -> subs)**")
     st.write(visa_map_norm)
     st.markdown("**visa_sub_options_map (sous_key -> checkbox labels)**")
@@ -763,20 +770,23 @@ with tabs[0]:
             except Exception:
                 pass
 
-# ---- Dashboard tab ----
+# ---- Dashboard tab (with diagnostics and corrected totals) ----
 with tabs[1]:
-    st.subheader("📊 Dashboard")
+    st.subheader("📊 Dashboard (totaux & diagnostic)")
     df_live_view = _get_df_live()
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
     else:
+        # filters
         cats = sorted(df_live_view["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_live_view.columns else []
         subs = sorted(df_live_view["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_live_view.columns else []
         years = sorted(pd.to_numeric(df_live_view["_Année_"], errors="coerce").dropna().astype(int).unique().tolist()) if "_Année_" in df_live_view.columns else []
+
         f1, f2, f3 = st.columns([1,1,1])
-        sel_cat = f1.selectbox("Catégorie", options=[""]+cats, index=0, key=skey("dash","cat"))
-        sel_sub = f2.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=skey("dash","sub"))
-        sel_year = f3.selectbox("Année", options=[""]+[str(y) for y in years], index=0, key=skey("dash","year"))
+        sel_cat = f1.selectbox("Catégorie", options=[""]+cats, index=0, key=skey("dbg","cat"))
+        sel_sub = f2.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=skey("dbg","sub"))
+        sel_year = f3.selectbox("Année", options=[""]+[str(y) for y in years], index=0, key=skey("dbg","year"))
+
         view = df_live_view.copy()
         if sel_cat:
             view = view[view["Categories"].astype(str)==sel_cat]
@@ -784,25 +794,51 @@ with tabs[1]:
             view = view[view["Sous-categorie"].astype(str)==sel_sub]
         if sel_year:
             view = view[view["_Année_"].astype(str)==sel_year]
-        total = (view.get("Montant honoraires (US $)",0).apply(_to_num) + view.get("Autres frais (US $)",0).apply(_to_num)).sum()
-        paye = view.get("Payé",0).apply(_to_num).sum() if "Payé" in view.columns else 0.0
-        solde = view.get("Solde",0).apply(_to_num).sum() if "Solde" in view.columns else 0.0
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Dossiers", f"{len(view):,}")
-        k2.metric("Total facturé", _fmt_money(total))
-        k3.metric("Solde total", _fmt_money(solde))
-        st.markdown("---")
-        st.subheader("Aperçu récent")
-        recent = view.sort_values(by=["_Année_","_MoisNum_"], ascending=[False,False]).head(20).copy()
-        for col in ["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde"]:
-            if col in recent.columns:
-                recent[col] = recent[col].apply(lambda x: _fmt_money(_to_num(x)))
-        if "Date" in recent.columns:
+
+        def safe_num(x):
             try:
-                recent["Date"] = pd.to_datetime(recent["Date"], errors="coerce").dt.date.astype(str)
+                return _to_num(x)
             except Exception:
-                recent["Date"] = recent["Date"].astype(str)
-        st.dataframe(recent.reset_index(drop=True), use_container_width=True, height=360)
+                return 0.0
+
+        view["_Montant_num_"] = view.get("Montant honoraires (US $)", 0).apply(safe_num)
+        view["_Autres_num_"] = view.get("Autres frais (US $)", 0).apply(safe_num)
+        view["_Paye_num_"] = view.get("Payé", 0).apply(safe_num)
+
+        total_honoraires = view["_Montant_num_"].sum()
+        total_autres = view["_Autres_num_"].sum()
+        total_facture_calc = (view["_Montant_num_"] + view["_Autres_num_"]).sum()
+        total_paye = view["_Paye_num_"].sum()
+        view["_Solde_calc_"] = (view["_Montant_num_"] + view["_Autres_num_"] - view["_Paye_num_"])
+        total_solde_calc = view["_Solde_calc_"].sum()
+        total_solde_recorded = view.get("Solde", 0).apply(safe_num).sum()
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Dossiers (vue)", f"{len(view):,}")
+        k2.metric("Montant honoraires", _fmt_money(total_honoraires))
+        k3.metric("Autres frais", _fmt_money(total_autres))
+        k4.metric("Total facturé (recalculé)", _fmt_money(total_facture_calc))
+        st.markdown("---")
+        k5, k6 = st.columns(2)
+        k5.metric("Total payé", _fmt_money(total_paye))
+        k6.metric("Solde total (recalc)", _fmt_money(total_solde_calc))
+
+        if abs(total_solde_calc - total_solde_recorded) > 0.005:
+            st.warning(f"Écart détecté entre Solde recalculé ({_fmt_money(total_solde_calc)}) et Solde enregistré ({_fmt_money(total_solde_recorded)}).")
+        else:
+            st.success("Solde enregistré et solde recalculé sont cohérents.")
+
+        view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - view["_Solde_calc_"]).abs()
+        anomalies = view[ (view["_Montant_num_"]==0) & (view.get("Montant honoraires (US $)","")!="") ]
+        anomalies = pd.concat([anomalies, view[view["écart_solde"] > 0.01]]).drop_duplicates()
+
+        with st.expander("Lignes avec problèmes de conversion ou écarts (cliquer)"):
+            if anomalies.empty:
+                st.write("Aucune anomalie détectée.")
+            else:
+                display_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie","Montant honoraires (US $)","Autres frais (US $)","Payé","Solde","_Montant_num_","_Autres_num_","_Paye_num_","_Solde_calc_","écart_solde"]
+                cols = [c for c in display_cols if c in anomalies.columns]
+                st.dataframe(anomalies[cols].reset_index(drop=True), use_container_width=True)
 
 # ---- Analyses tab ----
 with tabs[2]:
@@ -825,7 +861,7 @@ with tabs[3]:
         if c not in df_live.columns:
             df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
 
-    categories_options = visa_categories if 'visa_categories' in globals() and visa_categories else sorted({str(x).strip() for x in df_live["Categories"].dropna().astype(str).tolist()})
+    categories_options = visa_categories if visa_categories else sorted({str(x).strip() for x in df_live["Categories"].dropna().astype(str).tolist()})
     st.markdown("### Ajouter un dossier")
     st.write("Choisissez la catégorie :")
     categories_local = [""] + [c.strip() for c in categories_options]
@@ -932,7 +968,7 @@ with tabs[3]:
                 with ecol2:
                     e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
                     st.markdown(f"Category choisie: **{e_cat_sel}**")
-                    init_sub = str(row.get("Sous-catégorie","")).strip()
+                    init_sub = str(row.get("Sous-categorie","")).strip()
                     if init_sub == "" and edit_sub_options:
                         init_sub_index = 1
                     else:
