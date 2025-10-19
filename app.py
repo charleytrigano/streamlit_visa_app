@@ -443,6 +443,52 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
                 safe[c] = 0.0 if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"] else ""
         return safe
 
+def _normalize_status(df: Any) -> pd.DataFrame:
+    """
+    Normalize status-like columns to 0/1.
+    Defensive: accepts any input, coerces missing/non-DataFrame to DataFrame,
+    tolerates numeric/text representations and unexpected values.
+    """
+    if not isinstance(df, pd.DataFrame):
+        try:
+            st.sidebar.warning("_normalize_status: input is not a DataFrame; coercing to empty DataFrame.")
+        except Exception:
+            pass
+        df = pd.DataFrame()
+
+    cols_status = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
+    for c in cols_status:
+        try:
+            if c in df.columns:
+                s = df[c]
+                if not isinstance(s, pd.Series):
+                    s = pd.Series([s] * len(df), index=df.index) if len(df) > 0 else pd.Series(dtype="float64")
+                def _to_flag(v):
+                    try:
+                        if pd.isna(v):
+                            return 0
+                        vs = str(v).strip().lower()
+                        if vs in ("1", "x", "t", "true", "oui", "o", "yes", "y"):
+                            return 1
+                        try:
+                            if float(v) == 1.0:
+                                return 1
+                        except Exception:
+                            pass
+                        return 0
+                    except Exception:
+                        return 0
+                df[c] = s.map(_to_flag).astype(int)
+            else:
+                df[c] = 0
+        except Exception as ex:
+            try:
+                st.sidebar.error(f"_normalize_status: erreur sur colonne '{c}': {ex}")
+            except Exception:
+                pass
+            df[c] = 0
+    return df
+
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
@@ -886,7 +932,7 @@ with tabs[3]:
                 with ecol2:
                     e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
                     st.markdown(f"Category choisie: **{e_cat_sel}**")
-                    init_sub = str(row.get("Sous-categorie","")).strip()
+                    init_sub = str(row.get("Sous-catégorie","")).strip()
                     if init_sub == "" and edit_sub_options:
                         init_sub_index = 1
                     else:
