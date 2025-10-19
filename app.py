@@ -648,10 +648,16 @@ except Exception as e_top:
         pass
     df_all = pd.DataFrame(columns=COLS_CLIENTS)
 
-# Persist working copy in session_state (always define it)
+# Persist working copy in session_state (update when files produced non-empty df_all)
 DF_LIVE_KEY = skey("df_live")
-if DF_LIVE_KEY not in st.session_state or st.session_state[DF_LIVE_KEY] is None:
-    st.session_state[DF_LIVE_KEY] = df_all.copy() if (df_all is not None) else pd.DataFrame()
+
+# If df_all was successfully produced and is non-empty, update session_state so Dashboard shows it.
+if isinstance(df_all, pd.DataFrame) and not df_all.empty:
+    st.session_state[DF_LIVE_KEY] = df_all.copy()
+else:
+    # If no df_all but session key absent, create empty DF to avoid later crashes
+    if DF_LIVE_KEY not in st.session_state or st.session_state[DF_LIVE_KEY] is None:
+        st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 def _get_df_live() -> pd.DataFrame:
     return st.session_state[DF_LIVE_KEY].copy()
