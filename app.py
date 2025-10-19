@@ -229,8 +229,6 @@ def build_visa_map(dfv: pd.DataFrame) -> Dict[str, List[str]]:
     # normalize column names if needed
     if "Categories" not in df.columns and "Categorie" in df.columns:
         df = df.rename(columns={"Categorie": "Categories"})
-    if "Sous-categorie" not in df.columns and "Sous-categorie" in df.columns:
-        pass
     for _, row in df.iterrows():
         cat = str(row.get("Categories", "")).strip()
         sub = str(row.get("Sous-categorie", "")).strip()
@@ -726,6 +724,30 @@ def debug_show_columns_preview(df, name="Data"):
     except Exception as e:
         st.sidebar.write(f"DEBUG erreur: {e}")
 
+# -----------------------
+# Helper: compute next client id
+# -----------------------
+def get_next_client_id(df: pd.DataFrame) -> int:
+    """
+    Determine next numeric client ID. Start from DEFAULT_START_CLIENT_ID if none found.
+    Accepts ID_Client with numeric content; extracts digits.
+    """
+    if df is None or df.empty:
+        return DEFAULT_START_CLIENT_ID
+    vals = df.get("ID_Client", pd.Series([], dtype="object"))
+    nums = []
+    for v in vals.dropna().astype(str):
+        m = re.search(r"(\d+)", v)
+        if m:
+            try:
+                nums.append(int(m.group(1)))
+            except Exception:
+                pass
+    if not nums:
+        return DEFAULT_START_CLIENT_ID
+    mx = max(nums)
+    return max(DEFAULT_START_CLIENT_ID, mx) + 1
+
 # =========================
 # App UI: Tabs - Files, Dashboard, Analyses, Gestion (Add/Edit/Delete), Export
 # =========================
@@ -854,9 +876,10 @@ visa_categories = []
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
         df_visa_raw, _vm = map_columns_heuristic(df_visa_raw)
-        # coerce category columns
         df_visa_raw = coerce_category_columns(df_visa_raw)
-        visa_map = build_visa_map(df_visa_raw)
+        raw_vm = build_visa_map(df_visa_raw)
+        # normalize keys and values (strip)
+        visa_map = {str(k).strip(): [str(s).strip() for s in v if str(s).strip()] for k, v in raw_vm.items() if str(k).strip()}
         visa_categories = sorted(list(visa_map.keys()))
     except Exception:
         visa_map = {}
@@ -913,30 +936,6 @@ def _get_df_live() -> pd.DataFrame:
 
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
-
-# -----------------------
-# Helper: compute next client id
-# -----------------------
-def get_next_client_id(df: pd.DataFrame) -> int:
-    """
-    Determine next numeric client ID. Start from DEFAULT_START_CLIENT_ID if none found.
-    Accepts ID_Client with numeric content; extracts digits.
-    """
-    if df is None or df.empty:
-        return DEFAULT_START_CLIENT_ID
-    vals = df.get("ID_Client", pd.Series([], dtype="object"))
-    nums = []
-    for v in vals.dropna().astype(str):
-        m = re.search(r"(\d+)", v)
-        if m:
-            try:
-                nums.append(int(m.group(1)))
-            except Exception:
-                pass
-    if not nums:
-        return DEFAULT_START_CLIENT_ID
-    mx = max(nums)
-    return max(DEFAULT_START_CLIENT_ID, mx) + 1
 
 # -----------------------
 # Tabs (already defined earlier list)
@@ -1160,7 +1159,7 @@ with tabs[3]:
             df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
 
     # Determine categories source: from visa_map if available otherwise from existing clients
-    categories_options = visa_categories if visa_categories else sorted(df_live["Categories"].dropna().astype(str).unique().tolist())
+    categories_options = visa_categories if visa_categories else sorted({str(x).strip() for x in df_live["Categories"].dropna().astype(str).tolist()})
 
     st.markdown("### Ajouter un dossier")
     with st.form(key=skey("form_add")):
@@ -1173,16 +1172,17 @@ with tabs[3]:
             add_nom = st.text_input("Nom", value="", key=skey("add","nom"))
         with col_a2:
             add_date = st.date_input("Date", value=date.today(), key=skey("add","date"))
-            # Categories dropdown from Visa file
-            add_cat = st.selectbox("Categories", options=[""] + categories_options, index=0, key=skey("add","cat"))
-            # Sous-categories depend on selected category via visa_map
-            sub_options = []
+            # Categories dropdown from Visa file (trimmed)
+            categories_options_local = [""] + [c.strip() for c in categories_options]
+            add_cat = st.selectbox("Categories", options=categories_options_local, index=0, key=skey("add","cat"))
+            # Sous-categories depend on selected category via visa_map (use stripped key)
+            add_sub_options = []
             if add_cat and visa_map:
-                sub_options = visa_map.get(add_cat, [])
+                add_sub_options = visa_map.get(add_cat.strip(), [])
             # fallback to existing values if no visa_map
-            if not sub_options:
-                sub_options = sorted(df_live["Sous-categorie"].dropna().astype(str).unique().tolist())
-            add_sub = st.selectbox("Sous-categorie", options=[""] + sub_options, index=0, key=skey("add","sub"))
+            if not add_sub_options:
+                add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
+            add_sub = st.selectbox("Sous-categorie", options=[""] + add_sub_options, index=0, key=skey("add","sub"))
         with col_a3:
             add_visa = st.text_input("Visa", value="", key=skey("add","visa"))
             add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("add","montant"))
@@ -1196,8 +1196,8 @@ with tabs[3]:
                 new_row["Dossier N"] = add_dossier
                 new_row["Nom"] = add_nom
                 new_row["Date"] = pd.to_datetime(add_date)
-                new_row["Categories"] = add_cat
-                new_row["Sous-categorie"] = add_sub
+                new_row["Categories"] = add_cat.strip() if isinstance(add_cat, str) else add_cat
+                new_row["Sous-categorie"] = add_sub.strip() if isinstance(add_sub, str) else add_sub
                 new_row["Visa"] = add_visa
                 new_row["Montant honoraires (US $)"] = money_to_float(add_montant)
                 new_row["Autres frais (US $)"] = money_to_float(add_autres)
@@ -1229,22 +1229,22 @@ with tabs[3]:
                     e_nom = st.text_input("Nom", value=str(row.get("Nom","")), key=skey("edit","nom"))
                 with ecol2:
                     e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
-                    # categories selectbox: prefer visa categories
-                    edit_cat_options = categories_options if categories_options else sorted(df_live["Categories"].dropna().astype(str).unique().tolist())
-                    try:
-                        init_cat = row.get("Categories","")
-                        idx_cat = edit_cat_options.index(init_cat) if init_cat in edit_cat_options else 0
-                    except Exception:
-                        idx_cat = 0
-                    e_cat = st.selectbox("Categories", options=[""] + edit_cat_options, index=idx_cat, key=skey("edit","cat"))
-                    # sub options depend on e_cat
-                    edit_sub_options = visa_map.get(e_cat, []) if visa_map else sorted(df_live["Sous-categorie"].dropna().astype(str).unique().tolist())
-                    try:
-                        init_sub = row.get("Sous-categorie","")
-                        idx_sub = edit_sub_options.index(init_sub) if init_sub in edit_sub_options else 0
-                    except Exception:
-                        idx_sub = 0
-                    e_sub = st.selectbox("Sous-categorie", options=[""] + edit_sub_options, index=idx_sub, key=skey("edit","sub"))
+                    # categories selectbox: prefer visa categories (trimmed)
+                    edit_cat_options = [c.strip() for c in categories_options] if categories_options else sorted({str(x).strip() for x in df_live["Categories"].dropna().astype(str).tolist()})
+                    edit_cat_options_with_empty = [""] + edit_cat_options
+                    init_cat = str(row.get("Categories","")).strip()
+                    default_cat_index = edit_cat_options_with_empty.index(init_cat) if init_cat in edit_cat_options_with_empty else 0
+                    e_cat = st.selectbox("Categories", options=edit_cat_options_with_empty, index=default_cat_index, key=skey("edit","cat"))
+
+                    # sub options depend on e_cat (strip key)
+                    if e_cat and visa_map:
+                        edit_sub_options = visa_map.get(e_cat.strip(), [])
+                    else:
+                        edit_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
+                    edit_sub_options_with_empty = [""] + edit_sub_options
+                    init_sub = str(row.get("Sous-categorie","")).strip()
+                    default_sub_index = edit_sub_options_with_empty.index(init_sub) if init_sub in edit_sub_options_with_empty else 0
+                    e_sub = st.selectbox("Sous-categorie", options=edit_sub_options_with_empty, index=default_sub_index, key=skey("edit","sub"))
                 e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa_2"))
                 e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
                 e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)",0)), key=skey("edit","autres"))
@@ -1256,8 +1256,8 @@ with tabs[3]:
                         df_live.at[idx, "Dossier N"] = e_dossier
                         df_live.at[idx, "Nom"] = e_nom
                         df_live.at[idx, "Date"] = pd.to_datetime(e_date)
-                        df_live.at[idx, "Categories"] = e_cat
-                        df_live.at[idx, "Sous-categorie"] = e_sub
+                        df_live.at[idx, "Categories"] = e_cat.strip() if isinstance(e_cat, str) else e_cat
+                        df_live.at[idx, "Sous-categorie"] = e_sub.strip() if isinstance(e_sub, str) else e_sub
                         df_live.at[idx, "Visa"] = e_visa
                         df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
                         df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres)
