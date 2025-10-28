@@ -1,9 +1,9 @@
 # Visa Manager - app.py
-# Complete Streamlit app with:
-# - Acomptes 1..4 integrated in add/edit forms
-# - Payé enforced as sum(Acompte 1..4) on normalization, add and edit
-# - recalc_payments_and_solde ensures Payé and Solde are canonical after changes
-# - Dashboard uses Payé, offers "Toutes les années" and lists filtered clients
+# Complete Streamlit app (updated)
+# - Ensures Payé = sum(Acompte 1..4) and Solde recalculated
+# - Dashboard now recalculates canonical values before filtering (fix total solde)
+# - Dashboard: smaller KPI presentation
+# - Dashboard: added filter "Visa"
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl, streamlit; optional: plotly
@@ -19,7 +19,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional: plotly (if installed)
+# Optional: plotly
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -452,7 +452,7 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
 def _normalize_status(df: Any) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
         try:
-            st.sidebar.warning("_normalize_status: input is not a DataFrame; coercing to empty DataFrame.")
+            st.sidebar.warning("_normalize_status: input was not a DataFrame; coercing to empty DataFrame.")
         except Exception:
             pass
         df = pd.DataFrame()
@@ -829,6 +829,18 @@ def unique_nonempty(series):
         out.append(s)
     return sorted(list(dict.fromkeys(out)))
 
+# Helper to render smaller KPI boxes using markdown (reduce visual size)
+def small_kpi(label: str, value: str, sub: str = ""):
+    # small card with thin border and reduced font sizes
+    html = f"""
+    <div style="border:1px solid #e6e6e6; border-radius:6px; padding:8px 10px; margin:4px 0; background:#fafafa;">
+      <div style="font-size:12px; color:#666;">{label}</div>
+      <div style="font-size:18px; font-weight:600; margin-top:4px;">{value}</div>
+      <div style="font-size:11px; color:#888; margin-top:3px;">{sub}</div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
 # =========================
 # Tabs and UI
 # =========================
@@ -885,12 +897,15 @@ with tabs[0]:
 # ---- Dashboard tab ----
 with tabs[1]:
     st.subheader("📊 Dashboard (totaux et diagnostics)")
-    df_live_view = _get_df_live()
+    # Always start from canonical dataframe (recalc) to avoid drift
+    df_live_view = recalc_payments_and_solde(_get_df_live())
+
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
     else:
         cats = unique_nonempty(df_live_view["Categories"]) if "Categories" in df_live_view.columns else []
         subs = unique_nonempty(df_live_view["Sous-categorie"]) if "Sous-categorie" in df_live_view.columns else []
+        visas = unique_nonempty(df_live_view["Visa"]) if "Visa" in df_live_view.columns else []
         years = []
         if "_Année_" in df_live_view.columns:
             try:
@@ -899,17 +914,21 @@ with tabs[1]:
             except Exception:
                 years = []
 
-        f1, f2, f3 = st.columns([1,1,1])
+        # Filters: Category, Sous-categorie, Visa, Year
+        f1, f2, f3, f4 = st.columns([1,1,1,1])
         sel_cat = f1.selectbox("Catégorie", options=[""]+cats, index=0, key=skey("dash","cat"))
         sel_sub = f2.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=skey("dash","sub"))
+        sel_visa = f3.selectbox("Visa", options=[""]+visas, index=0, key=skey("dash","visa"))
         year_options = ["Toutes les années"] + [str(y) for y in years]
-        sel_year = f3.selectbox("Année", options=year_options, index=0, key=skey("dash","year"))
+        sel_year = f4.selectbox("Année", options=year_options, index=0, key=skey("dash","year"))
 
         view = df_live_view.copy()
         if sel_cat:
             view = view[view["Categories"].astype(str)==sel_cat]
         if sel_sub:
             view = view[view["Sous-categorie"].astype(str)==sel_sub]
+        if sel_visa:
+            view = view[view["Visa"].astype(str)==sel_visa]
         if sel_year and sel_year != "Toutes les années":
             view = view[view["_Année_"].astype(str)==sel_year]
 
@@ -919,45 +938,53 @@ with tabs[1]:
             except Exception:
                 return 0.0
 
+        # Numeric prepared fields
         view["_Montant_num_"] = view.get("Montant honoraires (US $)", 0).apply(safe_num)
         view["_Autres_num_"] = view.get("Autres frais (US $)", 0).apply(safe_num)
-
+        # Ensure acomptes present
         for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
             if acc not in view.columns:
                 view[acc] = 0.0
-
         view["_Acompte1_"] = view.get("Acompte 1", 0).apply(safe_num)
         view["_Acompte2_"] = view.get("Acompte 2", 0).apply(safe_num)
         view["_Acompte3_"] = view.get("Acompte 3", 0).apply(safe_num)
         view["_Acompte4_"] = view.get("Acompte 4", 0).apply(safe_num)
-
+        # Payé taken from canonical column
         view["_Payé_num_"] = view.get("Payé", 0).apply(safe_num)
+
+        # Totals: use canonical Solde (from recalc) to compute total solde
         total_honoraires = view["_Montant_num_"].sum()
         total_autres = view["_Autres_num_"].sum()
         total_facture_calc = total_honoraires + total_autres
         total_paye = view["_Payé_num_"].sum()
-        view["_Solde_calc_"] = view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"]
-        total_solde_calc = view["_Solde_calc_"].sum()
-        total_solde_recorded = view.get("Solde", 0).apply(safe_num).sum()
+        # Prefer canonical "Solde" column: this is already recomputed in recalc, so use it
+        total_solde_calc = view.get("Solde", 0).apply(safe_num).sum()
 
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Dossiers (vue)", f"{len(view):,}")
-        k2.metric("Montant honoraires", _fmt_money(total_honoraires))
-        k3.metric("Autres frais", _fmt_money(total_autres))
-        k4.metric("Total facturé (recalc)", _fmt_money(total_facture_calc))
+        # Render KPIs with smaller footprint
+        kcols = st.columns(4)
+        small_kpi("Dossiers (vue)", f"{len(view):,}", "")
+        small_kpi("Montant honoraires", _fmt_money(total_honoraires), "")
+        small_kpi("Autres frais", _fmt_money(total_autres), "")
+        small_kpi("Total facturé (recalc)", _fmt_money(total_facture_calc), "")
+
         st.markdown("---")
-        k5, k6 = st.columns(2)
-        k5.metric("Montant payé (Payé = somme acomptes)", _fmt_money(total_paye))
-        k6.metric("Solde total (recalc)", _fmt_money(total_solde_calc))
+        # Second row of smaller KPIs
+        small_kpi("Montant payé (Payé = somme acomptes)", _fmt_money(total_paye), "")
+        small_kpi("Solde total (recalc)", _fmt_money(total_solde_calc), "")
 
-        if abs(total_solde_calc - total_solde_recorded) > 0.005:
-            st.warning(f"Écart détecté entre Solde recalculé ({_fmt_money(total_solde_calc)}) et Solde enregistré ({_fmt_money(total_solde_recorded)}).")
+        # Check consistency vs computed
+        # Recompute solde from montants - paid just for verification
+        view["_Solde_recalc_check_"] = view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"]
+        check_total_solde_recalc = view["_Solde_recalc_check_"].sum()
+        if abs(check_total_solde_recalc - total_solde_calc) > 0.005:
+            st.warning(f"Attention : somme des soldes recalculés ({_fmt_money(check_total_solde_recalc)}) diffère du total Solde stocké ({_fmt_money(total_solde_calc)}). Nous utilisons la colonne 'Solde' (forcée) pour le KPI.")
         else:
-            st.success("Solde enregistré et solde recalculé sont cohérents.")
+            st.success("Solde cohérent avec les montants recalculés.")
 
+        # anomalies and checks
         view["_Acomptes_sum_"] = view["_Acompte1_"] + view["_Acompte2_"] + view["_Acompte3_"] + view["_Acompte4_"]
         view["écart_paye_acompte"] = (view["_Payé_num_"] - view["_Acomptes_sum_"]).abs()
-        view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - view["_Solde_calc_"]).abs()
+        view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - view["_Solde_recalc_check_"]).abs()
         anomalies = view[(view["_Montant_num_"]==0) & (view.get("Montant honoraires (US $)","")!="")]
         anomalies = pd.concat([anomalies, view[view["écart_solde"] > 0.01], view[view["écart_paye_acompte"] > 0.005]]).drop_duplicates()
 
@@ -965,9 +992,9 @@ with tabs[1]:
             if anomalies.empty:
                 st.write("Aucune anomalie détectée.")
             else:
-                display_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie",
+                display_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie","Visa",
                                 "Montant honoraires (US $)","Autres frais (US $)","Acompte 1","Acompte 2","Acompte 3","Acompte 4","Payé","Solde",
-                                "_Montant_num_","_Autres_num_","_Acomptes_sum_","_Payé_num_","_Solde_calc_","écart_solde","écart_paye_acompte"]
+                                "_Montant_num_","_Autres_num_","_Acomptes_sum_","_Payé_num_","_Solde_recalc_check_","écart_solde","écart_paye_acompte"]
                 cols = [c for c in display_cols if c in anomalies.columns]
                 st.dataframe(anomalies[cols].reset_index(drop=True), use_container_width=True, height=300)
 
@@ -1171,7 +1198,7 @@ with tabs[3]:
                             init_sub_index = ([""] + edit_sub_options).index(init_sub)
                         except Exception:
                             init_sub_index = 0
-                    e_sub = st.selectbox("Sous-categorie", options=[""] + edit_sub_options, index=init_sub_index, key=skey("edit","sub"))
+                    e_sub = st.selectbox("Sous-catégorie", options=[""] + edit_sub_options, index=init_sub_index, key=skey("edit","sub"))
                     edit_specific = get_sub_options_for(e_sub, visa_sub_options_map)
                     checkbox_options_edit = edit_specific if edit_specific else DEFAULT_FLAGS
                     ensure_flag_columns(df_live, checkbox_options_edit)
