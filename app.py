@@ -1,5 +1,9 @@
 # Visa Manager - app.py
-# Complete, robust Streamlit app with Acompte 1..4 integrated.
+# Complete, robust Streamlit app
+# - Payé = sum(Acompte 1..4) enforced on normalization and on add/edit
+# - Dashboard uses Payé for "Montant payé"
+# - Acomptes included in forms and export
+#
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl, streamlit; optional: plotly
 
@@ -14,7 +18,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional: plotly (si installé)
+# Optional: plotly
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -45,7 +49,7 @@ def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
 # =========================
-# Small helpers (normalization / formatting)
+# Helpers (normalization / formatting)
 # =========================
 def normalize_header_text(s: Any) -> str:
     if s is None:
@@ -488,6 +492,10 @@ def _normalize_status(df: Any) -> pd.DataFrame:
     return df
 
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
+    """
+    Coerce input to DataFrame, map headers, normalize numeric columns, ensure acomptes exist,
+    compute Payé = sum(Acompte 1..4) and Solde = Montant + Autres - Payé.
+    """
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
             if 'read_any_table' in globals() and callable(globals()['read_any_table']):
@@ -509,18 +517,23 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
             df_clients_raw = pd.DataFrame()
     if df_clients_raw is None or not isinstance(df_clients_raw, pd.DataFrame):
         df_clients_raw = pd.DataFrame()
+
     try:
         df_mapped, _ = map_columns_heuristic(df_clients_raw)
         if df_mapped is None or not isinstance(df_mapped, pd.DataFrame):
             df_mapped = pd.DataFrame()
     except Exception:
         df_mapped = df_clients_raw.copy() if isinstance(df_clients_raw, pd.DataFrame) else pd.DataFrame()
+
     if "Date" in df_mapped.columns:
         try:
             df_mapped["Date"] = pd.to_datetime(df_mapped["Date"], dayfirst=True, errors="coerce")
         except Exception:
             pass
+
     df = _ensure_columns(df_mapped, COLS_CLIENTS)
+
+    # Numeric normalization for known numeric targets including acomptes
     for col in NUMERIC_TARGETS:
         if col in df.columns:
             try:
@@ -530,13 +543,40 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
                     df[col] = df[col].apply(lambda x: 0.0)
                 except Exception:
                     pass
+
+    # Ensure acomptes exist (zeros if missing)
+    for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
+        if acc not in df.columns:
+            df[acc] = 0.0
+
+    # Compute Payé as sum of acomptes (enforce canonical meaning)
+    try:
+        df["Payé"] = df[["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]].fillna(0).apply(lambda row: float(_to_num(row["Acompte 1"]) + _to_num(row["Acompte 2"]) + _to_num(row["Acompte 3"]) + _to_num(row["Acompte 4"])), axis=1)
+    except Exception:
+        # fallback: attempt column-wise sum
+        try:
+            df["Payé"] = _to_num(df.get("Acompte 1",0)) + _to_num(df.get("Acompte 2",0)) + _to_num(df.get("Acompte 3",0)) + _to_num(df.get("Acompte 4",0))
+        except Exception:
+            df["Payé"] = df.get("Payé",0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
+
+    # Recompute Solde as Montant + Autres - Payé
+    try:
+        df["Solde"] = df.get("Montant honoraires (US $)",0).apply(_to_num) + df.get("Autres frais (US $)",0).apply(_to_num) - df.get("Payé",0).apply(_to_num)
+    except Exception:
+        try:
+            df["Solde"] = 0.0
+        except Exception:
+            pass
+
     df = _normalize_status(df)
+
     for c in ["Nom", "Categories", "Sous-categorie", "Visa", "Commentaires"]:
         if c in df.columns:
             try:
                 df[c] = df[c].astype(str).fillna("")
             except Exception:
                 df[c] = df[c].fillna("").astype(str)
+
     try:
         dser = pd.to_datetime(df["Date"], errors="coerce")
         df["_Année_"] = dser.dt.year.fillna(0).astype(int)
@@ -544,6 +584,7 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         df["Mois"] = df["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) and m>0 else "")
     except Exception:
         df["_Année_"] = 0; df["_MoisNum_"] = 0; df["Mois"] = ""
+
     return df
 
 # =========================
@@ -607,6 +648,7 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
+# Read uploaded files into bytes
 clients_bytes = None
 visa_bytes = None
 if up_clients is not None:
@@ -703,7 +745,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
 else:
     visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 
-# Debug expander
+# Debug expander in sidebar
 with st.sidebar.expander("DEBUG Visa / Maps", expanded=False):
     if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         st.markdown("**Visa raw columns (preview):**")
@@ -845,13 +887,14 @@ with tabs[1]:
         view["_Acompte2_"] = view.get("Acompte 2", 0).apply(safe_num)
         view["_Acompte3_"] = view.get("Acompte 3", 0).apply(safe_num)
         view["_Acompte4_"] = view.get("Acompte 4", 0).apply(safe_num)
-        view["_Acomptes_sum_"] = view["_Acompte1_"] + view["_Acompte2_"] + view["_Acompte3_"] + view["_Acompte4_"]
 
+        # Montant payé now taken from Payé column (which equals sum of acomptes on normalization / edit / add)
+        view["_Payé_num_"] = view.get("Payé", 0).apply(safe_num)
         total_honoraires = view["_Montant_num_"].sum()
         total_autres = view["_Autres_num_"].sum()
         total_facture_calc = total_honoraires + total_autres
-        total_paye = view["_Acomptes_sum_"].sum()
-        view["_Solde_calc_"] = view["_Montant_num_"] + view["_Autres_num_"] - view["_Acomptes_sum_"]
+        total_paye = view["_Payé_num_"].sum()
+        view["_Solde_calc_"] = view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"]
         total_solde_calc = view["_Solde_calc_"].sum()
         total_solde_recorded = view.get("Solde", 0).apply(safe_num).sum()
 
@@ -862,7 +905,7 @@ with tabs[1]:
         k4.metric("Total facturé (recalc)", _fmt_money(total_facture_calc))
         st.markdown("---")
         k5, k6 = st.columns(2)
-        k5.metric("Montant payé (acomptes)", _fmt_money(total_paye))
+        k5.metric("Montant payé (Payé = somme acomptes)", _fmt_money(total_paye))
         k6.metric("Solde total (recalc)", _fmt_money(total_solde_calc))
 
         if abs(total_solde_calc - total_solde_recorded) > 0.005:
@@ -870,17 +913,20 @@ with tabs[1]:
         else:
             st.success("Solde enregistré et solde recalculé sont cohérents.")
 
+        # anomalies: where Payé != sum(acompte columns) or other conversion problems
+        view["_Acomptes_sum_"] = view["_Acompte1_"] + view["_Acompte2_"] + view["_Acompte3_"] + view["_Acompte4_"]
+        view["écart_paye_acompte"] = (view["_Payé_num_"] - view["_Acomptes_sum_"]).abs()
         view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - view["_Solde_calc_"]).abs()
         anomalies = view[(view["_Montant_num_"]==0) & (view.get("Montant honoraires (US $)","")!="")]
-        anomalies = pd.concat([anomalies, view[view["écart_solde"] > 0.01]]).drop_duplicates()
+        anomalies = pd.concat([anomalies, view[view["écart_solde"] > 0.01], view[view["écart_paye_acompte"] > 0.005]]).drop_duplicates()
 
-        with st.expander("Lignes avec problèmes de conversion ou écarts"):
+        with st.expander("Lignes avec problèmes de conversion, écarts ou Payé ≠ somme acomptes"):
             if anomalies.empty:
                 st.write("Aucune anomalie détectée.")
             else:
                 display_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie",
                                 "Montant honoraires (US $)","Autres frais (US $)","Acompte 1","Acompte 2","Acompte 3","Acompte 4","Payé","Solde",
-                                "_Montant_num_","_Autres_num_","_Acomptes_sum_","_Solde_calc_","écart_solde"]
+                                "_Montant_num_","_Autres_num_","_Acomptes_sum_","_Payé_num_","_Solde_calc_","écart_solde","écart_paye_acompte"]
                 cols = [c for c in display_cols if c in anomalies.columns]
                 st.dataframe(anomalies[cols].reset_index(drop=True), use_container_width=True, height=300)
 
@@ -1006,6 +1052,10 @@ with tabs[3]:
                 ensure_flag_columns(df_live, flags_to_create)
                 for opt, val in add_flags_state.items():
                     new_row[opt] = 1 if val else 0
+                # ensure acomptes exist in df_live
+                for acc in ["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
+                    if acc not in df_live.columns:
+                        df_live[acc] = 0.0
                 df_live = df_live.append(new_row, ignore_index=True)
                 _set_df_live(df_live)
                 st.success("Dossier ajouté.")
@@ -1057,7 +1107,7 @@ with tabs[3]:
                             init_sub_index = ([""] + edit_sub_options).index(init_sub)
                         except Exception:
                             init_sub_index = 0
-                    e_sub = st.selectbox("Sous-categorie", options=[""] + edit_sub_options, index=init_sub_index, key=skey("edit","sub"))
+                    e_sub = st.selectbox("Sous-catégorie", options=[""] + edit_sub_options, index=init_sub_index, key=skey("edit","sub"))
                     edit_specific = get_sub_options_for(e_sub, visa_sub_options_map)
                     checkbox_options_edit = edit_specific if edit_specific else DEFAULT_FLAGS
                     ensure_flag_columns(df_live, checkbox_options_edit)
