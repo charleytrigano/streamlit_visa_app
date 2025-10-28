@@ -1,9 +1,9 @@
 # Visa Manager - app.py
-# Complete, robust Streamlit app
-# - Payé = sum(Acompte 1..4) enforced on normalization and on add/edit
-# - Dashboard uses Payé for "Montant payé"
-# - Acomptes included in forms and export
-# - Dashboard: "Toutes les années" option and listing of filtered clients
+# Complete Streamlit app with:
+# - Acomptes 1..4 integrated in add/edit forms
+# - Payé enforced as sum(Acompte 1..4) on normalization, add and edit
+# - recalc_payments_and_solde ensures Payé and Solde are canonical after changes
+# - Dashboard uses Payé, offers "Toutes les années" and lists filtered clients
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl, streamlit; optional: plotly
@@ -19,7 +19,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional: plotly
+# Optional: plotly (if installed)
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -89,12 +89,11 @@ def money_to_float(x: Any) -> float:
     if pd.isna(x):
         return 0.0
     s = str(x).strip()
-    if s == "" or s in ["-", "—", "–", "NA", "N/A"]:
+    if s == "" or s in ("-", "—", "–", "NA", "N/A"):
         return 0.0
     s = re.sub(r"[^\d,.\-]", "", s)
     if s == "":
         return 0.0
-    # handle comma/point decimal/thousands
     if "," in s and "." in s:
         if s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")
@@ -192,7 +191,6 @@ def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
         if mapped is None:
             mapped = normalize_header_text(c)
         mapping[c] = mapped
-    # ensure unique names
     new_names = {}
     seen = {}
     for orig, new in mapping.items():
@@ -403,7 +401,6 @@ def get_sub_options_for(sub_value: str, visa_sub_options_map: Dict[str, List[str
         return visa_sub_options_map[s_lower][:]
     if s_noacc in visa_sub_options_map:
         return visa_sub_options_map[s_noacc][:]
-    # fallback contains match
     s_match = remove_accents(s_raw).lower()
     candidates = []
     for k in visa_sub_options_map.keys():
@@ -588,6 +585,49 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
 
     return df
 
+# --- New utility: ensure Payé and Solde canonical after any change ---
+def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure acomptes numeric, compute Payé = sum(Acompte 1..4),
+    and Solde = Montant honoraires + Autres frais - Payé.
+    Returns a copied & updated DataFrame.
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    # Ensure acomptes columns exist and cast to numeric
+    for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
+        if acc not in out.columns:
+            out[acc] = 0.0
+        else:
+            out[acc] = out[acc].apply(lambda x: _to_num(x) if not isinstance(x, (int, float)) else float(x))
+
+    # Ensure Montant / Autres are numeric
+    for mc in ["Montant honoraires (US $)", "Autres frais (US $)"]:
+        if mc not in out.columns:
+            out[mc] = 0.0
+        else:
+            out[mc] = out[mc].apply(lambda x: _to_num(x) if not isinstance(x, (int, float)) else float(x))
+
+    # Compute Payé from acomptes (overwrite to keep canonical)
+    try:
+        out["Payé"] = out[["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]].sum(axis=1).astype(float)
+    except Exception:
+        out["Payé"] = out.get("Payé", 0).apply(lambda x: _to_num(x) if not isinstance(x, (int, float)) else float(x))
+
+    # Recompute Solde
+    out["Solde"] = out["Montant honoraires (US $)"] + out["Autres frais (US $)"] - out["Payé"]
+
+    # enforce types
+    try:
+        out["Payé"] = out["Payé"].astype(float)
+        out["Solde"] = out["Solde"].astype(float)
+    except Exception:
+        pass
+
+    return out
+
 # =========================
 # Next ID & flags helpers
 # =========================
@@ -649,7 +689,6 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
-# Read uploaded files into bytes
 clients_bytes = None
 visa_bytes = None
 if up_clients is not None:
@@ -758,8 +797,9 @@ with st.sidebar.expander("DEBUG Visa / Maps", expanded=False):
     st.markdown("**visa_sub_options_map (sous_key -> checkbox labels)**")
     st.write(visa_sub_options_map)
 
-# Build live df
+# Build live df and enforce canonical Payé/Solde
 df_all = normalize_clients_for_live(df_clients_raw)
+df_all = recalc_payments_and_solde(df_all)
 DF_LIVE_KEY = skey("df_live")
 if isinstance(df_all, pd.DataFrame) and not df_all.empty:
     st.session_state[DF_LIVE_KEY] = df_all.copy()
@@ -828,6 +868,7 @@ with tabs[0]:
     with col_a:
         if st.button("Réinitialiser mémoire (recharger)"):
             df_all2 = normalize_clients_for_live(df_clients_raw)
+            df_all2 = recalc_payments_and_solde(df_all2)
             _set_df_live(df_all2)
             st.success("Mémoire réinitialisée.")
             try:
@@ -861,7 +902,6 @@ with tabs[1]:
         f1, f2, f3 = st.columns([1,1,1])
         sel_cat = f1.selectbox("Catégorie", options=[""]+cats, index=0, key=skey("dash","cat"))
         sel_sub = f2.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=skey("dash","sub"))
-        # Year select: include "Toutes les années" option
         year_options = ["Toutes les années"] + [str(y) for y in years]
         sel_year = f3.selectbox("Année", options=year_options, index=0, key=skey("dash","year"))
 
@@ -870,7 +910,6 @@ with tabs[1]:
             view = view[view["Categories"].astype(str)==sel_cat]
         if sel_sub:
             view = view[view["Sous-categorie"].astype(str)==sel_sub]
-        # Apply year filter only if a specific year is chosen (not "Toutes les années")
         if sel_year and sel_year != "Toutes les années":
             view = view[view["_Année_"].astype(str)==sel_year]
 
@@ -883,7 +922,6 @@ with tabs[1]:
         view["_Montant_num_"] = view.get("Montant honoraires (US $)", 0).apply(safe_num)
         view["_Autres_num_"] = view.get("Autres frais (US $)", 0).apply(safe_num)
 
-        # ensure acomptes columns exist
         for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
             if acc not in view.columns:
                 view[acc] = 0.0
@@ -893,7 +931,6 @@ with tabs[1]:
         view["_Acompte3_"] = view.get("Acompte 3", 0).apply(safe_num)
         view["_Acompte4_"] = view.get("Acompte 4", 0).apply(safe_num)
 
-        # Montant payé taken from Payé column (which equals sum of acomptes on normalization / edit / add)
         view["_Payé_num_"] = view.get("Payé", 0).apply(safe_num)
         total_honoraires = view["_Montant_num_"].sum()
         total_autres = view["_Autres_num_"].sum()
@@ -918,7 +955,6 @@ with tabs[1]:
         else:
             st.success("Solde enregistré et solde recalculé sont cohérents.")
 
-        # anomalies
         view["_Acomptes_sum_"] = view["_Acompte1_"] + view["_Acompte2_"] + view["_Acompte3_"] + view["_Acompte4_"]
         view["écart_paye_acompte"] = (view["_Payé_num_"] - view["_Acomptes_sum_"]).abs()
         view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - view["_Solde_calc_"]).abs()
@@ -935,10 +971,9 @@ with tabs[1]:
                 cols = [c for c in display_cols if c in anomalies.columns]
                 st.dataframe(anomalies[cols].reset_index(drop=True), use_container_width=True, height=300)
 
-        # ----- New: list clients matching the current filters -----
+        # ----- list clients matching current filters -----
         st.markdown("### Détails — clients correspondant aux filtres")
         display_df = view.copy()
-        # Format date as string, format money columns for readability
         if "Date" in display_df.columns:
             try:
                 display_df["Date"] = pd.to_datetime(display_df["Date"], errors="coerce").dt.date.astype(str)
@@ -951,7 +986,6 @@ with tabs[1]:
                     display_df[mc] = display_df[mc].apply(lambda x: _fmt_money(_to_num(x)))
                 except Exception:
                     display_df[mc] = display_df[mc].astype(str)
-        # reset index for nicer display
         try:
             st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=360)
         except Exception:
@@ -1084,6 +1118,9 @@ with tabs[3]:
                     if acc not in df_live.columns:
                         df_live[acc] = 0.0
                 df_live = df_live.append(new_row, ignore_index=True)
+
+                # Recalculate canonical Payé and Solde for whole df and save
+                df_live = recalc_payments_and_solde(df_live)
                 _set_df_live(df_live)
                 st.success("Dossier ajouté.")
             except Exception as e:
@@ -1169,10 +1206,12 @@ with tabs[3]:
                         df_live.at[idx, "Acompte 2"] = money_to_float(e_ac2)
                         df_live.at[idx, "Acompte 3"] = money_to_float(e_ac3)
                         df_live.at[idx, "Acompte 4"] = money_to_float(e_ac4)
-                        # payé = sum acomptes
-                        paid_sum = _to_num(df_live.at[idx, "Acompte 1"]) + _to_num(df_live.at[idx, "Acompte 2"]) + _to_num(df_live.at[idx, "Acompte 3"]) + _to_num(df_live.at[idx, "Acompte 4"])
-                        df_live.at[idx, "Payé"] = paid_sum
-                        df_live.at[idx, "Solde"] = _to_num(df_live.at[idx, "Montant honoraires (US $)"]) + _to_num(df_live.at[idx, "Autres frais (US $)"]) - paid_sum
+                        # Ensure acomptes exist if needed
+                        for acc in ["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
+                            if acc not in df_live.columns:
+                                df_live[acc] = 0.0
+                        # Recalculate payments & solde for entire df
+                        df_live = recalc_payments_and_solde(df_live)
                         df_live.at[idx, "Commentaires"] = e_comments
                         for opt, val in edit_flags_state.items():
                             df_live.at[idx, opt] = 1 if val else 0
@@ -1193,6 +1232,7 @@ with tabs[3]:
                 idxs = [int(s.split("|")[0].strip()) for s in selected_to_del]
                 try:
                     df_live = df_live.drop(index=idxs).reset_index(drop=True)
+                    df_live = recalc_payments_and_solde(df_live)
                     _set_df_live(df_live)
                     st.success(f"{len(idxs)} ligne(s) supprimée(s).")
                 except Exception as e:
