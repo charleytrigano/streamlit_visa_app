@@ -1,9 +1,6 @@
 # Visa Manager - app.py
-# Complete Streamlit app (updated)
-# - Ensures Payé = sum(Acompte 1..4) and Solde recalculated
-# - Dashboard now recalculates canonical values before filtering (fix total solde)
-# - Dashboard: smaller KPI presentation
-# - Dashboard: added filter "Visa"
+# Updated: smaller KPI cards rendered in columns, canonical solde total used,
+# Visa filter included (uses column "Visa").
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl, streamlit; optional: plotly
@@ -19,7 +16,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional: plotly
+# Optional: plotly (if installed)
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -829,17 +826,16 @@ def unique_nonempty(series):
         out.append(s)
     return sorted(list(dict.fromkeys(out)))
 
-# Helper to render smaller KPI boxes using markdown (reduce visual size)
-def small_kpi(label: str, value: str, sub: str = ""):
-    # small card with thin border and reduced font sizes
+# Helper to build compact KPI HTML
+def kpi_html(label: str, value: str, sub: str = "") -> str:
     html = f"""
-    <div style="border:1px solid #e6e6e6; border-radius:6px; padding:8px 10px; margin:4px 0; background:#fafafa;">
-      <div style="font-size:12px; color:#666;">{label}</div>
-      <div style="font-size:18px; font-weight:600; margin-top:4px;">{value}</div>
-      <div style="font-size:11px; color:#888; margin-top:3px;">{sub}</div>
+    <div style="border:1px solid rgba(255,255,255,0.04); border-radius:6px; padding:8px 10px; margin:6px 4px; background:transparent;">
+      <div style="font-size:12px; color:#a8b3c0;">{label}</div>
+      <div style="font-size:18px; font-weight:700; margin-top:4px; color:#ffffff;">{value}</div>
+      <div style="font-size:11px; color:#9aa9b7; margin-top:4px;">{sub}</div>
     </div>
     """
-    st.markdown(html, unsafe_allow_html=True)
+    return html
 
 # =========================
 # Tabs and UI
@@ -952,39 +948,37 @@ with tabs[1]:
         # Payé taken from canonical column
         view["_Payé_num_"] = view.get("Payé", 0).apply(safe_num)
 
-        # Totals: use canonical Solde (from recalc) to compute total solde
+        # Totals: compute canonical totals from numeric columns
         total_honoraires = view["_Montant_num_"].sum()
         total_autres = view["_Autres_num_"].sum()
         total_facture_calc = total_honoraires + total_autres
         total_paye = view["_Payé_num_"].sum()
-        # Prefer canonical "Solde" column: this is already recomputed in recalc, so use it
-        total_solde_calc = view.get("Solde", 0).apply(safe_num).sum()
+        # canonical solde computed from numeric columns (reliable)
+        canonical_solde_sum = (view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"]).sum()
 
-        # Render KPIs with smaller footprint
-        kcols = st.columns(4)
-        small_kpi("Dossiers (vue)", f"{len(view):,}", "")
-        small_kpi("Montant honoraires", _fmt_money(total_honoraires), "")
-        small_kpi("Autres frais", _fmt_money(total_autres), "")
-        small_kpi("Total facturé (recalc)", _fmt_money(total_facture_calc), "")
+        # Render KPIs in columns (compact)
+        cols_k = st.columns(4)
+        cols_k[0].markdown(kpi_html("Dossiers (vue)", f"{len(view):,}"), unsafe_allow_html=True)
+        cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
+        cols_k[2].markdown(kpi_html("Autres frais", _fmt_money(total_autres)), unsafe_allow_html=True)
+        cols_k[3].markdown(kpi_html("Total facturé (recalc)", _fmt_money(total_facture_calc)), unsafe_allow_html=True)
 
         st.markdown("---")
-        # Second row of smaller KPIs
-        small_kpi("Montant payé (Payé = somme acomptes)", _fmt_money(total_paye), "")
-        small_kpi("Solde total (recalc)", _fmt_money(total_solde_calc), "")
+        cols_k2 = st.columns(2)
+        cols_k2[0].markdown(kpi_html("Montant payé (Payé = somme acomptes)", _fmt_money(total_paye)), unsafe_allow_html=True)
+        cols_k2[1].markdown(kpi_html("Solde total (recalc)", _fmt_money(canonical_solde_sum)), unsafe_allow_html=True)
 
-        # Check consistency vs computed
-        # Recompute solde from montants - paid just for verification
-        view["_Solde_recalc_check_"] = view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"]
-        check_total_solde_recalc = view["_Solde_recalc_check_"].sum()
-        if abs(check_total_solde_recalc - total_solde_calc) > 0.005:
-            st.warning(f"Attention : somme des soldes recalculés ({_fmt_money(check_total_solde_recalc)}) diffère du total Solde stocké ({_fmt_money(total_solde_calc)}). Nous utilisons la colonne 'Solde' (forcée) pour le KPI.")
+        # Check consistency vs stored Solde column
+        total_solde_recorded = view.get("Solde", 0).apply(safe_num).sum()
+        if abs(canonical_solde_sum - total_solde_recorded) > 0.005:
+            st.warning(f"Attention : somme des soldes recalculés ({_fmt_money(canonical_solde_sum)}) diffère du total Solde stocké ({_fmt_money(total_solde_recorded)}). Le KPI affiche le solde recalculé.")
         else:
-            st.success("Solde cohérent avec les montants recalculés.")
+            st.success("Solde stocké et solde recalculé sont cohérents.")
 
         # anomalies and checks
         view["_Acomptes_sum_"] = view["_Acompte1_"] + view["_Acompte2_"] + view["_Acompte3_"] + view["_Acompte4_"]
         view["écart_paye_acompte"] = (view["_Payé_num_"] - view["_Acomptes_sum_"]).abs()
-        view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - view["_Solde_recalc_check_"]).abs()
+        view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - (view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"])).abs()
         anomalies = view[(view["_Montant_num_"]==0) & (view.get("Montant honoraires (US $)","")!="")]
         anomalies = pd.concat([anomalies, view[view["écart_solde"] > 0.01], view[view["écart_paye_acompte"] > 0.005]]).drop_duplicates()
 
