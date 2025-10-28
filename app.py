@@ -3,6 +3,7 @@
 # - Payé = sum(Acompte 1..4) enforced on normalization and on add/edit
 # - Dashboard uses Payé for "Montant payé"
 # - Acomptes included in forms and export
+# - Dashboard: "Toutes les années" option and listing of filtered clients
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl, streamlit; optional: plotly
@@ -49,7 +50,7 @@ def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
 # =========================
-# Helpers (normalization / formatting)
+# Small helpers (normalization / formatting)
 # =========================
 def normalize_header_text(s: Any) -> str:
     if s is None:
@@ -852,21 +853,25 @@ with tabs[1]:
         years = []
         if "_Année_" in df_live_view.columns:
             try:
-                years = sorted([int(y) for y in pd.to_numeric(df_live_view["_Année_"], errors="coerce").dropna().unique().astype(int).tolist()])
+                years_vals = pd.to_numeric(df_live_view["_Année_"], errors="coerce").dropna().unique().astype(int).tolist()
+                years = sorted([int(y) for y in years_vals])
             except Exception:
                 years = []
 
         f1, f2, f3 = st.columns([1,1,1])
         sel_cat = f1.selectbox("Catégorie", options=[""]+cats, index=0, key=skey("dash","cat"))
         sel_sub = f2.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=skey("dash","sub"))
-        sel_year = f3.selectbox("Année", options=[""]+[str(y) for y in years], index=0, key=skey("dash","year"))
+        # Year select: include "Toutes les années" option
+        year_options = ["Toutes les années"] + [str(y) for y in years]
+        sel_year = f3.selectbox("Année", options=year_options, index=0, key=skey("dash","year"))
 
         view = df_live_view.copy()
         if sel_cat:
             view = view[view["Categories"].astype(str)==sel_cat]
         if sel_sub:
             view = view[view["Sous-categorie"].astype(str)==sel_sub]
-        if sel_year:
+        # Apply year filter only if a specific year is chosen (not "Toutes les années")
+        if sel_year and sel_year != "Toutes les années":
             view = view[view["_Année_"].astype(str)==sel_year]
 
         def safe_num(x):
@@ -888,7 +893,7 @@ with tabs[1]:
         view["_Acompte3_"] = view.get("Acompte 3", 0).apply(safe_num)
         view["_Acompte4_"] = view.get("Acompte 4", 0).apply(safe_num)
 
-        # Montant payé now taken from Payé column (which equals sum of acomptes on normalization / edit / add)
+        # Montant payé taken from Payé column (which equals sum of acomptes on normalization / edit / add)
         view["_Payé_num_"] = view.get("Payé", 0).apply(safe_num)
         total_honoraires = view["_Montant_num_"].sum()
         total_autres = view["_Autres_num_"].sum()
@@ -913,7 +918,7 @@ with tabs[1]:
         else:
             st.success("Solde enregistré et solde recalculé sont cohérents.")
 
-        # anomalies: where Payé != sum(acompte columns) or other conversion problems
+        # anomalies
         view["_Acomptes_sum_"] = view["_Acompte1_"] + view["_Acompte2_"] + view["_Acompte3_"] + view["_Acompte4_"]
         view["écart_paye_acompte"] = (view["_Payé_num_"] - view["_Acomptes_sum_"]).abs()
         view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - view["_Solde_calc_"]).abs()
@@ -929,6 +934,28 @@ with tabs[1]:
                                 "_Montant_num_","_Autres_num_","_Acomptes_sum_","_Payé_num_","_Solde_calc_","écart_solde","écart_paye_acompte"]
                 cols = [c for c in display_cols if c in anomalies.columns]
                 st.dataframe(anomalies[cols].reset_index(drop=True), use_container_width=True, height=300)
+
+        # ----- New: list clients matching the current filters -----
+        st.markdown("### Détails — clients correspondant aux filtres")
+        display_df = view.copy()
+        # Format date as string, format money columns for readability
+        if "Date" in display_df.columns:
+            try:
+                display_df["Date"] = pd.to_datetime(display_df["Date"], errors="coerce").dt.date.astype(str)
+            except Exception:
+                display_df["Date"] = display_df["Date"].astype(str)
+        money_cols = ["Montant honoraires (US $)","Autres frais (US $)","Payé","Solde","Acompte 1","Acompte 2","Acompte 3","Acompte 4"]
+        for mc in money_cols:
+            if mc in display_df.columns:
+                try:
+                    display_df[mc] = display_df[mc].apply(lambda x: _fmt_money(_to_num(x)))
+                except Exception:
+                    display_df[mc] = display_df[mc].astype(str)
+        # reset index for nicer display
+        try:
+            st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=360)
+        except Exception:
+            st.write("Impossible d'afficher la liste des clients (trop volumineuse). Utilisez l'export pour récupérer les données filtrées.")
 
 # ---- Analyses tab ----
 with tabs[2]:
@@ -1107,7 +1134,7 @@ with tabs[3]:
                             init_sub_index = ([""] + edit_sub_options).index(init_sub)
                         except Exception:
                             init_sub_index = 0
-                    e_sub = st.selectbox("Sous-catégorie", options=[""] + edit_sub_options, index=init_sub_index, key=skey("edit","sub"))
+                    e_sub = st.selectbox("Sous-categorie", options=[""] + edit_sub_options, index=init_sub_index, key=skey("edit","sub"))
                     edit_specific = get_sub_options_for(e_sub, visa_sub_options_map)
                     checkbox_options_edit = edit_specific if edit_specific else DEFAULT_FLAGS
                     ensure_flag_columns(df_live, checkbox_options_edit)
