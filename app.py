@@ -1,9 +1,10 @@
 # Visa Manager - app.py
-# Robust complete Streamlit app
-# - canonical Payé = sum(Acompte cols) and Solde = Montant + Autres - Payé
-# - dynamic detection of acomptes / montant / autres columns
-# - Dashboard: filters, smaller KPIs, debug panel
-# - Export: CSV, XLSX with Solde_formule column, XLSX with formulas for Payé & Solde
+# Final robust Streamlit app (modified)
+# - Always ignores source "Solde" column (renames to Solde_source and drops original)
+# - Recomputes Payé = sum(all detected Acompte columns)
+# - Computes Solde per row = Montant + Autres - sum(acompte cols)
+# - KPIs computed by robust column-wise aggregation (sum(Montant)+sum(Autres)-sum(all acomptes))
+# - Defensive parsing of monetary strings, detection of columns, debug panel, CSV/XLSX export (with Solde_formule and optional formulas)
 #
 # Usage: streamlit run app.py
 # Requires: pandas, streamlit, openpyxl
@@ -19,7 +20,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional: plotly
+# Optional: plotly for charts
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -27,7 +28,7 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# openpyxl for writing formulas
+# openpyxl for XLSX formula export
 try:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -58,7 +59,7 @@ def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
 # =========================
-# Helpers (normalization / formatting)
+# Helpers: normalization / formatting
 # =========================
 def normalize_header_text(s: Any) -> str:
     if s is None:
@@ -94,32 +95,40 @@ def canonical_key(s: Any) -> str:
     return s2
 
 def money_to_float(x: Any) -> float:
-    if pd.isna(x):
-        return 0.0
-    s = str(x).strip()
-    if s == "" or s in ("-", "—", "–", "NA", "N/A"):
-        return 0.0
-    s = re.sub(r"[^\d,.\-]", "", s)
-    if s == "":
-        return 0.0
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    else:
-        if "," in s and s.count(",") == 1:
-            if len(s.split(",")[-1]) == 2:
-                s = s.replace(",", ".")
+    # Robust money parser: handles spaces, non-breaking spaces, €, $, commas, dots, negatives and strange strings
+    try:
+        if pd.isna(x):
+            return 0.0
+        s = str(x).strip()
+        if s == "" or s in ("-", "—", "–", "NA", "N/A"):
+            return 0.0
+        # remove currency symbols and keep digits, separators and minus
+        s = s.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
+        s = re.sub(r"[^\d,.\-]", "", s)
+        if s == "":
+            return 0.0
+        # If both comma and dot present, infer decimal separator by last occurrence
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
             else:
                 s = s.replace(",", "")
         else:
-            s = s.replace(",", ".")
-    try:
+            # Only comma present: if comma looks like decimal (two digits after), treat as decimal separator
+            if "," in s and s.count(",") == 1 and "." not in s:
+                if len(s.split(",")[-1]) == 2:
+                    s = s.replace(",", ".")
+                else:
+                    s = s.replace(",", "")
+            else:
+                s = s.replace(",", ".")
+        s = s.strip()
+        if s in ("", "-"):
+            return 0.0
         return float(s)
     except Exception:
         try:
-            return float(re.sub(r"[^0-9.\-]", "", s))
+            return float(re.sub(r"[^0-9.\-]", "", str(x)))
         except Exception:
             return 0.0
 
@@ -179,7 +188,7 @@ NUMERIC_TARGETS = [
 ]
 
 def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
-    # Defensive: always return (DataFrame, mapping)
+    # Defensive mapping: returns (df, mapping)
     if not isinstance(df, pd.DataFrame):
         try:
             st.sidebar.warning("map_columns_heuristic: input is not a DataFrame — coercing to empty DataFrame.")
@@ -200,7 +209,6 @@ def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
         if mapped is None:
             mapped = normalize_header_text(c)
         mapping[c] = mapped
-    # ensure unique names
     new_names = {}
     seen = {}
     for orig, new in mapping.items():
@@ -355,7 +363,7 @@ def detect_acompte_columns(df: pd.DataFrame) -> List[str]:
         k = canonical_key(c)
         if "acompte" in k:
             cols.append(c)
-    # sort by numeric suffix if possible (Acompte 1..4)
+    # sort by numeric suffix if possible
     def sort_key(name):
         m = re.search(r"(\d+)", name)
         return int(m.group(1)) if m else 999
@@ -458,12 +466,14 @@ def _normalize_status(df: Any) -> pd.DataFrame:
     return df
 
 # =========================
-# normalize_clients_for_live (defensive)
+# normalize_clients_for_live (defensive, drops source Solde)
 # =========================
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
     """
     Coerce input to DataFrame, map headers, normalize numeric columns, ensure acomptes exist,
     compute Payé = sum(Acompte cols) and Solde = Montant + Autres - Payé.
+    If the input contains a "Solde" column it is renamed to "Solde_source" and dropped
+    so that the app always recalculates canonical Solde.
     """
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
@@ -484,6 +494,17 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
     except Exception:
         df_mapped = df_clients_raw.copy() if isinstance(df_clients_raw, pd.DataFrame) else pd.DataFrame()
 
+    # If user supplied a column "Solde", preserve as Solde_source then drop to force recalculation
+    if "Solde" in df_mapped.columns:
+        try:
+            df_mapped["Solde_source"] = df_mapped["Solde"].copy()
+        except Exception:
+            pass
+        try:
+            df_mapped = df_mapped.drop(columns=["Solde"])
+        except Exception:
+            pass
+
     if "Date" in df_mapped.columns:
         try:
             df_mapped["Date"] = pd.to_datetime(df_mapped["Date"], dayfirst=True, errors="coerce")
@@ -503,12 +524,12 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
                 except Exception:
                     pass
 
-    # Ensure acomptes exist (zeros if missing)
+    # Ensure acomptes exist
     for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
         if acc not in df.columns:
             df[acc] = 0.0
 
-    # Compute Payé from acomptes (dynamic)
+    # Compute Payé from detected acomptes
     acomptes_cols = detect_acompte_columns(df)
     if acomptes_cols:
         try:
@@ -516,11 +537,14 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         except Exception:
             df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x))
 
-    # Recompute Solde
+    # Recompute Solde canonical
     try:
         montant_col = detect_montant_column(df) or "Montant honoraires (US $)"
         autres_col = detect_autres_column(df) or "Autres frais (US $)"
-        df["Solde"] = df.get(montant_col, 0).apply(_to_num) + df.get(autres_col, 0).apply(_to_num) - df.get("Payé", 0).apply(_to_num)
+        df[montant_col] = df.get(montant_col, 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
+        df[autres_col] = df.get(autres_col, 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
+        df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
+        df["Solde"] = df[montant_col] + df[autres_col] - df["Payé"]
     except Exception:
         try:
             df["Solde"] = df.get("Solde", 0).apply(lambda x: _to_num(x))
@@ -550,25 +574,18 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
 # recalc_payments_and_solde (robust)
 # =========================
 def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Robust recalculation:
-    - detect acomptes columns dynamically (any column whose canonical key contains 'acompte')
-    - detect montant and autres columns dynamically
-    - compute Payé = sum(acomptes) and Solde = Montant + Autres - Payé
-    """
     if df is None or df.empty:
         return df
     out = df.copy()
 
     acomptes = detect_acompte_columns(out)
     if not acomptes:
-        # ensure standard acomptes exist
         for acc in ["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
             if acc not in out.columns:
                 out[acc] = 0.0
         acomptes = detect_acompte_columns(out)
 
-    # Cast acomptes numeric
+    # cast acomptes numeric
     for c in acomptes:
         try:
             out[c] = out[c].apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
@@ -587,18 +604,19 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
             except Exception:
                 out[c] = out[c].apply(lambda x: 0.0)
 
-    # compute Payé and Solde
+    # compute Payé as sum of acomptes (overwrite)
     try:
         out["Payé"] = out[acomptes].sum(axis=1).astype(float) if acomptes else out.get("Payé",0).apply(lambda x: _to_num(x))
     except Exception:
         out["Payé"] = out.get("Payé",0).apply(lambda x: _to_num(x))
 
+    # compute Solde canonical
     try:
         out["Solde"] = out[montant_col] + out[autres_col] - out["Payé"]
         out["Solde"] = out["Solde"].astype(float)
         out["Payé"] = out["Payé"].astype(float)
     except Exception:
-        out["Solde"] = out.get("Solde", 0).apply(lambda x: _to_num(x))
+        out["Solde"] = out.get("Solde",0).apply(lambda x: _to_num(x))
 
     return out
 
@@ -749,7 +767,6 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
             pass
         raw_vm = {}
         try:
-            # attempt to build a simple map Category -> [Subs]
             for _, row in df_visa_mapped.iterrows():
                 cat = str(row.get("Categories","")).strip()
                 sub = str(row.get("Sous-categorie","")).strip()
@@ -764,7 +781,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
         visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
         visa_categories = sorted(list(visa_map.keys()))
-        # build sub options map from boolean flags if present
+        # build sub options map from flags
         visa_sub_options_map = {}
         try:
             cols_to_skip = set(["Categories","Categorie","Sous-categorie"])
@@ -832,7 +849,7 @@ def unique_nonempty(series):
         out.append(s)
     return sorted(list(dict.fromkeys(out)))
 
-# Helper to build compact KPI HTML
+# KPI HTML small card
 def kpi_html(label: str, value: str, sub: str = "") -> str:
     html = f"""
     <div style="border:1px solid rgba(255,255,255,0.04); border-radius:6px; padding:8px 10px; margin:6px 4px;">
@@ -844,9 +861,8 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # =========================
-# Tabs: Files / Dashboard / Analyses / Gestion / Export
+# Tabs UI
 # =========================
-
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ / ✏️ / 🗑️ Gestion","💾 Export"])
 
 # ---- Files tab ----
@@ -932,9 +948,10 @@ with tabs[1]:
         if sel_year and sel_year != "Toutes les années":
             view = view[view["_Année_"].astype(str) == sel_year]
 
-        # Recalc canonical values on filtered view
+        # Force recalc on filtered view for canonical values
         view = recalc_payments_and_solde(view)
 
+        # KPI calculation: robust column-wise aggregation
         def safe_num(x):
             try:
                 return float(_to_num(x))
@@ -945,42 +962,41 @@ with tabs[1]:
         autres_col = detect_autres_column(view) or "Autres frais (US $)"
         acomptes_cols = detect_acompte_columns(view)
 
+        # numeric conversions and column aggregates
         view["_Montant_num_"] = view.get(montant_col, 0).apply(safe_num)
         view["_Autres_num_"] = view.get(autres_col, 0).apply(safe_num)
-        for i, c in enumerate(acomptes_cols):
-            view[f"_acompte_num_{i}"] = view.get(c, 0).apply(safe_num)
+
+        total_acomptes_sum = 0.0
         if acomptes_cols:
-            view["_Acomptes_sum_"] = view[[f"_acompte_num_{i}" for i in range(len(acomptes_cols))]].sum(axis=1)
-        else:
-            view["_Acomptes_sum_"] = 0.0
-        view["_Payé_num_"] = view.get("Payé", 0).apply(safe_num)
-        canonical_solde_sum = (view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"]).sum()
+            for c in acomptes_cols:
+                view[f"_ac_{c}"] = view.get(c, 0).apply(safe_num)
+                total_acomptes_sum += float(view[f"_ac_{c}"].sum())
 
-        total_honoraires = view["_Montant_num_"].sum()
-        total_autres = view["_Autres_num_"].sum()
-        total_facture_calc = total_honoraires + total_autres
-        total_paye = view["_Payé_num_"].sum()
-        total_acomptes_sum = view["_Acomptes_sum_"].sum()
-        total_solde_recorded = view.get("Solde", 0).apply(safe_num).sum()
+        total_honoraires = float(view["_Montant_num_"].sum())
+        total_autres = float(view["_Autres_num_"].sum())
+        total_paye = float(total_acomptes_sum)
+        canonical_solde_sum = float(total_honoraires + total_autres - total_paye)
+        total_solde_recorded = float(view.get("Solde", 0).apply(safe_num).sum())
 
+        # KPIs
         cols_k = st.columns(4)
         cols_k[0].markdown(kpi_html("Dossiers (vue)", f"{len(view):,}"), unsafe_allow_html=True)
         cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
         cols_k[2].markdown(kpi_html("Autres frais", _fmt_money(total_autres)), unsafe_allow_html=True)
-        cols_k[3].markdown(kpi_html("Total facturé (recalc)", _fmt_money(total_facture_calc)), unsafe_allow_html=True)
+        cols_k[3].markdown(kpi_html("Total facturé (recalc)", _fmt_money(total_honoraires + total_autres)), unsafe_allow_html=True)
 
         st.markdown("---")
         cols_k2 = st.columns(2)
-        cols_k2[0].markdown(kpi_html("Montant payé (Payé = somme acomptes)", _fmt_money(total_paye)), unsafe_allow_html=True)
+        cols_k2[0].markdown(kpi_html("Montant payé (somme acomptes)", _fmt_money(total_paye)), unsafe_allow_html=True)
         cols_k2[1].markdown(kpi_html("Solde total (recalc)", _fmt_money(canonical_solde_sum)), unsafe_allow_html=True)
 
-        if abs(canonical_solde_sum - total_solde_recorded) > 0.005 or abs(total_paye - total_acomptes_sum) > 0.005:
+        # Diagnostics if mismatch
+        if abs(canonical_solde_sum - total_solde_recorded) > 0.005 or abs(total_paye - total_acomptes_sum) > 0.005 if 'total_acomptes_sum' in locals() else False:
             st.warning("Diagnostics : écart détecté entre valeurs recalculées et colonnes enregistrées.")
             st.write({
                 "total_honoraires": float(total_honoraires),
                 "total_autres": float(total_autres),
-                "total_paye (col Payé)": float(total_paye),
-                "total_acomptes_sum (sum Acompte cols)": float(total_acomptes_sum),
+                "total_paye (sum acomptes cols)": float(total_paye),
                 "canonical_solde_sum (calc)": float(canonical_solde_sum),
                 "total_solde_recorded (col Solde)": float(total_solde_recorded),
                 "rows_shown": int(len(view)),
@@ -989,7 +1005,8 @@ with tabs[1]:
                 "autres_column": autres_col
             })
 
-        view["_Solde_calc_row_"] = view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"]
+        # Per-row debug: show rows where stored Solde differs from calc (should be none if Solde was removed & recalc forces canonical)
+        view["_Solde_calc_row_"] = view["_Montant_num_"] + view["_Autres_num_"] - view.get("Payé", view.get("_Acomptes_sum_", 0)).apply(safe_num)
         mismatches = view[(view.get("Solde",0).apply(safe_num) - view["_Solde_calc_row_"]).abs() > 0.005]
         with st.expander("DEBUG — Lignes où Solde != Montant + Autres − somme(Acomptes)"):
             if mismatches.empty:
@@ -1277,10 +1294,9 @@ with tabs[4]:
             csv_bytes = df_live.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
 
-        # XLSX export with Solde_formule numeric
+        # XLSX export with numeric Solde_formule
         with col2:
             df_for_export = df_live.copy()
-            # compute numeric parts
             try:
                 montant_col = detect_montant_column(df_for_export) or "Montant honoraires (US $)"
                 autres_col = detect_autres_column(df_for_export) or "Autres frais (US $)"
@@ -1296,7 +1312,6 @@ with tabs[4]:
                 df_for_export["Solde_formule"] = df_for_export["_Montant_num_"] + df_for_export["_Autres_num_"] - df_for_export["_Acomptes_sum_"]
             except Exception:
                 df_for_export["Solde_formule"] = df_for_export.get("Solde",0).apply(lambda x: _to_num(x))
-            # drop helper cols
             drop_cols = [c for c in df_for_export.columns if c.startswith("_num_") or c in ["_Montant_num_","_Autres_num_","_Acomptes_sum_"]]
             try:
                 df_export_final = df_for_export.drop(columns=drop_cols)
