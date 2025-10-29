@@ -1,7 +1,9 @@
 # Visa Manager - app.py
-# Final updated app with corrections applied to Dashboard solde calculation,
-# Payé enforced from Acompte 1..4, smaller KPI cards, Visa filter included,
-# and recalc_payments_and_solde applied before filtering to ensure canonical totals.
+# Final updated app with:
+# - Payé enforced as sum(Acompte 1..4) and Solde recalculated in memory
+# - Dashboard uses canonical totals and includes Visa filter
+# - Export XLSX original now includes an extra column "Solde_formule" (numeric calculated)
+# - Also provides an "Export XLSX (with formulas Payé & Solde)" which writes Excel formulas
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl, streamlit; optional: plotly
@@ -24,6 +26,10 @@ try:
 except Exception:
     px = None
     HAS_PLOTLY = False
+
+# Needed for writing formulas into XLSX
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 # =========================
 # Configuration
@@ -1288,12 +1294,91 @@ with tabs[4]:
         st.info("Aucune donnée à exporter.")
     else:
         st.write(f"Vue en mémoire: {df_live.shape[0]} lignes, {df_live.shape[1]} colonnes")
+
+        # CSV export (unchanged)
         col1, col2 = st.columns(2)
         with col1:
             csv_bytes = df_live.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
+
+        # XLSX export (original button) — now includes Solde_formule numeric column
         with col2:
+            # Prepare a copy and compute Solde_formule numeric column
+            df_for_export = df_live.copy()
+            # Defensive numeric conversions
+            df_for_export["_Montant_num_"] = df_for_export.get("Montant honoraires (US $)", 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
+            df_for_export["_Autres_num_"] = df_for_export.get("Autres frais (US $)", 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
+            for acc in ["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
+                if acc not in df_for_export.columns:
+                    df_for_export[acc] = 0.0
+                df_for_export[f"_num_{acc}"] = df_for_export.get(acc, 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
+
+            # Compute Payé_formule (sum of acomptes) and Solde_formule = Montant + Autres - sum(ac)
+            df_for_export["_Acomptes_sum_"] = df_for_export[["_num_Acompte 1","_num_Acompte 2","_num_Acompte 3","_num_Acompte 4"]].sum(axis=1)
+            df_for_export["Solde_formule"] = df_for_export["_Montant_num_"] + df_for_export["_Autres_num_"] - df_for_export["_Acomptes_sum_"]
+
+            # Drop helper numeric columns before export
+            drop_cols = [c for c in df_for_export.columns if c.startswith("_num_") or c in ["_Montant_num_","_Autres_num_","_Acomptes_sum_"]]
+            try:
+                df_export_final = df_for_export.drop(columns=drop_cols)
+            except Exception:
+                df_export_final = df_for_export.copy()
+
+            # Write to Excel in memory
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df_export_final.to_excel(writer, index=False, sheet_name="Clients")
+            out_bytes = buf.getvalue()
+            st.download_button("⬇️ Export XLSX (avec colonne Solde_formule)", data=out_bytes, file_name="Clients_export_with_Solde_formule.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        # Additional button: XLSX with formulas written into Payé and Solde (keeps Solde also as fixed value in original column)
+        st.markdown("### Option avancée : XLSX avec formules (Payé & Solde)")
+        if st.button("Générer XLSX avec formules Payé & Solde"):
+            # 1) Create initial Excel from df_live
+            buf2 = BytesIO()
+            with pd.ExcelWriter(buf2, engine="openpyxl") as writer:
                 df_live.to_excel(writer, index=False, sheet_name="Clients")
-            st.download_button("⬇️ Export XLSX", data=buf.getvalue(), file_name="Clients_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            wb = load_workbook(filename=BytesIO(buf2.getvalue()))
+            if "Clients" not in wb.sheetnames:
+                st.error("Feuille 'Clients' introuvable dans le workbook généré.")
+            else:
+                ws = wb["Clients"]
+                headers = [cell.value for cell in ws[1]]
+                def col_letter_for(name: str):
+                    try:
+                        idx = headers.index(name) + 1
+                        return get_column_letter(idx)
+                    except ValueError:
+                        return None
+
+                col_paye = col_letter_for("Payé")
+                col_solde = col_letter_for("Solde")
+                col_montant = col_letter_for("Montant honoraires (US $)")
+                col_autres = col_letter_for("Autres frais (US $)")
+                col_a1 = col_letter_for("Acompte 1")
+                col_a2 = col_letter_for("Acompte 2")
+                col_a3 = col_letter_for("Acompte 3")
+                col_a4 = col_letter_for("Acompte 4")
+
+                max_row = ws.max_row
+                # Write formula for Payé column as sum of the 4 acomptes (if columns exist)
+                if col_paye is not None and any([col_a1, col_a2, col_a3, col_a4]):
+                    for r in range(2, max_row+1):
+                        parts = []
+                        for c in (col_a1, col_a2, col_a3, col_a4):
+                            if c:
+                                parts.append(f"{c}{r}")
+                        if parts:
+                            formula = "=IFERROR(" + "+".join(parts) + ",0)"
+                            ws[f"{col_paye}{r}"] = formula
+                # Write formula for Solde column: Montant + Autres - Payé (if all required cols exist)
+                if col_solde is not None and col_montant is not None and col_autres is not None and col_paye is not None:
+                    for r in range(2, max_row+1):
+                        formula = f"=IFERROR({col_montant}{r}+{col_autres}{r}-{col_paye}{r},0)"
+                        ws[f"{col_solde}{r}"] = formula
+
+                # Save workbook to buffer and offer it for download
+                out_buf = BytesIO()
+                wb.save(out_buf)
+                out_bytes2 = out_buf.getvalue()
+                st.download_button("⬇️ Export XLSX (avec formules Payé & Solde)", data=out_bytes2, file_name="Clients_export_with_formulas.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
