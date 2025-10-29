@@ -1,6 +1,7 @@
 # Visa Manager - app.py
-# Updated: smaller KPI cards rendered in columns, canonical solde total used,
-# Visa filter included (uses column "Visa").
+# Final updated app with corrections applied to Dashboard solde calculation,
+# Payé enforced from Acompte 1..4, smaller KPI cards, Visa filter included,
+# and recalc_payments_and_solde applied before filtering to ensure canonical totals.
 #
 # Usage: streamlit run app.py
 # Requirements: pandas, openpyxl, streamlit; optional: plotly
@@ -918,26 +919,30 @@ with tabs[1]:
         year_options = ["Toutes les années"] + [str(y) for y in years]
         sel_year = f4.selectbox("Année", options=year_options, index=0, key=skey("dash","year"))
 
+        # Start from a canonical copy then apply filters
         view = df_live_view.copy()
+        # (recalc already applied to df_live_view above)
         if sel_cat:
-            view = view[view["Categories"].astype(str)==sel_cat]
+            view = view[view["Categories"].astype(str) == sel_cat]
         if sel_sub:
-            view = view[view["Sous-categorie"].astype(str)==sel_sub]
+            view = view[view["Sous-categorie"].astype(str) == sel_sub]
         if sel_visa:
-            view = view[view["Visa"].astype(str)==sel_visa]
+            view = view[view["Visa"].astype(str) == sel_visa]
         if sel_year and sel_year != "Toutes les années":
-            view = view[view["_Année_"].astype(str)==sel_year]
+            view = view[view["_Année_"].astype(str) == sel_year]
 
+        # Defensive numeric conversions
         def safe_num(x):
             try:
-                return _to_num(x)
+                return float(_to_num(x))
             except Exception:
                 return 0.0
 
-        # Numeric prepared fields
+        # Numeric prepared fields (guaranteed numeric)
         view["_Montant_num_"] = view.get("Montant honoraires (US $)", 0).apply(safe_num)
         view["_Autres_num_"] = view.get("Autres frais (US $)", 0).apply(safe_num)
-        # Ensure acomptes present
+
+        # Ensure acomptes present and numeric
         for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
             if acc not in view.columns:
                 view[acc] = 0.0
@@ -945,7 +950,8 @@ with tabs[1]:
         view["_Acompte2_"] = view.get("Acompte 2", 0).apply(safe_num)
         view["_Acompte3_"] = view.get("Acompte 3", 0).apply(safe_num)
         view["_Acompte4_"] = view.get("Acompte 4", 0).apply(safe_num)
-        # Payé taken from canonical column
+
+        # Payé taken from canonical column (recalc_payments_and_solde enforced it)
         view["_Payé_num_"] = view.get("Payé", 0).apply(safe_num)
 
         # Totals: compute canonical totals from numeric columns
@@ -953,8 +959,13 @@ with tabs[1]:
         total_autres = view["_Autres_num_"].sum()
         total_facture_calc = total_honoraires + total_autres
         total_paye = view["_Payé_num_"].sum()
+
         # canonical solde computed from numeric columns (reliable)
         canonical_solde_sum = (view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"]).sum()
+
+        # For transparency compute acomptes sum
+        view["_Acomptes_sum_row_"] = view[["_Acompte1_","_Acompte2_","_Acompte3_","_Acompte4_"]].sum(axis=1)
+        total_acomptes_sum = view["_Acomptes_sum_row_"].sum()
 
         # Render KPIs in columns (compact)
         cols_k = st.columns(4)
@@ -970,14 +981,22 @@ with tabs[1]:
 
         # Check consistency vs stored Solde column
         total_solde_recorded = view.get("Solde", 0).apply(safe_num).sum()
-        if abs(canonical_solde_sum - total_solde_recorded) > 0.005:
-            st.warning(f"Attention : somme des soldes recalculés ({_fmt_money(canonical_solde_sum)}) diffère du total Solde stocké ({_fmt_money(total_solde_recorded)}). Le KPI affiche le solde recalculé.")
+        if abs(canonical_solde_sum - total_solde_recorded) > 0.005 or abs(total_paye - total_acomptes_sum) > 0.005:
+            st.warning("Diagnostics (détail des totaux) :")
+            st.write({
+                "total_honoraires": float(total_honoraires),
+                "total_autres": float(total_autres),
+                "total_paye (col Payé)": float(total_paye),
+                "total_acomptes_sum (sum Acompte1..4)": float(total_acomptes_sum),
+                "canonical_solde_sum (calc)": float(canonical_solde_sum),
+                "total_solde_recorded (col Solde)": float(total_solde_recorded),
+                "rows_shown": int(len(view))
+            })
         else:
             st.success("Solde stocké et solde recalculé sont cohérents.")
 
         # anomalies and checks
-        view["_Acomptes_sum_"] = view["_Acompte1_"] + view["_Acompte2_"] + view["_Acompte3_"] + view["_Acompte4_"]
-        view["écart_paye_acompte"] = (view["_Payé_num_"] - view["_Acomptes_sum_"]).abs()
+        view["écart_paye_acompte"] = (view["_Payé_num_"] - view["_Acomptes_sum_row_"]).abs()
         view["écart_solde"] = (view.get("Solde", 0).apply(safe_num) - (view["_Montant_num_"] + view["_Autres_num_"] - view["_Payé_num_"])).abs()
         anomalies = view[(view["_Montant_num_"]==0) & (view.get("Montant honoraires (US $)","")!="")]
         anomalies = pd.concat([anomalies, view[view["écart_solde"] > 0.01], view[view["écart_paye_acompte"] > 0.005]]).drop_duplicates()
@@ -988,7 +1007,7 @@ with tabs[1]:
             else:
                 display_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie","Visa",
                                 "Montant honoraires (US $)","Autres frais (US $)","Acompte 1","Acompte 2","Acompte 3","Acompte 4","Payé","Solde",
-                                "_Montant_num_","_Autres_num_","_Acomptes_sum_","_Payé_num_","_Solde_recalc_check_","écart_solde","écart_paye_acompte"]
+                                "_Montant_num_","_Autres_num_","_Acomptes_sum_row_","_Payé_num_","écart_solde","écart_paye_acompte"]
                 cols = [c for c in display_cols if c in anomalies.columns]
                 st.dataframe(anomalies[cols].reset_index(drop=True), use_container_width=True, height=300)
 
