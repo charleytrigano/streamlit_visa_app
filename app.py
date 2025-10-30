@@ -1,9 +1,9 @@
 # Visa Manager - app.py
-# Final robust Streamlit app (modified)
+# Robust Streamlit app with dedicated "➕ Ajouter" tab for adding new clients.
 # - Always ignores source "Solde" column (renames to Solde_source and drops original)
 # - Recomputes Payé = sum(all detected Acompte columns)
 # - Computes Solde per row = Montant + Autres - sum(acompte cols)
-# - KPIs computed by robust column-wise aggregation (sum(Montant)+sum(Autres)-sum(all acomptes))
+# - KPIs computed by robust column-wise aggregation
 # - Defensive parsing of monetary strings, detection of columns, debug panel, CSV/XLSX export (with Solde_formule and optional formulas)
 #
 # Usage: streamlit run app.py
@@ -95,26 +95,23 @@ def canonical_key(s: Any) -> str:
     return s2
 
 def money_to_float(x: Any) -> float:
-    # Robust money parser: handles spaces, non-breaking spaces, €, $, commas, dots, negatives and strange strings
+    # Robust money parser: handles spaces, NBSP, €, $, commas, dots, negatives and strange strings
     try:
         if pd.isna(x):
             return 0.0
         s = str(x).strip()
         if s == "" or s in ("-", "—", "–", "NA", "N/A"):
             return 0.0
-        # remove currency symbols and keep digits, separators and minus
         s = s.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
         s = re.sub(r"[^\d,.\-]", "", s)
         if s == "":
             return 0.0
-        # If both comma and dot present, infer decimal separator by last occurrence
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."):
                 s = s.replace(".", "").replace(",", ".")
             else:
                 s = s.replace(",", "")
         else:
-            # Only comma present: if comma looks like decimal (two digits after), treat as decimal separator
             if "," in s and s.count(",") == 1 and "." not in s:
                 if len(s.split(",")[-1]) == 2:
                     s = s.replace(",", ".")
@@ -188,7 +185,6 @@ NUMERIC_TARGETS = [
 ]
 
 def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
-    # Defensive mapping: returns (df, mapping)
     if not isinstance(df, pd.DataFrame):
         try:
             st.sidebar.warning("map_columns_heuristic: input is not a DataFrame — coercing to empty DataFrame.")
@@ -363,7 +359,6 @@ def detect_acompte_columns(df: pd.DataFrame) -> List[str]:
         k = canonical_key(c)
         if "acompte" in k:
             cols.append(c)
-    # sort by numeric suffix if possible
     def sort_key(name):
         m = re.search(r"(\d+)", name)
         return int(m.group(1)) if m else 999
@@ -585,7 +580,6 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
                 out[acc] = 0.0
         acomptes = detect_acompte_columns(out)
 
-    # cast acomptes numeric
     for c in acomptes:
         try:
             out[c] = out[c].apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
@@ -604,13 +598,11 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
             except Exception:
                 out[c] = out[c].apply(lambda x: 0.0)
 
-    # compute Payé as sum of acomptes (overwrite)
     try:
         out["Payé"] = out[acomptes].sum(axis=1).astype(float) if acomptes else out.get("Payé",0).apply(lambda x: _to_num(x))
     except Exception:
         out["Payé"] = out.get("Payé",0).apply(lambda x: _to_num(x))
 
-    # compute Solde canonical
     try:
         out["Solde"] = out[montant_col] + out[autres_col] - out["Payé"]
         out["Solde"] = out["Solde"].astype(float)
@@ -863,7 +855,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
 # =========================
 # Tabs UI
 # =========================
-tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ / ✏️ / 🗑️ Gestion","💾 Export"])
+tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
 # ---- Files tab ----
 with tabs[0]:
@@ -948,10 +940,8 @@ with tabs[1]:
         if sel_year and sel_year != "Toutes les années":
             view = view[view["_Année_"].astype(str) == sel_year]
 
-        # Force recalc on filtered view for canonical values
         view = recalc_payments_and_solde(view)
 
-        # KPI calculation: robust column-wise aggregation
         def safe_num(x):
             try:
                 return float(_to_num(x))
@@ -962,7 +952,6 @@ with tabs[1]:
         autres_col = detect_autres_column(view) or "Autres frais (US $)"
         acomptes_cols = detect_acompte_columns(view)
 
-        # numeric conversions and column aggregates
         view["_Montant_num_"] = view.get(montant_col, 0).apply(safe_num)
         view["_Autres_num_"] = view.get(autres_col, 0).apply(safe_num)
 
@@ -978,7 +967,6 @@ with tabs[1]:
         canonical_solde_sum = float(total_honoraires + total_autres - total_paye)
         total_solde_recorded = float(view.get("Solde", 0).apply(safe_num).sum())
 
-        # KPIs
         cols_k = st.columns(4)
         cols_k[0].markdown(kpi_html("Dossiers (vue)", f"{len(view):,}"), unsafe_allow_html=True)
         cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
@@ -990,22 +978,6 @@ with tabs[1]:
         cols_k2[0].markdown(kpi_html("Montant payé (somme acomptes)", _fmt_money(total_paye)), unsafe_allow_html=True)
         cols_k2[1].markdown(kpi_html("Solde total (recalc)", _fmt_money(canonical_solde_sum)), unsafe_allow_html=True)
 
-        # Diagnostics if mismatch
-        if abs(canonical_solde_sum - total_solde_recorded) > 0.005 or abs(total_paye - total_acomptes_sum) > 0.005 if 'total_acomptes_sum' in locals() else False:
-            st.warning("Diagnostics : écart détecté entre valeurs recalculées et colonnes enregistrées.")
-            st.write({
-                "total_honoraires": float(total_honoraires),
-                "total_autres": float(total_autres),
-                "total_paye (sum acomptes cols)": float(total_paye),
-                "canonical_solde_sum (calc)": float(canonical_solde_sum),
-                "total_solde_recorded (col Solde)": float(total_solde_recorded),
-                "rows_shown": int(len(view)),
-                "acompte_columns_detected": acomptes_cols,
-                "montant_column": montant_col,
-                "autres_column": autres_col
-            })
-
-        # Per-row debug: show rows where stored Solde differs from calc (should be none if Solde was removed & recalc forces canonical)
         view["_Solde_calc_row_"] = view["_Montant_num_"] + view["_Autres_num_"] - view.get("Payé", view.get("_Acomptes_sum_", 0)).apply(safe_num)
         mismatches = view[(view.get("Solde",0).apply(safe_num) - view["_Solde_calc_row_"]).abs() > 0.005]
         with st.expander("DEBUG — Lignes où Solde != Montant + Autres − somme(Acomptes)"):
@@ -1024,7 +996,6 @@ with tabs[1]:
                 st.dataframe(mshow[disp_cols + ["_acomptes_raw_concat_"]].head(200), use_container_width=True, height=360)
                 st.markdown("Téléchargez la vue filtrée si vous voulez que j'analyse plus en détail (onglet Export).")
 
-        # Display table
         st.markdown("### Détails — clients correspondant aux filtres")
         display_df = view.copy()
         if "Date" in display_df.columns:
@@ -1044,27 +1015,11 @@ with tabs[1]:
         except Exception:
             st.write("Impossible d'afficher la liste des clients (trop volumineuse). Utilisez l'export.")
 
-# ---- Analyses tab ----
-with tabs[2]:
-    st.subheader("📈 Analyses")
-    st.info("Graphiques et analyses (basics).")
-    df_ = _get_df_live()
-    if isinstance(df_, pd.DataFrame) and not df_.empty and "Categories" in df_.columns:
-        cat_counts = df_["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
-        if HAS_PLOTLY and px is not None:
-            fig = px.pie(cat_counts, names="Categorie", values="Nombre", hole=0.4, title="Répartition par catégorie")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
-
-# ---- Gestion tab (Add / Edit / Delete) ----
+# ---- Add tab (new dedicated simple form) ----
 with tabs[3]:
-    st.subheader("➕ / ✏️ / 🗑️ Gestion")
+    st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live()
-    for c in COLS_CLIENTS:
-        if c not in df_live.columns:
-            df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
-
+    # Prepare category options
     if visa_categories:
         categories_options = visa_categories
     else:
@@ -1074,21 +1029,24 @@ with tabs[3]:
         else:
             categories_options = []
 
-    st.markdown("### Ajouter un dossier")
-    with st.form(key=skey("form_add")):
+    st.write("Formulaire d'ajout rapide — les champs numeric acceptent formats '2 500,00 €' ou '2500'.")
+
+    with st.form(key=skey("form_add_tab")):
+        # Row 1
         r1c1, r1c2, r1c3 = st.columns([1.4,2.2,0.8])
         with r1c1:
-            add_dossier = st.text_input("Dossier N", value="", placeholder="Ex: D12345", key=skey("add","dossier"))
+            add_dossier = st.text_input("Dossier N", value="", placeholder="Ex: D12345", key=skey("addtab","dossier"))
         with r1c2:
-            add_nom = st.text_input("Nom", value="", placeholder="Nom du client", key=skey("add","nom"))
+            add_nom = st.text_input("Nom", value="", placeholder="Nom du client", key=skey("addtab","nom"))
         with r1c3:
             next_id = get_next_client_id(df_live)
             st.markdown(f"**ID_Client**\n{next_id}")
 
-        r2c1, r2c2, r2c3 = st.columns([1.4,1.8,2.2])
+        # Row 2: category/sub
+        r2c1, r2c2 = st.columns([1.4,2.8])
         with r2c1:
             categories_local = [""] + [c.strip() for c in categories_options]
-            add_cat = st.selectbox("Catégorie", options=categories_local, index=0, key=skey("add","cat"))
+            add_cat = st.selectbox("Catégorie", options=categories_local, index=0, key=skey("addtab","cat"))
         with r2c2:
             add_sub_options = []
             if isinstance(add_cat, str) and add_cat.strip():
@@ -1099,41 +1057,32 @@ with tabs[3]:
                     if add_cat in visa_map:
                         add_sub_options = visa_map.get(add_cat, [])[:]
             if not add_sub_options:
-                add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
-            default_sub_index = 1 if add_sub_options else 0
-            add_sub = st.selectbox("Sous-catégorie", options=[""] + add_sub_options, index=default_sub_index if default_sub_index < len([""]+add_sub_options) else 0, key=skey("add","sub"))
-        with r2c3:
-            specific_options = []
-            try:
-                specific_options = get_sub_options_for(add_sub, visa_sub_options_map)
-            except Exception:
-                specific_options = []
-            checkbox_options = specific_options if specific_options else DEFAULT_FLAGS
-            cols_chk = st.columns(2)
-            add_flags_state = {}
-            for i, opt in enumerate(checkbox_options):
-                col_i = cols_chk[i % 2]
-                k = skey("add","flag", re.sub(r"\s+","_", opt))
-                add_flags_state[opt] = col_i.checkbox(opt, value=False, key=k)
+                try:
+                    add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
+                except Exception:
+                    add_sub_options = []
+            add_sub = st.selectbox("Sous-catégorie", options=[""] + add_sub_options, index=0, key=skey("addtab","sub"))
 
+        # Row 3: date / visa / montant
         r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
         with r3c1:
-            add_date = st.date_input("Date", value=date.today(), key=skey("add","date"))
+            add_date = st.date_input("Date", value=date.today(), key=skey("addtab","date"))
         with r3c2:
-            add_visa = st.text_input("Visa", value="", key=skey("add","visa"))
+            add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
         with r3c3:
-            add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("add","montant"))
+            add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
 
+        # Row 4: autres / acomptes
         r4c1, r4c2 = st.columns([1.6,2.4])
         with r4c1:
-            add_autres = st.text_input("Autres frais (US $)", value="0", key=skey("add","autres"))
+            add_autres = st.text_input("Autres frais (US $)", value="0", key=skey("addtab","autres"))
         with r4c2:
-            a1 = st.text_input("Acompte 1", value="0", key=skey("add","ac1"))
-            a2 = st.text_input("Acompte 2", value="0", key=skey("add","ac2"))
-            a3 = st.text_input("Acompte 3", value="0", key=skey("add","ac3"))
-            a4 = st.text_input("Acompte 4", value="0", key=skey("add","ac4"))
+            a1 = st.text_input("Acompte 1", value="0", key=skey("addtab","ac1"))
+            a2 = st.text_input("Acompte 2", value="0", key=skey("addtab","ac2"))
+            a3 = st.text_input("Acompte 3", value="0", key=skey("addtab","ac3"))
+            a4 = st.text_input("Acompte 4", value="0", key=skey("addtab","ac4"))
 
-        add_comments = st.text_area("Commentaires", value="", key=skey("add","comments"))
+        add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
 
         submitted = st.form_submit_button("Ajouter")
         if submitted:
@@ -1156,13 +1105,10 @@ with tabs[3]:
                 new_row["Payé"] = paid_sum
                 new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - paid_sum
                 new_row["Commentaires"] = add_comments
-                flags_to_create = list(add_flags_state.keys())
+                flags_to_create = DEFAULT_FLAGS  # basic flags presence
                 ensure_flag_columns(df_live, flags_to_create)
-                for opt, val in add_flags_state.items():
-                    new_row[opt] = 1 if val else 0
-                for acc in ["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
-                    if acc not in df_live.columns:
-                        df_live[acc] = 0.0
+                for opt in flags_to_create:
+                    new_row[opt] = 0
                 df_live = df_live.append(new_row, ignore_index=True)
                 df_live = recalc_payments_and_solde(df_live)
                 _set_df_live(df_live)
@@ -1170,33 +1116,23 @@ with tabs[3]:
             except Exception as e:
                 st.error(f"Erreur ajout: {e}")
 
-    st.markdown("---")
-    st.markdown("### Modifier un dossier")
+# ---- Gestion tab (modify / delete only) ----
+with tabs[4]:
+    st.subheader("✏️ / 🗑️ Gestion — Modifier / Supprimer")
+    df_live = _get_df_live()
+    for c in COLS_CLIENTS:
+        if c not in df_live.columns:
+            df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
+
     if df_live is None or df_live.empty:
-        st.info("Aucun dossier à modifier.")
+        st.info("Aucun dossier à modifier ou supprimer.")
     else:
         choices = [f"{i} | {df_live.at[i,'Dossier N'] if 'Dossier N' in df_live.columns else ''} | {df_live.at[i,'Nom'] if 'Nom' in df_live.columns else ''}" for i in range(len(df_live))]
-        sel = st.selectbox("Sélectionner ligne", options=[""]+choices, key=skey("edit","select"))
+        sel = st.selectbox("Sélectionner ligne à modifier", options=[""]+choices, key=skey("edit","select"))
         if sel:
             idx = int(sel.split("|")[0].strip())
             row = df_live.loc[idx].copy()
-            edit_cat_options = [""] + [c.strip() for c in categories_options]
-            init_cat = str(row.get("Categories","")).strip()
-            try:
-                init_cat_index = edit_cat_options.index(init_cat)
-            except Exception:
-                init_cat_index = 0
-            e_cat_sel = st.selectbox("Categories (réactif)", options=edit_cat_options, index=init_cat_index, key=skey("edit","cat_sel"))
-            edit_sub_options = []
-            if isinstance(e_cat_sel, str) and e_cat_sel.strip():
-                cat_key = canonical_key(e_cat_sel)
-                if cat_key in visa_map_norm:
-                    edit_sub_options = visa_map_norm.get(cat_key, [])[:]
-                else:
-                    if e_cat_sel in visa_map:
-                        edit_sub_options = visa_map.get(e_cat_sel, [])[:]
-            if not edit_sub_options:
-                edit_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
+            st.write("Modifier la ligne sélectionnée :")
             with st.form(key=skey("form_edit")):
                 ecol1, ecol2 = st.columns(2)
                 with ecol1:
@@ -1205,26 +1141,8 @@ with tabs[3]:
                     e_nom = st.text_input("Nom", value=str(row.get("Nom","")), key=skey("edit","nom"))
                 with ecol2:
                     e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
-                    st.markdown(f"Category choisie: **{e_cat_sel}**")
-                    init_sub = str(row.get("Sous-categorie","")).strip()
-                    if init_sub == "" and edit_sub_options:
-                        init_sub_index = 1
-                    else:
-                        try:
-                            init_sub_index = ([""] + edit_sub_options).index(init_sub)
-                        except Exception:
-                            init_sub_index = 0
-                    e_sub = st.selectbox("Sous-catégorie", options=[""] + edit_sub_options, index=init_sub_index, key=skey("edit","sub"))
-                    edit_specific = get_sub_options_for(e_sub, visa_sub_options_map)
-                    checkbox_options_edit = edit_specific if edit_specific else DEFAULT_FLAGS
-                    ensure_flag_columns(df_live, checkbox_options_edit)
-                    cols_chk = st.columns(2)
-                    edit_flags_state = {}
-                    for i, opt in enumerate(checkbox_options_edit):
-                        col_i = cols_chk[i % 2]
-                        initial_val = True if (opt in df_live.columns and _to_num(row.get(opt, 0))>0) else False
-                        k = skey("edit","flag", re.sub(r"\s+","_", opt), str(idx))
-                        edit_flags_state[opt] = col_i.checkbox(opt, value=initial_val, key=k)
+                    e_cat = st.text_input("Categorie", value=str(row.get("Categories","")), key=skey("edit","cat"))
+                    e_sub = st.text_input("Sous-categorie", value=str(row.get("Sous-categorie","")), key=skey("edit","sub"))
                 e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa"))
                 e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
                 e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)",0)), key=skey("edit","autres"))
@@ -1239,8 +1157,8 @@ with tabs[3]:
                         df_live.at[idx, "Dossier N"] = e_dossier
                         df_live.at[idx, "Nom"] = e_nom
                         df_live.at[idx, "Date"] = pd.to_datetime(e_date)
-                        df_live.at[idx, "Categories"] = e_cat_sel.strip() if isinstance(e_cat_sel,str) else e_cat_sel
-                        df_live.at[idx, "Sous-categorie"] = e_sub.strip() if isinstance(e_sub,str) else e_sub
+                        df_live.at[idx, "Categories"] = e_cat
+                        df_live.at[idx, "Sous-categorie"] = e_sub
                         df_live.at[idx, "Visa"] = e_visa
                         df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
                         df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres)
@@ -1248,13 +1166,8 @@ with tabs[3]:
                         df_live.at[idx, "Acompte 2"] = money_to_float(e_ac2)
                         df_live.at[idx, "Acompte 3"] = money_to_float(e_ac3)
                         df_live.at[idx, "Acompte 4"] = money_to_float(e_ac4)
-                        for acc in ["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
-                            if acc not in df_live.columns:
-                                df_live[acc] = 0.0
                         df_live = recalc_payments_and_solde(df_live)
                         df_live.at[idx, "Commentaires"] = e_comments
-                        for opt, val in edit_flags_state.items():
-                            df_live.at[idx, opt] = 1 if val else 0
                         _set_df_live(df_live)
                         st.success("Modifications enregistrées.")
                     except Exception as e:
@@ -1281,7 +1194,7 @@ with tabs[3]:
                 st.warning("Aucune sélection pour suppression.")
 
 # ---- Export tab ----
-with tabs[4]:
+with tabs[5]:
     st.header("💾 Export")
     df_live = _get_df_live()
     if df_live is None or df_live.empty:
@@ -1294,7 +1207,7 @@ with tabs[4]:
             csv_bytes = df_live.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
 
-        # XLSX export with numeric Solde_formule
+        # XLSX export with Solde_formule numeric
         with col2:
             df_for_export = df_live.copy()
             try:
