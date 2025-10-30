@@ -1,10 +1,8 @@
 # Visa Manager - app.py
-# Presentation update: dashboard now shows each dossier as a 3-line card:
-# 1) Dossier N  ---  Date de création (fallback to Date)
-# 2) Nom du client
-# 3) Catégorie   Sous-catégorie   Visa
+# Persist uploaded Clients & Visa files to local cache so re-uploads are not required on code changes.
+# Always use two uploaders (Clients & Visa). Removed "Un fichier" mode.
+# Retains: robust parsing, metadata, reactive Add tab layout, edit/delete, exports, Visa mapping fallback.
 #
-# All previous functionality preserved (parsing, add/edit/delete, metadata, exports, Visa mapping).
 # Usage: streamlit run app.py
 # Requires: pandas, streamlit; openpyxl optional for XLSX with formulas.
 
@@ -39,7 +37,6 @@ except Exception:
 # Configuration & current user
 # -------------------------
 APP_TITLE = "🛂 Visa Manager"
-# Add metadata columns: Date de création, Créé par, Dernière modification, Modifié par
 COLS_CLIENTS = [
     "ID_Client", "Dossier N", "Nom", "Date",
     "Categories", "Sous-categorie", "Visa",
@@ -48,17 +45,18 @@ COLS_CLIENTS = [
     "Acompte 3", "Acompte 4",
     "RFE", "Dossiers envoyé", "Dossier approuvé",
     "Dossier refusé", "Dossier Annulé",
-    # metadata
     "Date de création", "Créé par", "Dernière modification", "Modifié par",
     "Commentaires"
 ]
 MEMO_FILE = "_vmemory.json"
+CACHE_CLIENTS = "_clients_cache.bin"
+CACHE_VISA = "_visa_cache.bin"
 SHEET_CLIENTS = "Clients"
 SHEET_VISA = "Visa"
 SID = "vmgr"
 DEFAULT_START_CLIENT_ID = 13057
 
-# Current user (from session provided)
+# Current user (from session)
 CURRENT_USER = "charleytrigano"
 
 def skey(*parts: str) -> str:
@@ -416,7 +414,6 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
             pass
         df = pd.DataFrame()
     out = df.copy()
-    # Provide sensible defaults for metadata and numeric columns
     for c in cols:
         if c not in out.columns:
             if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
@@ -505,7 +502,6 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
     except Exception:
         df_mapped = df_clients_raw.copy() if isinstance(df_clients_raw, pd.DataFrame) else pd.DataFrame()
 
-    # preserve user-provided Solde as Solde_source then drop original Solde to force canonical calc
     if "Solde" in df_mapped.columns:
         try:
             df_mapped["Solde_source"] = df_mapped["Solde"].copy()
@@ -516,7 +512,6 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         except Exception:
             pass
 
-    # Parse Date columns
     if "Date" in df_mapped.columns:
         try:
             df_mapped["Date"] = pd.to_datetime(df_mapped["Date"], dayfirst=True, errors="coerce")
@@ -535,7 +530,6 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
 
     df = _ensure_columns(df_mapped, COLS_CLIENTS)
 
-    # numeric normalization
     for col in NUMERIC_TARGETS:
         if col in df.columns:
             try:
@@ -546,12 +540,10 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
                 except Exception:
                     pass
 
-    # ensure acomptes exist
     for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
         if acc not in df.columns:
             df[acc] = 0.0
 
-    # compute Payé from detected acomptes
     acomptes_cols = detect_acompte_columns(df)
     if acomptes_cols:
         try:
@@ -559,7 +551,6 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         except Exception:
             df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x))
 
-    # compute Solde canonical
     try:
         montant_col = detect_montant_column(df) or "Montant honoraires (US $)"
         autres_col = detect_autres_column(df) or "Autres frais (US $)"
@@ -667,80 +658,103 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 # -------------------------
-# Read files & build visa maps
+# Streamlit UI bootstrap and file upload caching logic
 # -------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
 st.sidebar.header("📂 Fichiers")
-last_clients, last_visa, last_save_dir = ("", "", "")
+last_clients_path = ""
+last_visa_path = ""
 try:
     if os.path.exists(MEMO_FILE):
         with open(MEMO_FILE, "r", encoding="utf-8") as f:
             d = json.load(f)
-            last_clients = d.get("clients",""); last_visa = d.get("visa",""); last_save_dir = d.get("save_dir","")
+            last_clients_path = d.get("clients","")
+            last_visa_path = d.get("visa","")
 except Exception:
     pass
 
-mode = st.sidebar.radio("Mode de chargement", ["Un fichier (Clients)", "Deux fichiers (Clients & Visa)"], index=0, key=skey("mode"))
-up_clients = st.sidebar.file_uploader("Clients (xlsx/csv)", type=["xlsx","xls","csv"], key=skey("up_clients"))
-up_visa = None
-if mode == "Deux fichiers (Clients & Visa)":
-    up_visa = st.sidebar.file_uploader("Visa (xlsx/csv)", type=["xlsx","xls","csv"], key=skey("up_visa"))
+# File uploaders (always present: Clients & Visa)
+up_clients = st.sidebar.file_uploader("Clients (xlsx/xls/csv)", type=["xlsx","xls","csv"], key=skey("up_clients"))
+up_visa = st.sidebar.file_uploader("Visa (xlsx/xls/csv)", type=["xlsx","xls","csv"], key=skey("up_visa"))
 
-clients_path_in = st.sidebar.text_input("ou chemin local Clients", value=last_clients or "", key=skey("cli_path"))
-visa_path_in = st.sidebar.text_input("ou chemin local Visa", value=last_visa or "", key=skey("vis_path"))
-save_dir_in = st.sidebar.text_input("Dossier de sauvegarde (optionnel)", value=last_save_dir or "", key=skey("save_dir"))
+clients_path_in = st.sidebar.text_input("ou chemin local Clients (optionnel)", value=last_clients_path or "", key=skey("cli_path"))
+visa_path_in = st.sidebar.text_input("ou chemin local Visa (optionnel)", value=last_visa_path or "", key=skey("vis_path"))
 
 if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     try:
         with open(MEMO_FILE, "w", encoding="utf-8") as f:
-            json.dump({"clients": clients_path_in or "", "visa": visa_path_in or "", "save_dir": save_dir_in or ""}, f, ensure_ascii=False, indent=2)
+            json.dump({"clients": clients_path_in or "", "visa": visa_path_in or ""}, f, ensure_ascii=False, indent=2)
         st.sidebar.success("Chemins sauvegardés.")
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
-# Read uploaded files into bytes
+# Read uploaded files into bytes, persist them to cache files so they survive code edits and reruns
 clients_bytes = None
 visa_bytes = None
+
+# If user uploaded via widget, take bytes and cache to disk
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
+        # persist to cache
+        try:
+            with open(CACHE_CLIENTS, "wb") as f:
+                f.write(clients_bytes)
+        except Exception:
+            pass
     except Exception:
         try:
             up_clients.seek(0); clients_bytes = up_clients.read()
         except Exception:
             clients_bytes = None
+
 if up_visa is not None:
     try:
         visa_bytes = up_visa.getvalue()
+        try:
+            with open(CACHE_VISA, "wb") as f:
+                f.write(visa_bytes)
+        except Exception:
+            pass
     except Exception:
         try:
             up_visa.seek(0); visa_bytes = up_visa.read()
         except Exception:
             visa_bytes = None
 
-if clients_bytes is not None:
-    clients_src_for_read = BytesIO(clients_bytes)
-elif clients_path_in:
+# If no uploader bytes, but a local path provided use it
+if clients_bytes is None and clients_path_in:
     clients_src_for_read = clients_path_in
-elif last_clients:
-    clients_src_for_read = last_clients
+elif clients_bytes is not None:
+    clients_src_for_read = BytesIO(clients_bytes)
+# If no uploader and no path, but cache file exists, load it
+elif os.path.exists(CACHE_CLIENTS):
+    try:
+        clients_bytes = open(CACHE_CLIENTS, "rb").read()
+        clients_src_for_read = BytesIO(clients_bytes)
+    except Exception:
+        clients_src_for_read = None
 else:
     clients_src_for_read = None
 
-if mode == "Deux fichiers (Clients & Visa)":
-    if visa_bytes is not None:
+if visa_bytes is None and visa_path_in:
+    visa_src_for_read = visa_path_in
+elif visa_bytes is not None:
+    visa_src_for_read = BytesIO(visa_bytes)
+elif os.path.exists(CACHE_VISA):
+    try:
+        visa_bytes = open(CACHE_VISA, "rb").read()
         visa_src_for_read = BytesIO(visa_bytes)
-    elif visa_path_in:
-        visa_src_for_read = visa_path_in
-    elif last_visa:
-        visa_src_for_read = last_visa
-    else:
+    except Exception:
         visa_src_for_read = None
 else:
-    visa_src_for_read = clients_src_for_read
+    visa_src_for_read = None
 
+# -------------------------
+# Read dataframes from provided sources
+# -------------------------
 df_clients_raw = None
 df_visa_raw = None
 try:
@@ -775,7 +789,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     except Exception:
         pass
 
-# build visa maps
+# Build visa maps from Visa sheet
 visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
@@ -800,7 +814,8 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
         visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
         visa_categories = sorted(list(visa_map.keys()))
-        # visa_sub_options_map
+        # Build visa_sub_options_map: key = canonical_sub, value = list of column headers where the row has truthy value (1, x, yes, etc.)
+        visa_sub_options_map = {}
         try:
             cols_to_skip = set(["Categories","Categorie","Sous-categorie"])
             cols_to_check = [c for c in df_visa_mapped.columns if c not in cols_to_skip]
@@ -832,8 +847,10 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
             visa_sub_options_map = {}
     except Exception:
         visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
+else:
+    visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 
-# fallback mapping (Affaires/Tourisme x B-1/B-2 => COS/EOS)
+# Built-in fallback cross-table mapping (canonical keys)
 DEFAULT_VISA_OPTIONS_BY_CAT_SUB: Dict[Tuple[str,str], List[str]] = {}
 for cat in ["Affaires", "Tourisme"]:
     for sub in ["B-1", "B-2"]:
@@ -855,7 +872,7 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
                 return opts
     return []
 
-# optional debug sidebar
+# Optional debug in sidebar to inspect mapping
 try:
     st.sidebar.markdown("**DEBUG: visa_sub_options_map**")
     st.sidebar.write(visa_sub_options_map)
@@ -863,7 +880,7 @@ except Exception:
     pass
 
 # -------------------------
-# Build live df and session state
+# Build live df and enforce canonical Payé/Solde
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -880,9 +897,7 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# -------------------------
-# Helper utilities
-# -------------------------
+# Helper unique non-empty
 def unique_nonempty(series):
     try:
         vals = series.dropna().astype(str).tolist()
@@ -909,7 +924,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # -------------------------
-# Tabs UI (Files / Dashboard / Analyses / Add / Gestion / Export)
+# Tabs UI (Dashboard restored to KPIs + table view)
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -923,6 +938,8 @@ with tabs[0]:
             st.text(f"Upload: {getattr(up_clients,'name','')}")
         elif isinstance(clients_src_for_read, str) and clients_src_for_read:
             st.text(f"Chargé depuis: {clients_src_for_read}")
+        elif os.path.exists(CACHE_CLIENTS):
+            st.text("Chargé depuis le cache local")
         if df_clients_raw is None or df_clients_raw.empty:
             st.warning("Aucun fichier Clients detecté.")
         else:
@@ -930,13 +947,12 @@ with tabs[0]:
             st.dataframe(df_clients_raw.head(8), use_container_width=True, height=240)
     with c2:
         st.subheader("Visa")
-        if mode == "Deux fichiers (Clients & Visa)":
-            if up_visa is not None:
-                st.text(f"Upload: {getattr(up_visa,'name','')}")
-            elif isinstance(visa_src_for_read, str) and visa_src_for_read:
-                st.text(f"Chargé depuis: {visa_src_for_read}")
-        else:
-            st.info("Mode 'Un fichier' : Visa sera lu depuis le fichier Clients si présent.")
+        if up_visa is not None:
+            st.text(f"Upload: {getattr(up_visa,'name','')}")
+        elif isinstance(visa_src_for_read, str) and visa_src_for_read:
+            st.text(f"Chargé depuis: {visa_src_for_read}")
+        elif os.path.exists(CACHE_VISA):
+            st.text("Chargé depuis le cache local")
         if df_visa_raw is None or df_visa_raw.empty:
             st.warning("Aucun fichier Visa detecté.")
         else:
@@ -965,6 +981,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("📊 Dashboard (totaux et diagnostics)")
     df_live_view = recalc_payments_and_solde(_get_df_live())
+
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
     else:
@@ -1020,6 +1037,7 @@ with tabs[1]:
         total_autres = float(view["_Autres_num_"].sum())
         total_paye = float(total_acomptes_sum)
         canonical_solde_sum = float(total_honoraires + total_autres - total_paye)
+        total_solde_recorded = float(view.get("Solde", 0).apply(safe_num).sum())
 
         cols_k = st.columns(4)
         cols_k[0].markdown(kpi_html("Dossiers (vue)", f"{len(view):,}"), unsafe_allow_html=True)
@@ -1032,53 +1050,42 @@ with tabs[1]:
         cols_k2[0].markdown(kpi_html("Montant payé (somme acomptes)", _fmt_money(total_paye)), unsafe_allow_html=True)
         cols_k2[1].markdown(kpi_html("Solde total (recalc)", _fmt_money(canonical_solde_sum)), unsafe_allow_html=True)
 
-        # Build display dataframe (format money and dates) but show as 3-line cards per dossier
+        view["_Solde_calc_row_"] = view["_Montant_num_"] + view["_Autres_num_"] - view.get("Payé", view.get("_Acomptes_sum_", 0)).apply(safe_num)
+        mismatches = view[(view.get("Solde",0).apply(safe_num) - view["_Solde_calc_row_"]).abs() > 0.005]
+        with st.expander("DEBUG — Lignes où Solde != Montant + Autres − somme(Acomptes)"):
+            if mismatches.empty:
+                st.write("Aucune ligne en écart détectée.")
+            else:
+                disp_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie","Visa", montant_col, autres_col] + acomptes_cols + ["Payé","Solde"]
+                for c in ["_Montant_num_","_Autres_num_","_Acomptes_sum_","_Payé_num_","_Solde_calc_row_"]:
+                    if c in mismatches.columns:
+                        disp_cols.append(c)
+                mshow = mismatches.reset_index(drop=True).copy()
+                try:
+                    mshow["_acomptes_raw_concat_"] = mshow[acomptes_cols].astype(str).agg(" | ".join, axis=1)
+                except Exception:
+                    mshow["_acomptes_raw_concat_"] = ""
+                st.dataframe(mshow[disp_cols + ["_acomptes_raw_concat_"]].head(200), use_container_width=True, height=360)
+                st.markdown("Téléchargez la vue filtrée si vous voulez que j'analyse plus en détail (onglet Export).")
+
+        st.markdown("### Détails — clients correspondant aux filtres")
         display_df = view.copy()
-        # Format numeric columns for human display (but keep originals in data)
-        for mc in [montant_col, autres_col, "Payé", "Solde"] + acomptes_cols:
+        if "Date" in display_df.columns:
+            try:
+                display_df["Date"] = pd.to_datetime(display_df["Date"], errors="coerce").dt.date.astype(str)
+            except Exception:
+                display_df["Date"] = display_df["Date"].astype(str)
+        money_cols = [montant_col, autres_col, "Payé","Solde"] + acomptes_cols
+        for mc in money_cols:
             if mc in display_df.columns:
                 try:
-                    display_df[mc + "_disp"] = display_df[mc].apply(lambda x: _fmt_money(_to_num(x)))
+                    display_df[mc] = display_df[mc].apply(lambda x: _fmt_money(_to_num(x)))
                 except Exception:
-                    display_df[mc + "_disp"] = display_df[mc].astype(str)
-        # Format dates for display
-        display_df["Date_event_disp"] = display_df.get("Date de création").apply(lambda v: _format_datetime_for_display(v) if "Date de création" in display_df.columns else "")
-        display_df["Date_event_disp"] = display_df.apply(
-            lambda r: _format_datetime_for_display(r.get("Date de création")) if pd.notna(r.get("Date de création")) and str(r.get("Date de création")).strip()!=""
-            else _format_datetime_for_display(r.get("Date")), axis=1
-        )
-
-        # Render cards: three lines as requested
-        st.markdown("### Liste des dossiers (présentation compacte)")
-        rows = display_df.reset_index(drop=True)
-        max_rows_show = 200
-        if len(rows) > max_rows_show:
-            st.info(f"Affichage limité aux {max_rows_show} premiers dossiers. Utilisez l'export pour obtenir tout.")
-        for i, r in rows.head(max_rows_show).iterrows():
-            dossier = r.get("Dossier N", "")
-            date_event = r.get("Date_event_disp", "") or ""
-            nom_client = r.get("Nom", "")
-            cat = r.get("Categories", "") or ""
-            sub = r.get("Sous-categorie", "") or ""
-            visa = r.get("Visa", "") or ""
-            # small inline styling for readability
-            card_html = f"""
-            <div style="border:1px solid #e3e3e3; border-radius:6px; padding:8px 12px; margin:8px 0;">
-              <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div style="font-size:14px; font-weight:600;">{dossier}</div>
-                <div style="font-size:12px; color:#666;">{date_event}</div>
-              </div>
-              <div style="margin-top:6px; font-size:16px; font-weight:700;">{nom_client}</div>
-              <div style="margin-top:6px; font-size:13px; color:#333;">
-                <span style='font-weight:600'>{cat}</span>
-                &nbsp;&nbsp; <span style='color:#555'>|</span> &nbsp;&nbsp;
-                <span>{sub}</span>
-                &nbsp;&nbsp; <span style='color:#555'>|</span> &nbsp;&nbsp;
-                <span style="font-style:italic; color:#222;">{visa}</span>
-              </div>
-            </div>
-            """
-            st.markdown(card_html, unsafe_allow_html=True)
+                    display_df[mc] = display_df[mc].astype(str)
+        try:
+            st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=360)
+        except Exception:
+            st.write("Impossible d'afficher la liste des clients (trop volumineuse). Utilisez l'export.")
 
 # ---- Analyses tab ----
 with tabs[2]:
@@ -1093,7 +1100,7 @@ with tabs[2]:
         else:
             st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
-# ---- Add tab (reactive Category -> Subcategory), metadata added automatically ----
+# ---- Add tab (modified layout: 3-line presentation requested) ----
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live()
@@ -1106,43 +1113,59 @@ with tabs[3]:
         else:
             categories_options = []
 
-    st.write("Choisissez la Catégorie puis la Sous-catégorie (réactif). Les métadonnées de création sont ajoutées automatiquement.")
+    st.write("Formulaire d'ajout — présentation en 3 lignes :")
+    st.write("1) Dossier N — Date (événement)")
+    st.write("2) Nom du client")
+    st.write("3) Catégorie — Sous-catégorie — Visa")
 
-    # Category selectbox (reactive)
-    categories_local = [""] + [c.strip() for c in categories_options]
-    add_cat = st.selectbox("Catégorie", options=categories_local, index=0, key=skey("addtab","cat"))
+    # Line 1: Dossier N and Date
+    r1c1, r1c2 = st.columns([1.8,1.2])
+    with r1c1:
+        add_dossier = st.text_input("Dossier N", value="", placeholder="Ex: D12345", key=skey("addtab","dossier"))
+    with r1c2:
+        add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
 
-    # Subcategory options computed based on selected category
-    add_sub_options = []
-    if isinstance(add_cat, str) and add_cat.strip():
-        cat_key = canonical_key(add_cat)
-        if cat_key in visa_map_norm:
-            add_sub_options = visa_map_norm.get(cat_key, [])[:]
+    # Line 2: Nom (full width)
+    add_nom = st.text_input("Nom du client", value="", placeholder="Nom complet du client", key=skey("addtab","nom"))
+
+    # Line 3: Catégorie | Sous-catégorie | Visa (reactive)
+    r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
+    with r3c1:
+        categories_local = [""] + [c.strip() for c in categories_options]
+        add_cat = st.selectbox("Catégorie", options=categories_local, index=0, key=skey("addtab","cat"))
+    with r3c2:
+        add_sub_options = []
+        if isinstance(add_cat, str) and add_cat.strip():
+            cat_key = canonical_key(add_cat)
+            if cat_key in visa_map_norm:
+                add_sub_options = visa_map_norm.get(cat_key, [])[:]
+            else:
+                if add_cat in visa_map:
+                    add_sub_options = visa_map.get(add_cat, [])[:]
+        if not add_sub_options:
+            try:
+                add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
+            except Exception:
+                add_sub_options = []
+        add_sub = st.selectbox("Sous-catégorie", options=[""] + add_sub_options, index=0, key=skey("addtab","sub"))
+    with r3c3:
+        specific_options = get_visa_options(add_cat, add_sub)
+        if specific_options:
+            add_visa = st.selectbox("Visa (options)", options=[""] + specific_options, index=0, key=skey("addtab","visa"))
         else:
-            if add_cat in visa_map:
-                add_sub_options = visa_map.get(add_cat, [])[:]
-    if not add_sub_options:
-        try:
-            add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
-        except Exception:
-            add_sub_options = []
-    add_sub = st.selectbox("Sous-catégorie", options=[""] + add_sub_options, index=0, key=skey("addtab","sub"))
+            add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
 
-    # Other inputs (Nom, Dossier N, Date, Visa, Montant, etc.)
-    add_dossier = st.text_input("Dossier N", value="", placeholder="Ex: D12345", key=skey("addtab","dossier"))
-    add_nom = st.text_input("Nom", value="", placeholder="Nom du client", key=skey("addtab","nom"))
-    add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
-    specific_options = get_visa_options(add_cat, add_sub)
-    if specific_options:
-        add_visa = st.selectbox("Visa (options)", options=[""] + specific_options, index=0, key=skey("addtab","visa"))
-    else:
-        add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
-    add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
-    add_autres = st.text_input("Autres frais (US $)", value="0", key=skey("addtab","autres"))
-    a1 = st.text_input("Acompte 1", value="0", key=skey("addtab","ac1"))
-    a2 = st.text_input("Acompte 2", value="0", key=skey("addtab","ac2"))
-    a3 = st.text_input("Acompte 3", value="0", key=skey("addtab","ac3"))
-    a4 = st.text_input("Acompte 4", value="0", key=skey("addtab","ac4"))
+    # Remaining financial fields below
+    r4c1, r4c2 = st.columns([1.6,2.4])
+    with r4c1:
+        add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
+        add_autres = st.text_input("Autres frais (US $)", value="0", key=skey("addtab","autres"))
+    with r4c2:
+        a1 = st.text_input("Acompte 1", value="0", key=skey("addtab","ac1"))
+        a2 = st.text_input("Acompte 2", value="0", key=skey("addtab","ac2"))
+        a3 = st.text_input("Acompte 3", value="0", key=skey("addtab","ac3"))
+        a4 = st.text_input("Acompte 4", value="0", key=skey("addtab","ac4"))
+
     add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
 
     if st.button("Ajouter", key=skey("addtab","btn_add")):
@@ -1165,19 +1188,16 @@ with tabs[3]:
             paid_sum = new_row["Acompte 1"] + new_row["Acompte 2"] + new_row["Acompte 3"] + new_row["Acompte 4"]
             new_row["Payé"] = paid_sum
             new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - paid_sum
-            # metadata: record creation/modification info
             now = datetime.now()
             new_row["Date de création"] = now
             new_row["Créé par"] = CURRENT_USER
             new_row["Dernière modification"] = now
             new_row["Modifié par"] = CURRENT_USER
             new_row["Commentaires"] = add_comments
-            # ensure flags exist
             flags_to_create = DEFAULT_FLAGS
             ensure_flag_columns(df_live, flags_to_create)
             for opt in flags_to_create:
                 new_row[opt] = 0
-            # append
             df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
             df_live = recalc_payments_and_solde(df_live)
             _set_df_live(df_live)
@@ -1210,13 +1230,11 @@ with tabs[4]:
                     e_nom = st.text_input("Nom", value=str(row.get("Nom","")), key=skey("edit","nom"))
                 with ecol2:
                     e_date = st.date_input("Date (événement)", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
-                    # Make Category/Sub reactive in edit form: category select then sub options
                     if visa_categories:
                         edit_categories_options = visa_categories
                     else:
                         edit_categories_options = unique_nonempty(df_live["Categories"]) if "Categories" in df_live.columns else []
                     e_cat = st.selectbox("Categorie", options=[""]+edit_categories_options, index=([""]+edit_categories_options).index(str(row.get("Categories",""))) if str(row.get("Categories","")) in ([""]+edit_categories_options) else 0, key=skey("edit","cat"))
-                    # sub options based on e_cat
                     e_sub_options = []
                     if isinstance(e_cat, str) and e_cat.strip():
                         cat_key = canonical_key(e_cat)
@@ -1232,7 +1250,6 @@ with tabs[4]:
                             e_sub_options = []
                     e_sub = st.selectbox("Sous-categorie", options=[""]+e_sub_options, index=([""]+e_sub_options).index(str(row.get("Sous-categorie",""))) if str(row.get("Sous-categorie","")) in ([""]+e_sub_options) else 0, key=skey("edit","sub"))
 
-                # Visa: propose options if available
                 edit_specific = get_visa_options(e_cat, e_sub)
                 if edit_specific:
                     current = str(row.get("Visa","")).strip()
@@ -1252,7 +1269,6 @@ with tabs[4]:
                 e_ac3 = st.text_input("Acompte 3", value=str(row.get("Acompte 3",0)), key=skey("edit","ac3"))
                 e_ac4 = st.text_input("Acompte 4", value=str(row.get("Acompte 4",0)), key=skey("edit","ac4"))
                 e_comments = st.text_area("Commentaires", value=str(row.get("Commentaires","")), key=skey("edit","comments"))
-
                 save = st.form_submit_button("Enregistrer modifications")
                 if save:
                     try:
@@ -1268,7 +1284,6 @@ with tabs[4]:
                         df_live.at[idx, "Acompte 2"] = money_to_float(e_ac2)
                         df_live.at[idx, "Acompte 3"] = money_to_float(e_ac3)
                         df_live.at[idx, "Acompte 4"] = money_to_float(e_ac4)
-                        # update modification metadata
                         df_live.at[idx, "Dernière modification"] = datetime.now()
                         df_live.at[idx, "Modifié par"] = CURRENT_USER
                         df_live = recalc_payments_and_solde(df_live)
