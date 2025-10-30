@@ -1,8 +1,10 @@
 # Visa Manager - app.py
-# Updated: add creation/modification metadata fields (Date de création, Créé par, Dernière modification, Modifié par)
-# - All previous behavior retained: robust parsing, canonical Payé/Solde, add/edit/delete, Visa mapping fallback
-# - New columns added to COLS_CLIENTS and managed on add/edit/export/display
+# Presentation update: dashboard now shows each dossier as a 3-line card:
+# 1) Dossier N  ---  Date de création (fallback to Date)
+# 2) Nom du client
+# 3) Catégorie   Sous-catégorie   Visa
 #
+# All previous functionality preserved (parsing, add/edit/delete, metadata, exports, Visa mapping).
 # Usage: streamlit run app.py
 # Requires: pandas, streamlit; openpyxl optional for XLSX with formulas.
 
@@ -56,7 +58,7 @@ SHEET_VISA = "Visa"
 SID = "vmgr"
 DEFAULT_START_CLIENT_ID = 13057
 
-# Current user fallback (provided in session context)
+# Current user (from session provided)
 CURRENT_USER = "charleytrigano"
 
 def skey(*parts: str) -> str:
@@ -153,6 +155,15 @@ def _date_for_widget(val: Any) -> date:
         return d.date()
     except Exception:
         return date.today()
+
+def _format_datetime_for_display(val: Any) -> str:
+    if pd.isna(val) or val is None or str(val).strip() == "":
+        return ""
+    try:
+        dt = pd.to_datetime(val)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(val)
 
 # -------------------------
 # Column heuristics & helpers
@@ -405,7 +416,7 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
             pass
         df = pd.DataFrame()
     out = df.copy()
-    # Provide sensible defaults for the new metadata columns
+    # Provide sensible defaults for metadata and numeric columns
     for c in cols:
         if c not in out.columns:
             if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
@@ -472,7 +483,7 @@ def _normalize_status(df: Any) -> pd.DataFrame:
     return df
 
 # -------------------------
-# normalize_clients_for_live (defensive, drops source Solde)
+# normalize_clients_for_live (defensive)
 # -------------------------
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
     if not isinstance(df_clients_raw, pd.DataFrame):
@@ -656,7 +667,7 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 # -------------------------
-# Read files & build visa maps (same logic as before)
+# Read files & build visa maps
 # -------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -1021,22 +1032,53 @@ with tabs[1]:
         cols_k2[0].markdown(kpi_html("Montant payé (somme acomptes)", _fmt_money(total_paye)), unsafe_allow_html=True)
         cols_k2[1].markdown(kpi_html("Solde total (recalc)", _fmt_money(canonical_solde_sum)), unsafe_allow_html=True)
 
-        # Show details with formatted money and dates (including metadata)
+        # Build display dataframe (format money and dates) but show as 3-line cards per dossier
         display_df = view.copy()
-        for dt_col in ["Date","Date de création","Dernière modification"]:
-            if dt_col in display_df.columns:
-                try:
-                    display_df[dt_col] = pd.to_datetime(display_df[dt_col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    display_df[dt_col] = display_df[dt_col].astype(str)
-        money_cols = [montant_col, autres_col, "Payé","Solde"] + acomptes_cols
-        for mc in money_cols:
+        # Format numeric columns for human display (but keep originals in data)
+        for mc in [montant_col, autres_col, "Payé", "Solde"] + acomptes_cols:
             if mc in display_df.columns:
                 try:
-                    display_df[mc] = display_df[mc].apply(lambda x: _fmt_money(_to_num(x)))
+                    display_df[mc + "_disp"] = display_df[mc].apply(lambda x: _fmt_money(_to_num(x)))
                 except Exception:
-                    display_df[mc] = display_df[mc].astype(str)
-        st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=360)
+                    display_df[mc + "_disp"] = display_df[mc].astype(str)
+        # Format dates for display
+        display_df["Date_event_disp"] = display_df.get("Date de création").apply(lambda v: _format_datetime_for_display(v) if "Date de création" in display_df.columns else "")
+        display_df["Date_event_disp"] = display_df.apply(
+            lambda r: _format_datetime_for_display(r.get("Date de création")) if pd.notna(r.get("Date de création")) and str(r.get("Date de création")).strip()!=""
+            else _format_datetime_for_display(r.get("Date")), axis=1
+        )
+
+        # Render cards: three lines as requested
+        st.markdown("### Liste des dossiers (présentation compacte)")
+        rows = display_df.reset_index(drop=True)
+        max_rows_show = 200
+        if len(rows) > max_rows_show:
+            st.info(f"Affichage limité aux {max_rows_show} premiers dossiers. Utilisez l'export pour obtenir tout.")
+        for i, r in rows.head(max_rows_show).iterrows():
+            dossier = r.get("Dossier N", "")
+            date_event = r.get("Date_event_disp", "") or ""
+            nom_client = r.get("Nom", "")
+            cat = r.get("Categories", "") or ""
+            sub = r.get("Sous-categorie", "") or ""
+            visa = r.get("Visa", "") or ""
+            # small inline styling for readability
+            card_html = f"""
+            <div style="border:1px solid #e3e3e3; border-radius:6px; padding:8px 12px; margin:8px 0;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div style="font-size:14px; font-weight:600;">{dossier}</div>
+                <div style="font-size:12px; color:#666;">{date_event}</div>
+              </div>
+              <div style="margin-top:6px; font-size:16px; font-weight:700;">{nom_client}</div>
+              <div style="margin-top:6px; font-size:13px; color:#333;">
+                <span style='font-weight:600'>{cat}</span>
+                &nbsp;&nbsp; <span style='color:#555'>|</span> &nbsp;&nbsp;
+                <span>{sub}</span>
+                &nbsp;&nbsp; <span style='color:#555'>|</span> &nbsp;&nbsp;
+                <span style="font-style:italic; color:#222;">{visa}</span>
+              </div>
+            </div>
+            """
+            st.markdown(card_html, unsafe_allow_html=True)
 
 # ---- Analyses tab ----
 with tabs[2]:
@@ -1169,7 +1211,6 @@ with tabs[4]:
                 with ecol2:
                     e_date = st.date_input("Date (événement)", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
                     # Make Category/Sub reactive in edit form: category select then sub options
-                    # Build category options
                     if visa_categories:
                         edit_categories_options = visa_categories
                     else:
