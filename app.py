@@ -390,7 +390,7 @@ def detect_autres_column(df: pd.DataFrame) -> Optional[str]:
     return None
 
 # =========================
-# Ensure columns helper (defensive)
+# Ensure columns helper
 # =========================
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -722,7 +722,7 @@ try:
 except Exception:
     df_visa_raw = None
 if df_visa_raw is None and visa_src_for_read is not None:
-    df_visa_raw = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ')
+    df_visa_raw = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ")
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
@@ -1160,7 +1160,6 @@ with tabs[4]:
                 # Visa: propose selectbox if sub has options
                 edit_specific = get_sub_options_for(row.get("Sous-categorie",""), visa_sub_options_map)
                 if edit_specific:
-                    # preselect current Visa if present in options
                     current = str(row.get("Visa","")).strip()
                     options = [""] + edit_specific
                     try:
