@@ -1,11 +1,9 @@
 # Visa Manager - app.py
-# Complete, corrected version (all DataFrame.append replaced by pd.concat for pandas >= 2.0)
-# - Ignores source "Solde" column (kept as Solde_source if present)
-# - Recomputes Payé = sum(all detected Acompte columns)
-# - Computes Solde per row = Montant + Autres - sum(acompte cols)
-# - Dedicated "➕ Ajouter" tab, separate "✏️ / 🗑️ Gestion" for edit/delete
-# - Robust monetary parsing, defensive column detection, CSV/XLSX export with Solde_formule,
-#   and optional XLSX with formulas (openpyxl required)
+# Robust Streamlit app with dynamic Visa options per Sous-categorie
+# - When a Sous-categorie is selected, Visa field proposes headers from the Visa sheet where value==1
+# - If no options for the Sous-categorie, Visa remains a free text input
+# - Always recalculates Payé and Solde from detected Acompte columns
+# - pandas >=2.0 compatible (pd.concat used), defensive parsing, export options
 #
 # Usage: streamlit run app.py
 # Requires: pandas, streamlit, openpyxl (optional for formula export)
@@ -21,7 +19,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional plotly
+# Optional: plotly for charts
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -29,7 +27,7 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# openpyxl for writing formulas
+# openpyxl for XLSX formula export (optional)
 try:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -60,7 +58,7 @@ def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
 # =========================
-# Helpers: normalization / formatting
+# Helpers (parsing / formatting)
 # =========================
 def normalize_header_text(s: Any) -> str:
     if s is None:
@@ -96,7 +94,6 @@ def canonical_key(s: Any) -> str:
     return s2
 
 def money_to_float(x: Any) -> float:
-    # Robust money parser: handles spaces, NBSP, €, $, commas, dots, negatives and strange strings
     try:
         if pd.isna(x):
             return 0.0
@@ -153,7 +150,7 @@ def _date_for_widget(val: Any) -> date:
         return date.today()
 
 # =========================
-# Column heuristics & helpers
+# Column heuristics
 # =========================
 COL_CANDIDATES = {
     "id client": "ID_Client", "idclient": "ID_Client",
@@ -393,7 +390,7 @@ def detect_autres_column(df: pd.DataFrame) -> Optional[str]:
     return None
 
 # =========================
-# Ensure columns helper
+# Ensure columns helper (defensive)
 # =========================
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -725,7 +722,7 @@ try:
 except Exception:
     df_visa_raw = None
 if df_visa_raw is None and visa_src_for_read is not None:
-    df_visa_raw = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ")
+    df_visa_raw = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ')
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
@@ -754,6 +751,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
             pass
         raw_vm = {}
         try:
+            # Build mapping Categories -> [Sous-categories]
             for _, row in df_visa_mapped.iterrows():
                 cat = str(row.get("Categories","")).strip()
                 sub = str(row.get("Sous-categorie","")).strip()
@@ -768,7 +766,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
         visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
         visa_categories = sorted(list(visa_map.keys()))
-        # build sub options map from flags
+        # Build visa_sub_options_map: key = canonical_sub, value = list of column headers where the row has truthy value (1, x, yes, etc.)
         visa_sub_options_map = {}
         try:
             cols_to_skip = set(["Categories","Categorie","Sous-categorie"])
@@ -795,6 +793,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
                                 truthy = False
                     if truthy:
                         visa_sub_options_map.setdefault(key, [])
+                        # Keep the original header text (not canonical) for display
                         if col not in visa_sub_options_map[key]:
                             visa_sub_options_map[key].append(col)
         except Exception:
@@ -803,6 +802,13 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 else:
     visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
+
+# Helper: return visa options (column headers) for a given sous-categorie (by canonical key)
+def get_sub_options_for(sub: str, visa_sub_map: Dict[str, List[str]]) -> List[str]:
+    if not sub:
+        return []
+    k = canonical_key(sub)
+    return visa_sub_map.get(k, [])
 
 # Build live df and enforce canonical Payé/Solde
 df_all = normalize_clients_for_live(df_clients_raw)
@@ -836,7 +842,7 @@ def unique_nonempty(series):
         out.append(s)
     return sorted(list(dict.fromkeys(out)))
 
-# KPI small card HTML
+# KPI small card html
 def kpi_html(label: str, value: str, sub: str = "") -> str:
     html = f"""
     <div style="border:1px solid rgba(255,255,255,0.04); border-radius:6px; padding:8px 10px; margin:6px 4px;">
@@ -848,7 +854,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # =========================
-# Tabs UI (Files / Dashboard / Analyses / Add / Edit-Delete / Export)
+# Tabs UI (Files / Dashboard / Analyses / Add / Gestion / Export)
 # =========================
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -962,7 +968,6 @@ with tabs[1]:
         canonical_solde_sum = float(total_honoraires + total_autres - total_paye)
         total_solde_recorded = float(view.get("Solde", 0).apply(safe_num).sum())
 
-        # KPIs
         cols_k = st.columns(4)
         cols_k[0].markdown(kpi_html("Dossiers (vue)", f"{len(view):,}"), unsafe_allow_html=True)
         cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
@@ -992,7 +997,6 @@ with tabs[1]:
                 st.dataframe(mshow[disp_cols + ["_acomptes_raw_concat_"]].head(200), use_container_width=True, height=360)
                 st.markdown("Téléchargez la vue filtrée si vous voulez que j'analyse plus en détail (onglet Export).")
 
-        # Display list
         st.markdown("### Détails — clients correspondant aux filtres")
         display_df = view.copy()
         if "Date" in display_df.columns:
@@ -1025,7 +1029,7 @@ with tabs[2]:
         else:
             st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
-# ---- Add tab (dedicated) ----
+# ---- Add tab ----
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live()
@@ -1073,8 +1077,13 @@ with tabs[3]:
         r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
         with r3c1:
             add_date = st.date_input("Date", value=date.today(), key=skey("addtab","date"))
+        # Visa field: propose options from visa_sub_options_map when available for the selected sous-categorie
         with r3c2:
-            add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
+            specific_options = get_sub_options_for(add_sub, visa_sub_options_map)
+            if specific_options:
+                add_visa = st.selectbox("Visa (options)", options=[""] + specific_options, index=0, key=skey("addtab","visa"))
+            else:
+                add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
         with r3c3:
             add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
 
@@ -1110,12 +1119,10 @@ with tabs[3]:
                 new_row["Payé"] = paid_sum
                 new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - paid_sum
                 new_row["Commentaires"] = add_comments
-                # ensure flags exist
                 flags_to_create = DEFAULT_FLAGS
                 ensure_flag_columns(df_live, flags_to_create)
                 for opt in flags_to_create:
                     new_row[opt] = 0
-                # append using pd.concat (pandas >= 2.0)
                 df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
                 df_live = recalc_payments_and_solde(df_live)
                 _set_df_live(df_live)
@@ -1150,7 +1157,20 @@ with tabs[4]:
                     e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
                     e_cat = st.text_input("Categorie", value=str(row.get("Categories","")), key=skey("edit","cat"))
                     e_sub = st.text_input("Sous-categorie", value=str(row.get("Sous-categorie","")), key=skey("edit","sub"))
-                e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa"))
+                # Visa: propose selectbox if sub has options
+                edit_specific = get_sub_options_for(row.get("Sous-categorie",""), visa_sub_options_map)
+                if edit_specific:
+                    # preselect current Visa if present in options
+                    current = str(row.get("Visa","")).strip()
+                    options = [""] + edit_specific
+                    try:
+                        init_idx = options.index(current) if current in options else 0
+                    except Exception:
+                        init_idx = 0
+                    e_visa = st.selectbox("Visa (options)", options=options, index=init_idx, key=skey("edit","visa"))
+                else:
+                    e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa"))
+
                 e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
                 e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)",0)), key=skey("edit","autres"))
                 e_ac1 = st.text_input("Acompte 1", value=str(row.get("Acompte 1",0)), key=skey("edit","ac1"))
@@ -1214,7 +1234,6 @@ with tabs[5]:
             csv_bytes = df_live.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
 
-        # XLSX export with numeric Solde_formule
         with col2:
             df_for_export = df_live.copy()
             try:
