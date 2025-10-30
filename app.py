@@ -1,10 +1,18 @@
 # Visa Manager - app.py
-# Updated: "Ajouter" tab layout changed per request:
-# - Remove "Autres frais", "Acompte 2/3/4" from Add tab.
-# - On same line show: Montant honoraires | Acompte 1 | Date (Acompte 1) | Solde (calculated) | Escrow (checkbox)
-# - Escrow stored in new "Escrow" column (0/1)
-# - Files upload caching preserved (no need to re-upload after code edits)
-# - Dashboard, Edit, Export, Visa mapping, metadata preserved
+# Final consolidated script per your requests:
+# - Clients & Visa upload caching (no need to re-upload on code changes)
+# - Two uploaders (Clients & Visa)
+# - Metadata columns (Date de création, Créé par, Dernière modification, Modifié par)
+# - "Ajouter" tab layout:
+#     Line 1: Dossier N | Date (événement)
+#     Line 2: Nom du client
+#     Line 3: Catégorie | Sous-catégorie | Visa
+#     Single line: Montant honoraires | Acompte 1 | Date Acompte 1 | Escrow (checkbox)
+#   (Removed Autres frais and Acompte 2/3/4 from Add tab; Solde is NOT shown on Add as requested)
+# - Solde and "Solde à percevoir (US $)" are computed and stored, but Solde is shown/editable in Gestion tab (modify/delete)
+# - Escrow flag is associated with Acompte 1 (stored as "Escrow" column and editable in Gestion)
+# - Edit (Gestion) tab contains Solde display/edit and Escrow checkbox; exports include escrow and solde fields
+# - XLSX export with formulas option included (Payé & Solde)
 #
 # Usage: streamlit run app.py
 # Requires: pandas, streamlit; openpyxl optional for XLSX with formulas.
@@ -47,7 +55,6 @@ COLS_CLIENTS = [
     "Payé", "Solde", "Solde à percevoir (US $)",
     "Acompte 1", "Date Acompte 1",
     "Acompte 2", "Date Acompte 2", "Acompte 3", "Acompte 4",
-    # Escrow flag
     "Escrow",
     "RFE", "Dossiers envoyé", "Dossier approuvé",
     "Dossier refusé", "Dossier Annulé",
@@ -526,7 +533,7 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         except Exception:
             pass
 
-    # parse known date cols
+    # parse date columns
     for dtc in ["Date","Date de création","Dernière modification","Date Acompte 1","Date Acompte 2"]:
         if dtc in df_mapped.columns:
             try:
@@ -943,7 +950,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # -------------------------
-# Tabs UI (Dashboard restored to KPIs + table view)
+# Tabs UI (Dashboard, etc.)
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -1125,7 +1132,7 @@ with tabs[2]:
         else:
             st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
-# ---- Add tab (modified layout: Montant | Acompte1 | Date | Solde calc | Escrow checkbox) ----
+# ---- Add tab (clean layout; Solde not shown; Escrow associated to Acompte 1) ----
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live()
@@ -1137,12 +1144,6 @@ with tabs[3]:
             categories_options = sorted([c for c in dict.fromkeys(cats_series) if c and c.lower() != "nan"])
         else:
             categories_options = []
-
-    st.write("Formulaire d'ajout — mise en page :")
-    st.write("1) Dossier N — Date (événement)")
-    st.write("2) Nom du client")
-    st.write("3) Catégorie — Sous-catégorie — Visa")
-    st.write("Ensuite sur une même ligne : Montant honoraires | Acompte 1 | Date (Acompte 1) | Solde (calculé) | Escrow (case)")
 
     # Line 1: Dossier N and Date
     r1c1, r1c2 = st.columns([1.8,1.2])
@@ -1181,8 +1182,8 @@ with tabs[3]:
         else:
             add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
 
-    # Single line: Montant | Acompte1 | Date Acompte1 | Solde (computed) | Escrow checkbox
-    r4c1, r4c2, r4c3, r4c4, r4c5 = st.columns([1.2,1.0,1.0,1.0,0.8])
+    # Single line: Montant | Acompte1 | Date Acompte1 | Escrow (checkbox)
+    r4c1, r4c2, r4c3, r4c4 = st.columns([1.2,1.0,1.0,0.8])
     with r4c1:
         add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
     with r4c2:
@@ -1190,18 +1191,6 @@ with tabs[3]:
     with r4c3:
         a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
     with r4c4:
-        # compute solde considering Autres frais (set to 0 for new rows) and only Acompte1
-        try:
-            montant_val = money_to_float(add_montant)
-            autres_val = 0.0  # we removed 'Autres' from Add, default to 0 for new rows
-            paid_val = money_to_float(a1)
-            solde_val = montant_val + autres_val - paid_val
-            solde_display = _fmt_money(solde_val)
-        except Exception:
-            solde_display = _fmt_money(0)
-        st.markdown("**Solde (Montant − Acompte 1)**")
-        st.markdown(f"**{solde_display}**")
-    with r4c5:
         escrow_checked = st.checkbox("Escrow", value=False, key=skey("addtab","escrow"))
 
     # Comments
@@ -1219,7 +1208,7 @@ with tabs[3]:
             new_row["Sous-categorie"] = add_sub.strip() if isinstance(add_sub, str) else add_sub
             new_row["Visa"] = add_visa
             new_row["Montant honoraires (US $)"] = money_to_float(add_montant)
-            # Autres frais intentionally set to 0 for adds (we removed field)
+            # Autres frais intentionally set to 0 for adds (field removed)
             new_row["Autres frais (US $)"] = 0.0
             new_row["Acompte 1"] = money_to_float(a1)
             new_row["Date Acompte 1"] = pd.to_datetime(a1_date) if a1_date else pd.NaT
@@ -1227,7 +1216,7 @@ with tabs[3]:
             new_row["Acompte 2"] = 0.0
             new_row["Acompte 3"] = 0.0
             new_row["Acompte 4"] = 0.0
-            # Escrow flag stored as 1/0
+            # Escrow flag stored as 1/0 and associated with Acompte 1
             new_row["Escrow"] = 1 if escrow_checked else 0
             paid_sum = new_row["Acompte 1"] + new_row["Acompte 2"] + new_row["Acompte 3"] + new_row["Acompte 4"]
             new_row["Payé"] = paid_sum
@@ -1320,10 +1309,10 @@ with tabs[4]:
                     solde_disp = _fmt_money(solde_val)
                 except Exception:
                     solde_disp = _fmt_money(0)
-                st.markdown(f"**Solde (Montant + Autres − Payé) : {solde_disp}**")
+                st.markdown(f"**Solde (visible ici) : {solde_disp}**")
                 # Escrow checkbox
                 current_esc = bool(int(row.get("Escrow", 0))) if pd.notna(row.get("Escrow", 0)) else False
-                e_escrow = st.checkbox("Escrow", value=current_esc, key=skey("edit","escrow"))
+                e_escrow = st.checkbox("Escrow (lié à Acompte 1)", value=current_esc, key=skey("edit","escrow"))
 
                 # Optional other acomptes (kept editable in Gestion)
                 e_ac2 = st.text_input("Acompte 2 (optionnel)", value=str(row.get("Acompte 2",0)), key=skey("edit","ac2"))
