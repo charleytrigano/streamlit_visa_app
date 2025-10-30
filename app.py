@@ -1,13 +1,14 @@
 # Visa Manager - app.py
-# Robust Streamlit app with dedicated "➕ Ajouter" tab for adding new clients.
-# - Always ignores source "Solde" column (renames to Solde_source and drops original)
+# Complete, corrected version (all DataFrame.append replaced by pd.concat for pandas >= 2.0)
+# - Ignores source "Solde" column (kept as Solde_source if present)
 # - Recomputes Payé = sum(all detected Acompte columns)
 # - Computes Solde per row = Montant + Autres - sum(acompte cols)
-# - KPIs computed by robust column-wise aggregation
-# - Defensive parsing of monetary strings, detection of columns, debug panel, CSV/XLSX export (with Solde_formule and optional formulas)
+# - Dedicated "➕ Ajouter" tab, separate "✏️ / 🗑️ Gestion" for edit/delete
+# - Robust monetary parsing, defensive column detection, CSV/XLSX export with Solde_formule,
+#   and optional XLSX with formulas (openpyxl required)
 #
 # Usage: streamlit run app.py
-# Requires: pandas, streamlit, openpyxl
+# Requires: pandas, streamlit, openpyxl (optional for formula export)
 
 import os
 import json
@@ -20,7 +21,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional: plotly for charts
+# Optional plotly
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -28,7 +29,7 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# openpyxl for XLSX formula export
+# openpyxl for writing formulas
 try:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -392,7 +393,7 @@ def detect_autres_column(df: pd.DataFrame) -> Optional[str]:
     return None
 
 # =========================
-# Ensure columns helper (defensive)
+# Ensure columns helper
 # =========================
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -464,12 +465,6 @@ def _normalize_status(df: Any) -> pd.DataFrame:
 # normalize_clients_for_live (defensive, drops source Solde)
 # =========================
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
-    """
-    Coerce input to DataFrame, map headers, normalize numeric columns, ensure acomptes exist,
-    compute Payé = sum(Acompte cols) and Solde = Montant + Autres - Payé.
-    If the input contains a "Solde" column it is renamed to "Solde_source" and dropped
-    so that the app always recalculates canonical Solde.
-    """
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
             maybe_df = read_any_table(df_clients_raw, sheet=None, debug_prefix="[normalize] ")
@@ -841,7 +836,7 @@ def unique_nonempty(series):
         out.append(s)
     return sorted(list(dict.fromkeys(out)))
 
-# KPI HTML small card
+# KPI small card HTML
 def kpi_html(label: str, value: str, sub: str = "") -> str:
     html = f"""
     <div style="border:1px solid rgba(255,255,255,0.04); border-radius:6px; padding:8px 10px; margin:6px 4px;">
@@ -853,7 +848,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # =========================
-# Tabs UI
+# Tabs UI (Files / Dashboard / Analyses / Add / Edit-Delete / Export)
 # =========================
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -967,6 +962,7 @@ with tabs[1]:
         canonical_solde_sum = float(total_honoraires + total_autres - total_paye)
         total_solde_recorded = float(view.get("Solde", 0).apply(safe_num).sum())
 
+        # KPIs
         cols_k = st.columns(4)
         cols_k[0].markdown(kpi_html("Dossiers (vue)", f"{len(view):,}"), unsafe_allow_html=True)
         cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
@@ -996,6 +992,7 @@ with tabs[1]:
                 st.dataframe(mshow[disp_cols + ["_acomptes_raw_concat_"]].head(200), use_container_width=True, height=360)
                 st.markdown("Téléchargez la vue filtrée si vous voulez que j'analyse plus en détail (onglet Export).")
 
+        # Display list
         st.markdown("### Détails — clients correspondant aux filtres")
         display_df = view.copy()
         if "Date" in display_df.columns:
@@ -1015,11 +1012,23 @@ with tabs[1]:
         except Exception:
             st.write("Impossible d'afficher la liste des clients (trop volumineuse). Utilisez l'export.")
 
-# ---- Add tab (new dedicated simple form) ----
+# ---- Analyses tab ----
+with tabs[2]:
+    st.subheader("📈 Analyses")
+    st.info("Graphiques et analyses (basics).")
+    df_ = _get_df_live()
+    if isinstance(df_, pd.DataFrame) and not df_.empty and "Categories" in df_.columns:
+        cat_counts = df_["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
+        if HAS_PLOTLY and px is not None:
+            fig = px.pie(cat_counts, names="Categorie", values="Nombre", hole=0.4, title="Répartition par catégorie")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
+
+# ---- Add tab (dedicated) ----
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live()
-    # Prepare category options
     if visa_categories:
         categories_options = visa_categories
     else:
@@ -1029,10 +1038,9 @@ with tabs[3]:
         else:
             categories_options = []
 
-    st.write("Formulaire d'ajout rapide — les champs numeric acceptent formats '2 500,00 €' ou '2500'.")
+    st.write("Formulaire d'ajout rapide — formats acceptés: '2 500,00 €', '2500', etc.")
 
     with st.form(key=skey("form_add_tab")):
-        # Row 1
         r1c1, r1c2, r1c3 = st.columns([1.4,2.2,0.8])
         with r1c1:
             add_dossier = st.text_input("Dossier N", value="", placeholder="Ex: D12345", key=skey("addtab","dossier"))
@@ -1042,7 +1050,6 @@ with tabs[3]:
             next_id = get_next_client_id(df_live)
             st.markdown(f"**ID_Client**\n{next_id}")
 
-        # Row 2: category/sub
         r2c1, r2c2 = st.columns([1.4,2.8])
         with r2c1:
             categories_local = [""] + [c.strip() for c in categories_options]
@@ -1063,7 +1070,6 @@ with tabs[3]:
                     add_sub_options = []
             add_sub = st.selectbox("Sous-catégorie", options=[""] + add_sub_options, index=0, key=skey("addtab","sub"))
 
-        # Row 3: date / visa / montant
         r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
         with r3c1:
             add_date = st.date_input("Date", value=date.today(), key=skey("addtab","date"))
@@ -1072,7 +1078,6 @@ with tabs[3]:
         with r3c3:
             add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
 
-        # Row 4: autres / acomptes
         r4c1, r4c2 = st.columns([1.6,2.4])
         with r4c1:
             add_autres = st.text_input("Autres frais (US $)", value="0", key=skey("addtab","autres"))
@@ -1105,18 +1110,20 @@ with tabs[3]:
                 new_row["Payé"] = paid_sum
                 new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - paid_sum
                 new_row["Commentaires"] = add_comments
-                flags_to_create = DEFAULT_FLAGS  # basic flags presence
+                # ensure flags exist
+                flags_to_create = DEFAULT_FLAGS
                 ensure_flag_columns(df_live, flags_to_create)
                 for opt in flags_to_create:
                     new_row[opt] = 0
-                df_live = df_live.append(new_row, ignore_index=True)
+                # append using pd.concat (pandas >= 2.0)
+                df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
                 df_live = recalc_payments_and_solde(df_live)
                 _set_df_live(df_live)
                 st.success("Dossier ajouté.")
             except Exception as e:
                 st.error(f"Erreur ajout: {e}")
 
-# ---- Gestion tab (modify / delete only) ----
+# ---- Gestion tab (edit / delete) ----
 with tabs[4]:
     st.subheader("✏️ / 🗑️ Gestion — Modifier / Supprimer")
     df_live = _get_df_live()
@@ -1207,7 +1214,7 @@ with tabs[5]:
             csv_bytes = df_live.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
 
-        # XLSX export with Solde_formule numeric
+        # XLSX export with numeric Solde_formule
         with col2:
             df_for_export = df_live.copy()
             try:
