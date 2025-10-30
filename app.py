@@ -1,22 +1,24 @@
 # Visa Manager - app.py
-# Full Streamlit application implementing requested behaviors and modified "Gestion" layout:
-# - Files, Dashboard, Analyses, Ajouter, Gestion (modified), Export
-# - Auto Dossier N numeric sequence starting at 13057
-# - ID_Client generated as YYYYMMDD-<seq> (distinct from Dossier N)
-# - Ajouter shows ID_Client, Dossier N, Date, Nom, Cat/Sub/Visa, Montant honoraires, Acompte 1, Date Acompte 1, Escrow (checkbox), Solde computed
-# - Gestion (modify) layout updated:
-#     * First row: ID Client | Dossier N | Date (événement)
-#     * Second row: Nom (full width)
-#     * Third row: Catégorie | Sous-catégorie | Visa
-#     * Fourth row: Montant honoraires | Autres frais | Montant Total | Acompte 1 | Solde (computed, readonly)
-#     * Fifth row: Acompte 2 | Acompte 3 | Acompte 4 (same line)
-#     * Sixth row: Date Acompte 2 | Date Acompte 3 | Date Acompte 4 (each below its acompte)
-#     * Metadata "Créé le / Créé par / Dernière modification / Modifié par" removed from visible form
-# - Recalc Payé & Solde persisted on save
-# - Export CSV and XLSX with optional formulas
+# Full, complete Streamlit application (single file).
+# - Reads Clients (CSV/XLSX) and Visa (CSV/XLSX) with robust parsing and heuristic mapping.
+# - Supports Add and Gestion tabs with requested layouts and behavior.
+# - ID_Client generated as YYYYMMDD-<seq> different from numeric Dossier N (starts at 13057).
+# - Gestion form layout:
+#     Line 1: ID_Client | Dossier N | Date (événement)
+#     Line 2: Nom client (full width)
+#     Line 3: Catégorie | Sous-catégorie | Visa
+#     Line 4: Montant honoraires | Autres frais | Montant Total (computed) | Acompte 1 | Solde (computed, readonly)
+#     Line 5: Acompte 2 | Acompte 3 | Acompte 4 (same line)
+#     Line 6: Date Acompte 2 | Date Acompte 3 | Date Acompte 4 (below each)
+#     Flags line (added in Gestion): Dossiers envoyé | Dossier approuvé | Dossier refusé | Dossier Annulé | RFE and a Date (Date d'envoi / Date état)
+# - Recalculation of Payé and Solde on save and on load.
+# - Export CSV & XLSX (optional formulas if openpyxl installed).
 #
-# Usage: streamlit run app.py
-# Requirements: pandas, streamlit. openpyxl optional for XLSX formula exports.
+# Usage: pip install streamlit pandas openpyxl
+#        streamlit run app.py
+#
+# Note: this file expects Clients CSV with semicolon (;) separators like the provided Clients BL.csv.
+# It also recovers columns heuristically and ensures required columns exist.
 
 import os
 import json
@@ -36,7 +38,7 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# openpyxl for writing formulas
+# Optional openpyxl for XLSX formula exports
 try:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -58,6 +60,7 @@ COLS_CLIENTS = [
     "Escrow",
     "RFE", "Dossiers envoyé", "Dossier approuvé",
     "Dossier refusé", "Dossier Annulé",
+    "Date d'envoi",  # used for flags date
     "Date de création", "Créé par", "Dernière modification", "Modifié par",
     "Commentaires"
 ]
@@ -69,7 +72,7 @@ SHEET_VISA = "Visa"
 SID = "vmgr"
 DEFAULT_START_CLIENT_ID = 13057
 
-# Current user (replace or integrate with auth)
+# Current user (replace with login integration if you have it)
 CURRENT_USER = "charleytrigano"
 
 def skey(*parts: str) -> str:
@@ -118,7 +121,7 @@ def money_to_float(x: Any) -> float:
         pass
     try:
         s = str(x).strip()
-        if s == "" or s in ("-", "—", "–", "NA", "N/A"):
+        if s == "" or s.lower() in ("na","n/a","nan"):
             return 0.0
         s = s.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
         s = re.sub(r"[^\d,.\-]", "", s)
@@ -131,15 +134,13 @@ def money_to_float(x: Any) -> float:
                 s = s.replace(",", "")
         else:
             if "," in s and s.count(",") == 1 and "." not in s:
+                # assume comma decimal if two digits after
                 if len(s.split(",")[-1]) == 2:
                     s = s.replace(",", ".")
                 else:
                     s = s.replace(",", "")
             else:
                 s = s.replace(",", ".")
-        s = s.strip()
-        if s in ("", "-"):
-            return 0.0
         return float(s)
     except Exception:
         try:
@@ -148,7 +149,9 @@ def money_to_float(x: Any) -> float:
             return 0.0
 
 def _to_num(x: Any) -> float:
-    return money_to_float(x) if not isinstance(x, (int, float)) else float(x)
+    if isinstance(x, (int, float)):
+        return float(x)
+    return money_to_float(x)
 
 def _fmt_money(v: Any) -> str:
     try:
@@ -179,7 +182,7 @@ COL_CANDIDATES = {
     "categories": "Categories", "categorie": "Categories",
     "sous categorie": "Sous-categorie", "sous-categorie": "Sous-categorie", "souscategorie": "Sous-categorie",
     "visa": "Visa",
-    "montant": "Montant honoraires (US $)", "montant honoraires": "Montant honoraires (US $)", "honoraires": "Montant honoraires (US $)",
+    "montant": "Montant honoraires (US $)", "montant honoraires": "Montant honoraires (US $)",
     "autres frais": "Autres frais (US $)", "autresfrais": "Autres frais (US $)",
     "payé": "Payé", "paye": "Payé",
     "solde": "Solde",
@@ -263,6 +266,62 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -------------------------
+# Visa options helper (ensure defined before UI usage)
+# -------------------------
+DEFAULT_VISA_OPTIONS_BY_CAT_SUB: Dict[Tuple[str,str], List[str]] = {}
+for cat in ["Affaires", "Tourisme"]:
+    for sub in ["B-1", "B-2"]:
+        DEFAULT_VISA_OPTIONS_BY_CAT_SUB[(canonical_key(cat), canonical_key(sub))] = ["COS", "EOS"]
+
+# visa_sub_options_map will be populated after reading Visa sheet; define empty default.
+visa_sub_options_map: Dict[str, List[str]] = {}
+visa_map: Dict[str, List[str]] = {}
+visa_map_norm: Dict[str, List[str]] = {}
+visa_categories: List[str] = []
+
+def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
+    """
+    Return visa options for given cat/sub using visa_sub_options_map or defaults.
+    """
+    global visa_sub_options_map, visa_map, visa_map_norm, DEFAULT_VISA_OPTIONS_BY_CAT_SUB
+    # 1) prefer visa_sub_options_map by canonical sub key
+    try:
+        if sub:
+            ksub = canonical_key(sub)
+            if isinstance(visa_sub_options_map, dict) and ksub in visa_sub_options_map:
+                opts = visa_sub_options_map.get(ksub, [])
+                if opts:
+                    return opts[:]
+    except Exception:
+        pass
+    # 2) fallback to visa_map_norm (list of subcats for category)
+    try:
+        if cat:
+            kcat = canonical_key(cat)
+            if isinstance(visa_map_norm, dict) and kcat in visa_map_norm:
+                return visa_map_norm.get(kcat, [])[:]
+    except Exception:
+        pass
+    # 3) fallback to DEFAULT_VISA_OPTIONS_BY_CAT_SUB
+    try:
+        if cat and sub:
+            key = (canonical_key(cat), canonical_key(sub))
+            if key in DEFAULT_VISA_OPTIONS_BY_CAT_SUB:
+                return DEFAULT_VISA_OPTIONS_BY_CAT_SUB[key][:]
+    except Exception:
+        pass
+    # 4) last resort: try by sub only
+    try:
+        if sub:
+            ksub = canonical_key(sub)
+            for (kcat, ksub_k), opts in DEFAULT_VISA_OPTIONS_BY_CAT_SUB.items():
+                if ksub_k == ksub:
+                    return opts[:]
+    except Exception:
+        pass
+    return []
+
+# -------------------------
 # I/O helpers
 # -------------------------
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
@@ -292,10 +351,12 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
         _log("read_any_table: src is None")
         return None
     try:
+        # bytes (uploaded)
         if isinstance(src, (bytes, bytearray)):
             df = try_read_excel_from_bytes(bytes(src), sheet)
             if df is not None:
                 return df
+            # fall back to csv attempts
             try:
                 return pd.read_csv(BytesIO(src), sep=";", encoding="utf-8", on_bad_lines="skip")
             except Exception:
@@ -303,25 +364,20 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
                     return pd.read_csv(BytesIO(src), sep=",", encoding="utf-8", on_bad_lines="skip")
                 except Exception:
                     return None
-        if isinstance(src, (BytesIO,)):
+        # BytesIO
+        if isinstance(src, BytesIO):
+            b = src.getvalue()
+            df = try_read_excel_from_bytes(b, sheet)
+            if df is not None:
+                return df
             try:
-                b = src.getvalue()
+                return pd.read_csv(BytesIO(b), sep=";", encoding="utf-8", on_bad_lines="skip")
             except Exception:
                 try:
-                    src.seek(0); b = src.read()
+                    return pd.read_csv(BytesIO(b), sep=",", encoding="utf-8", on_bad_lines="skip")
                 except Exception:
-                    b = None
-            if b:
-                df = try_read_excel_from_bytes(b, sheet)
-                if df is not None:
-                    return df
-                try:
-                    return pd.read_csv(BytesIO(b), sep=";", encoding="utf-8", on_bad_lines="skip")
-                except Exception:
-                    try:
-                        return pd.read_csv(BytesIO(b), sep=",", encoding="utf-8", on_bad_lines="skip")
-                    except Exception:
-                        return None
+                    return None
+        # file-like
         if hasattr(src, "read") and hasattr(src, "name"):
             try:
                 data = src.getvalue()
@@ -341,12 +397,14 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
                         return pd.read_csv(BytesIO(data), sep=",", encoding="utf-8", on_bad_lines="skip")
                     except Exception:
                         return None
+        # path
         if isinstance(src, (str, os.PathLike)):
             p = str(src)
             if not os.path.exists(p):
                 _log(f"path does not exist: {p}")
                 return None
             if p.lower().endswith(".csv"):
+                # try semicolon first (your CSV uses ;)
                 try:
                     return pd.read_csv(p, sep=";", encoding="utf-8", on_bad_lines="skip")
                 except Exception:
@@ -414,11 +472,12 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
         if c not in out.columns:
-            if c in ["Payé", "Solde", "Solde à percevoir (US $)", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
+            if c in ["Payé", "Solde", "Solde à percevoir (US $)", "Montant honoraires (US $)", "Autres frais (US $)",
+                     "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
                 out[c] = 0.0
             elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
                 out[c] = 0
-            elif c in ["Date de création", "Dernière modification", "Date", "Date Acompte 1", "Date Acompte 2"]:
+            elif c in ["Date de création", "Dernière modification", "Date", "Date Acompte 1", "Date Acompte 2", "Date Acompte 3", "Date Acompte 4", "Date d'envoi"]:
                 out[c] = pd.NaT
             elif c == "Escrow":
                 out[c] = 0
@@ -432,9 +491,10 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
             if c in out.columns:
                 safe[c] = out[c]
             else:
-                if c in ["Payé", "Solde", "Solde à percevoir (US $)", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
+                if c in ["Payé", "Solde", "Solde à percevoir (US $)", "Montant honoraires (US $)", "Autres frais (US $)",
+                         "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
                     safe[c] = 0.0
-                elif c in ["Date de création", "Dernière modification", "Date", "Date Acompte 1", "Date Acompte 2"]:
+                elif c in ["Date de création", "Dernière modification", "Date", "Date Acompte 1", "Date Acompte 2", "Date Acompte 3", "Date Acompte 4", "Date d'envoi"]:
                     safe[c] = pd.NaT
                 elif c == "Escrow":
                     safe[c] = 0
@@ -443,59 +503,38 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
         return safe
 
 # -------------------------
-# normalize_clients_for_live (defensive)
+# normalize_clients_for_live
 # -------------------------
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
     if not isinstance(df_clients_raw, pd.DataFrame):
-        try:
-            maybe_df = read_any_table(df_clients_raw, sheet=None, debug_prefix="[normalize] ")
-            if isinstance(maybe_df, pd.DataFrame):
-                df_clients_raw = maybe_df
-            else:
-                df_clients_raw = pd.DataFrame()
-        except Exception:
-            df_clients_raw = pd.DataFrame()
-    if df_clients_raw is None or not isinstance(df_clients_raw, pd.DataFrame):
-        df_clients_raw = pd.DataFrame()
-
-    try:
-        df_mapped, _ = map_columns_heuristic(df_clients_raw)
-        if not isinstance(df_mapped, pd.DataFrame):
-            df_mapped = pd.DataFrame()
-    except Exception:
-        df_mapped = df_clients_raw.copy() if isinstance(df_clients_raw, pd.DataFrame) else pd.DataFrame()
-
-    # parse date columns
-    for dtc in ["Date","Date de création","Dernière modification","Date Acompte 1","Date Acompte 2","Date Acompte 3","Date Acompte 4"]:
+        maybe_df = read_any_table(df_clients_raw, sheet=None, debug_prefix="[normalize] ")
+        df_clients_raw = maybe_df if isinstance(maybe_df, pd.DataFrame) else pd.DataFrame()
+    df_mapped, _ = map_columns_heuristic(df_clients_raw)
+    # parse date columns safely
+    for dtc in ["Date","Date de création","Dernière modification","Date Acompte 1","Date Acompte 2","Date Acompte 3","Date Acompte 4","Date d'envoi"]:
         if dtc in df_mapped.columns:
             try:
-                df_mapped[dtc] = pd.to_datetime(df_mapped[dtc], errors="coerce")
+                df_mapped[dtc] = pd.to_datetime(df_mapped[dtc], dayfirst=True, errors="coerce")
             except Exception:
                 pass
-
     df = _ensure_columns(df_mapped, COLS_CLIENTS)
-
+    # numeric coercion
     for col in NUMERIC_TARGETS:
         if col in df.columns:
             try:
                 df[col] = df[col].apply(lambda x: _to_num(x))
             except Exception:
-                try:
-                    df[col] = df[col].apply(lambda x: 0.0)
-                except Exception:
-                    pass
-
-    for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
+                df[col] = 0.0
+    # ensure acomptes present
+    for acc in ["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
         if acc not in df.columns:
             df[acc] = 0.0
-
     acomptes_cols = detect_acompte_columns(df)
     if acomptes_cols:
         try:
             df["Payé"] = df[acomptes_cols].fillna(0).apply(lambda row: sum([_to_num(row[c]) for c in acomptes_cols]), axis=1)
         except Exception:
             df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x))
-
     try:
         montant_col = detect_montant_column(df) or "Montant honoraires (US $)"
         autres_col = detect_autres_column(df) or "Autres frais (US $)"
@@ -505,27 +544,18 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         df["Solde"] = df[montant_col] + df[autres_col] - df["Payé"]
         df["Solde à percevoir (US $)"] = df["Solde"].copy()
     except Exception:
-        try:
-            df["Solde"] = df.get("Solde", 0).apply(lambda x: _to_num(x))
-            df["Solde à percevoir (US $)"] = df.get("Solde à percevoir (US $)", 0).apply(lambda x: _to_num(x))
-        except Exception:
-            df["Solde"] = 0.0
-            df["Solde à percevoir (US $)"] = 0.0
-
-    for f in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
+        df["Solde"] = df.get("Solde", 0).apply(lambda x: _to_num(x))
+        df["Solde à percevoir (US $)"] = df.get("Solde à percevoir (US $)", 0).apply(lambda x: _to_num(x))
+    # flags default
+    for f in ["RFE","Dossiers envoyé","Dossier approuvé","Dossier refusé","Dossier Annulé"]:
         if f not in df.columns:
             df[f] = 0
-
     if "Escrow" not in df.columns:
         df["Escrow"] = 0
-
-    for c in ["Nom", "Categories", "Sous-categorie", "Visa", "Commentaires", "Créé par", "Modifié par"]:
+    for c in ["Nom","Categories","Sous-categorie","Visa","Commentaires","Créé par","Modifié par"]:
         if c in df.columns:
-            try:
-                df[c] = df[c].astype(str).fillna("")
-            except Exception:
-                df[c] = df[c].fillna("").astype(str)
-
+            df[c] = df[c].fillna("").astype(str)
+    # date breakdown
     try:
         dser = pd.to_datetime(df["Date"], errors="coerce")
         df["_Année_"] = dser.dt.year.fillna(0).astype(int)
@@ -533,7 +563,6 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         df["Mois"] = df["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if pd.notna(m) and m>0 else "")
     except Exception:
         df["_Année_"] = 0; df["_MoisNum_"] = 0; df["Mois"] = ""
-
     return df
 
 # -------------------------
@@ -543,23 +572,19 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     out = df.copy()
-
     acomptes = detect_acompte_columns(out)
     if not acomptes:
         for acc in ["Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
             if acc not in out.columns:
                 out[acc] = 0.0
         acomptes = detect_acompte_columns(out)
-
     for c in acomptes:
         try:
             out[c] = out[c].apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
         except Exception:
             out[c] = out[c].apply(lambda x: 0.0)
-
     montant_col = detect_montant_column(out) or "Montant honoraires (US $)"
     autres_col = detect_autres_column(out) or "Autres frais (US $)"
-
     for c in [montant_col, autres_col]:
         if c not in out.columns:
             out[c] = 0.0
@@ -568,12 +593,10 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
                 out[c] = out[c].apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
             except Exception:
                 out[c] = out[c].apply(lambda x: 0.0)
-
     try:
         out["Payé"] = out[acomptes].sum(axis=1).astype(float) if acomptes else out.get("Payé",0).apply(lambda x: _to_num(x))
     except Exception:
         out["Payé"] = out.get("Payé",0).apply(lambda x: _to_num(x))
-
     try:
         out["Solde"] = out[montant_col] + out[autres_col] - out["Payé"]
         out["Solde à percevoir (US $)"] = out["Solde"].copy()
@@ -583,14 +606,12 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         out["Solde"] = out.get("Solde",0).apply(lambda x: _to_num(x))
         out["Solde à percevoir (US $)"] = out.get("Solde à percevoir (US $)",0).apply(lambda x: _to_num(x))
-
-    # Ensure Escrow is integer 0/1
+    # ensure escrow normalized
     if "Escrow" in out.columns:
         try:
             out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else (1 if _to_num(x) == 1 else 0))
         except Exception:
             out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else 0)
-
     return out
 
 # -------------------------
@@ -644,7 +665,7 @@ except Exception:
     pass
 
 # File uploaders (always present: Clients & Visa)
-up_clients = st.sidebar.file_uploader("Clients (xlsx/xls/csv)", type=["xlsx","xls","csv"], key=skey("up_clients"))
+up_clients = st.sidebar.file_uploader("Clients (xlsx/xls/csv) — si vous fournissez le CSV (Clients BL.csv) il sera lu correctement", type=["xlsx","xls","csv"], key=skey("up_clients"))
 up_visa = st.sidebar.file_uploader("Visa (xlsx/xls/csv)", type=["xlsx","xls","csv"], key=skey("up_visa"))
 
 clients_path_in = st.sidebar.text_input("ou chemin local Clients (optionnel)", value=last_clients_path or "", key=skey("cli_path"))
@@ -817,8 +838,14 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
 else:
     visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 
+# ensure our globals updated for get_visa_options
+globals()['visa_map'] = visa_map
+globals()['visa_map_norm'] = visa_map_norm
+globals()['visa_categories'] = visa_categories
+globals()['visa_sub_options_map'] = visa_sub_options_map
+
 # -------------------------
-# Build live df and session state
+# Build live df and enforce canonical Payé/Solde
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -862,11 +889,11 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # -------------------------
-# Tabs UI (Files / Dashboard / Analyses / Add / Gestion / Export)
+# Tabs UI: Files / Dashboard / Analyses / Add / Gestion / Export
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
-# ---- Files tab ----
+# Files tab
 with tabs[0]:
     st.header("📂 Fichiers")
     c1, c2 = st.columns(2)
@@ -915,9 +942,9 @@ with tabs[0]:
             except Exception:
                 pass
 
-# ---- Dashboard tab ----
+# Dashboard
 with tabs[1]:
-    st.subheader("📊 Dashboard (totaux et diagnostics)")
+    st.subheader("📊 Dashboard")
     df_live_view = recalc_payments_and_solde(_get_df_live())
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
@@ -931,14 +958,12 @@ with tabs[1]:
                 years = sorted([int(y) for y in pd.to_numeric(df_live_view["_Année_"], errors="coerce").dropna().unique().astype(int).tolist()])
             except Exception:
                 years = []
-
         f1, f2, f3, f4 = st.columns([1,1,1,1])
         sel_cat = f1.selectbox("Catégorie", options=[""]+cats, index=0, key=skey("dash","cat"))
         sel_sub = f2.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=skey("dash","sub"))
         sel_visa = f3.selectbox("Visa", options=[""]+visas, index=0, key=skey("dash","visa"))
         year_options = ["Toutes les années"] + [str(y) for y in years]
         sel_year = f4.selectbox("Année", options=year_options, index=0, key=skey("dash","year"))
-
         view = df_live_view.copy()
         if sel_cat:
             view = view[view["Categories"].astype(str) == sel_cat]
@@ -948,44 +973,35 @@ with tabs[1]:
             view = view[view["Visa"].astype(str) == sel_visa]
         if sel_year and sel_year != "Toutes les années":
             view = view[view["_Année_"].astype(str) == sel_year]
-
         view = recalc_payments_and_solde(view)
-
         def safe_num(x):
             try:
                 return float(_to_num(x))
             except Exception:
                 return 0.0
-
         montant_col = detect_montant_column(view) or "Montant honoraires (US $)"
         autres_col = detect_autres_column(view) or "Autres frais (US $)"
         acomptes_cols = detect_acompte_columns(view)
-
         view["_Montant_num_"] = view.get(montant_col, 0).apply(safe_num)
         view["_Autres_num_"] = view.get(autres_col, 0).apply(safe_num)
-
         total_acomptes_sum = 0.0
         if acomptes_cols:
             for c in acomptes_cols:
                 view[f"_ac_{c}"] = view.get(c, 0).apply(safe_num)
                 total_acomptes_sum += float(view[f"_ac_{c}"].sum())
-
         total_honoraires = float(view["_Montant_num_"].sum())
         total_autres = float(view["_Autres_num_"].sum())
         total_paye = float(total_acomptes_sum)
         canonical_solde_sum = float(total_honoraires + total_autres - total_paye)
-
         cols_k = st.columns(4)
         cols_k[0].markdown(kpi_html("Dossiers (vue)", f"{len(view):,}"), unsafe_allow_html=True)
         cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
         cols_k[2].markdown(kpi_html("Autres frais", _fmt_money(total_autres)), unsafe_allow_html=True)
         cols_k[3].markdown(kpi_html("Total facturé (recalc)", _fmt_money(total_honoraires + total_autres)), unsafe_allow_html=True)
-
         st.markdown("---")
         cols_k2 = st.columns(2)
         cols_k2[0].markdown(kpi_html("Montant payé (somme acomptes)", _fmt_money(total_paye)), unsafe_allow_html=True)
         cols_k2[1].markdown(kpi_html("Solde total (recalc)", _fmt_money(canonical_solde_sum)), unsafe_allow_html=True)
-
         st.markdown("### Détails — clients correspondant aux filtres")
         display_df = view.copy()
         if "Date" in display_df.columns:
@@ -993,7 +1009,7 @@ with tabs[1]:
                 display_df["Date"] = pd.to_datetime(display_df["Date"], errors="coerce").dt.date.astype(str)
             except Exception:
                 display_df["Date"] = display_df["Date"].astype(str)
-        for dtc in ["Date Acompte 1", "Date Acompte 2", "Date de création", "Dernière modification"]:
+        for dtc in ["Date Acompte 1", "Date Acompte 2", "Date d'envoi", "Date de création", "Dernière modification"]:
             if dtc in display_df.columns:
                 try:
                     display_df[dtc] = pd.to_datetime(display_df[dtc], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -1011,7 +1027,7 @@ with tabs[1]:
         except Exception:
             st.write("Impossible d'afficher la liste des clients (trop volumineuse). Utilisez l'export.")
 
-# ---- Analyses tab ----
+# Analyses
 with tabs[2]:
     st.subheader("📈 Analyses")
     st.info("Graphiques et analyses basiques.")
@@ -1024,22 +1040,17 @@ with tabs[2]:
         else:
             st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
-# ---- Add tab ----
+# Add tab
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live()
-
-    # Determine next ID and next dossier number
-    next_dossier = str(get_next_dossier_numeric(df_live))
+    next_dossier_num = get_next_dossier_numeric(df_live)
+    next_dossier = str(next_dossier_num)
     next_id_client = make_id_client_datebased(df_live)
-
-    # show ID and Dossier N as auto fields (non-editable)
     st.markdown(f"**ID_Client (auto)**: {next_id_client}")
     st.markdown(f"**Dossier N (auto)**: {next_dossier}")
-
     add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
     add_nom = st.text_input("Nom du client", value="", placeholder="Nom complet du client", key=skey("addtab","nom"))
-
     if visa_categories:
         categories_options = visa_categories
     else:
@@ -1048,7 +1059,6 @@ with tabs[3]:
             categories_options = sorted([c for c in dict.fromkeys(cats_series) if c and c.lower() != "nan"])
         else:
             categories_options = []
-
     r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
     with r3c1:
         categories_local = [""] + [c.strip() for c in categories_options]
@@ -1074,8 +1084,7 @@ with tabs[3]:
             add_visa = st.selectbox("Visa (options)", options=[""] + specific_options, index=0, key=skey("addtab","visa"))
         else:
             add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
-
-    r4c1, r4c2, r4c3, r4c4 = st.columns([1.2,1.0,1.0,0.8])
+    r4c1, r4c2, r4c3, r4c4 = st.columns([1.2,1.0,1.0,0.6])
     with r4c1:
         add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
     with r4c2:
@@ -1084,7 +1093,6 @@ with tabs[3]:
         a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
     with r4c4:
         escrow_checked = st.checkbox("Escrow", value=False, key=skey("addtab","escrow"))
-
     try:
         montant_val = money_to_float(add_montant)
         autres_val = 0.0  # Autres not present in Add
@@ -1093,10 +1101,8 @@ with tabs[3]:
         solde_display = _fmt_money(solde_val)
     except Exception:
         solde_display = _fmt_money(0)
-
     st.markdown(f"**Solde**: {solde_display}")
     add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
-
     if st.button("Ajouter", key=skey("addtab","btn_add")):
         try:
             new_row = {c: "" for c in df_live.columns}
@@ -1132,22 +1138,23 @@ with tabs[3]:
             ensure_flag_columns(df_live, flags_to_create)
             for opt in flags_to_create:
                 new_row[opt] = 0
+            # ensure Date d'envoi present
+            new_row["Date d'envoi"] = pd.NaT
             df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
             df_live = recalc_payments_and_solde(df_live)
             _set_df_live(df_live)
-            st.success(f"Dossier ajouté : ID_Client {next_id_client} / Dossier N {next_dossier}")
+            st.success(f"Dossier ajouté : ID_Client {next_id_client} — Dossier N {next_dossier}")
         except Exception as e:
             st.error(f"Erreur ajout: {e}")
 
-# ---- Gestion tab (modified layout per your request) ----
+# Gestion tab (modified layout)
 with tabs[4]:
     st.subheader("✏️ / 🗑️ Gestion — Modifier / Supprimer")
     df_live = _get_df_live()
-
-    # Ensure expected columns exist
+    # ensure columns exist
     for c in COLS_CLIENTS:
         if c not in df_live.columns:
-            if c in ["Date Acompte 2", "Date Acompte 3", "Date Acompte 4"]:
+            if c in ["Date Acompte 2","Date Acompte 3","Date Acompte 4","Date d'envoi","Date de création","Dernière modification"]:
                 df_live[c] = pd.NaT
             else:
                 df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
@@ -1162,21 +1169,20 @@ with tabs[4]:
             row = df_live.loc[idx].copy()
 
             st.write("Modifier la ligne sélectionnée :")
-
             with st.form(key=skey("form_edit")):
-                # First line: ID Client | Dossier N | Date (événement)
-                c1, c2, c3 = st.columns([1.4, 1.0, 1.2])
-                with c1:
+                # Line 1: ID_Client | Dossier N | Date
+                r1c1, r1c2, r1c3 = st.columns([1.4,1.0,1.2])
+                with r1c1:
                     st.markdown(f"**ID_Client :** {row.get('ID_Client','')}")
-                with c2:
+                with r1c2:
                     e_dossier = st.text_input("Dossier N", value=str(row.get("Dossier N","")), key=skey("edit","dossier"))
-                with c3:
+                with r1c3:
                     e_date = st.date_input("Date (événement)", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
 
-                # Second line: Nom client (full width)
+                # Line 2: Nom full width
                 e_nom = st.text_input("Nom du client", value=str(row.get("Nom","")), key=skey("edit","nom"))
 
-                # Third line: Categorie | Sous-categorie | Visa
+                # Line 3: Category | Sub | Visa
                 r3c1, r3c2, r3c3 = st.columns([1.2,1.2,1.6])
                 with r3c1:
                     if visa_categories:
@@ -1220,7 +1226,7 @@ with tabs[4]:
                     else:
                         e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa"))
 
-                # Fourth line: Montant honoraires | Autres frais | Montant Total | Acompte 1 | Solde
+                # Line 4: Montant | Autres | Montant Total (computed) | Acompte1 | Solde (computed readonly)
                 r4c1, r4c2, r4c3, r4c4, r4c5 = st.columns([1.2,1.0,1.0,1.0,1.0])
                 with r4c1:
                     e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
@@ -1242,7 +1248,7 @@ with tabs[4]:
                         solde_preview = row.get("Solde", 0)
                     st.text_input("Solde (calculé)", value=str(solde_preview), key=skey("edit","solde_preview"), disabled=True)
 
-                # Fifth line: Acompte 2 | Acompte 3 | Acompte 4 (same line)
+                # Line 5: Acompte2 | Acompte3 | Acompte4
                 r5c1, r5c2, r5c3 = st.columns([1.0,1.0,1.0])
                 with r5c1:
                     e_ac2 = st.text_input("Acompte 2", value=str(row.get("Acompte 2",0)), key=skey("edit","ac2"))
@@ -1251,7 +1257,7 @@ with tabs[4]:
                 with r5c3:
                     e_ac4 = st.text_input("Acompte 4", value=str(row.get("Acompte 4",0)), key=skey("edit","ac4"))
 
-                # Sixth line: Date Acompte 2 | Date Acompte 3 | Date Acompte 4 (each below its acompte)
+                # Line 6: Date Acompte2 | Date Acompte3 | Date Acompte4
                 r6c1, r6c2, r6c3 = st.columns([1.0,1.0,1.0])
                 with r6c1:
                     e_ac2_date = st.date_input("Date Acompte 2", value=_date_for_widget(row.get("Date Acompte 2")) if pd.notna(row.get("Date Acompte 2")) else None, key=skey("edit","ac2_date"))
@@ -1260,7 +1266,24 @@ with tabs[4]:
                 with r6c3:
                     e_ac4_date = st.date_input("Date Acompte 4", value=_date_for_widget(row.get("Date Acompte 4")) if pd.notna(row.get("Date Acompte 4")) else None, key=skey("edit","ac4_date"))
 
-                # Escrow, comments
+                # Flags line: Dossiers envoyé | Dossier approuvé | Dossier refusé | Dossier Annulé | RFE (checkboxes) and Date d'envoi
+                f1, f2, f3, f4, f5 = st.columns([1.0,1.0,1.0,1.0,0.6])
+                with f1:
+                    e_flag_envoye = st.checkbox("Dossiers envoyé", value=bool(int(row.get("Dossiers envoyé", 0))) if pd.notna(row.get("Dossiers envoyé", 0)) else False, key=skey("edit","flag_envoye"))
+                with f2:
+                    e_flag_approuve = st.checkbox("Dossier approuvé", value=bool(int(row.get("Dossier approuvé", 0))) if pd.notna(row.get("Dossier approuvé", 0)) else False, key=skey("edit","flag_approuve"))
+                with f3:
+                    e_flag_refuse = st.checkbox("Dossier refusé", value=bool(int(row.get("Dossier refusé", 0))) if pd.notna(row.get("Dossier refusé", 0)) else False, key=skey("edit","flag_refuse"))
+                with f4:
+                    e_flag_annule = st.checkbox("Dossier Annulé", value=bool(int(row.get("Dossier Annulé", 0))) if pd.notna(row.get("Dossier Annulé", 0)) else False, key=skey("edit","flag_annule"))
+                with f5:
+                    e_flag_rfe = st.checkbox("RFE", value=bool(int(row.get("RFE", 0))) if pd.notna(row.get("RFE", 0)) else False, key=skey("edit","flag_rfe"))
+                d1, d2 = st.columns([1.6, 1.0])
+                with d1:
+                    e_flags_date = st.date_input("Date d'envoi / Date état", value=_date_for_widget(row.get("Date d'envoi")) if pd.notna(row.get("Date d'envoi")) else None, key=skey("edit","flags_date"))
+                with d2:
+                    st.markdown(" ")  # spacer
+
                 e_escrow = st.checkbox("Escrow", value=bool(int(row.get("Escrow", 0))) if pd.notna(row.get("Escrow", 0)) else False, key=skey("edit","escrow"))
                 e_comments = st.text_area("Commentaires", value=str(row.get("Commentaires","")), key=skey("edit","comments"))
 
@@ -1285,8 +1308,17 @@ with tabs[4]:
                         df_live.at[idx, "Date Acompte 3"] = pd.to_datetime(e_ac3_date) if e_ac3_date else pd.NaT
                         df_live.at[idx, "Date Acompte 4"] = pd.to_datetime(e_ac4_date) if e_ac4_date else pd.NaT
                         df_live.at[idx, "Escrow"] = 1 if e_escrow else 0
+                        # flags
+                        df_live.at[idx, "Dossiers envoyé"] = 1 if e_flag_envoye else 0
+                        df_live.at[idx, "Dossier approuvé"] = 1 if e_flag_approuve else 0
+                        df_live.at[idx, "Dossier refusé"] = 1 if e_flag_refuse else 0
+                        df_live.at[idx, "Dossier Annulé"] = 1 if e_flag_annule else 0
+                        df_live.at[idx, "RFE"] = 1 if e_flag_rfe else 0
+                        df_live.at[idx, "Date d'envoi"] = pd.to_datetime(e_flags_date) if e_flags_date else pd.NaT
+                        # metadata
                         df_live.at[idx, "Dernière modification"] = datetime.now()
                         df_live.at[idx, "Modifié par"] = CURRENT_USER
+                        # recalc
                         df_live = recalc_payments_and_solde(df_live)
                         df_live.at[idx, "Solde à percevoir (US $)"] = df_live.at[idx, "Solde"]
                         df_live.at[idx, "Commentaires"] = e_comments
@@ -1315,7 +1347,7 @@ with tabs[4]:
             else:
                 st.warning("Aucune sélection pour suppression.")
 
-# ---- Export tab ----
+# Export tab
 with tabs[5]:
     st.header("💾 Export")
     df_live = _get_df_live()
@@ -1323,7 +1355,6 @@ with tabs[5]:
         st.info("Aucune donnée à exporter.")
     else:
         st.write(f"Vue en mémoire: {df_live.shape[0]} lignes, {df_live.shape[1]} colonnes")
-
         col1, col2 = st.columns(2)
         with col1:
             csv_bytes = df_live.to_csv(index=False).encode("utf-8")
@@ -1357,7 +1388,6 @@ with tabs[5]:
                 df_export_final.to_excel(writer, index=False, sheet_name="Clients")
             out_bytes = buf.getvalue()
             st.download_button("⬇️ Export XLSX (avec colonne Solde_formule)", data=out_bytes, file_name="Clients_export_with_Solde_formule.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
         st.markdown("### Option avancée : XLSX avec formules (Payé & Solde)")
         if st.button("Générer XLSX avec formules Payé & Solde"):
             if not HAS_OPENPYXL:
