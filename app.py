@@ -1,7 +1,10 @@
 # Visa Manager - app.py
-# Updated: "Ajouter" tab now shows only Acompte 1 + date, and adds "Solde à percevoir (US $)" computed.
-# Persist uploaded Clients & Visa files to local cache so re-uploads are not required on code changes.
-# Always two uploaders (Clients & Visa). Retains: robust parsing, metadata, reactive Add layout, edit/delete, exports, Visa mapping fallback.
+# Updated: "Ajouter" tab layout changed per request:
+# - Remove "Autres frais", "Acompte 2/3/4" from Add tab.
+# - On same line show: Montant honoraires | Acompte 1 | Date (Acompte 1) | Solde (calculated) | Escrow (checkbox)
+# - Escrow stored in new "Escrow" column (0/1)
+# - Files upload caching preserved (no need to re-upload after code edits)
+# - Dashboard, Edit, Export, Visa mapping, metadata preserved
 #
 # Usage: streamlit run app.py
 # Requires: pandas, streamlit; openpyxl optional for XLSX with formulas.
@@ -44,6 +47,8 @@ COLS_CLIENTS = [
     "Payé", "Solde", "Solde à percevoir (US $)",
     "Acompte 1", "Date Acompte 1",
     "Acompte 2", "Date Acompte 2", "Acompte 3", "Acompte 4",
+    # Escrow flag
+    "Escrow",
     "RFE", "Dossiers envoyé", "Dossier approuvé",
     "Dossier refusé", "Dossier Annulé",
     "Date de création", "Créé par", "Dernière modification", "Modifié par",
@@ -178,12 +183,13 @@ COL_CANDIDATES = {
     "autres frais": "Autres frais (US $)", "autresfrais": "Autres frais (US $)",
     "payé": "Payé", "paye": "Payé",
     "solde": "Solde",
-    "solde a percevoir": "Solde à percevoir (US $)", "soldeapercevoir": "Solde à percevoir (US $)",
+    "solde a percevoir": "Solde à percevoir (US $)",
     "acompte 1": "Acompte 1", "acompte1": "Acompte 1",
+    "date acompte 1": "Date Acompte 1",
     "acompte 2": "Acompte 2", "acompte2": "Acompte 2",
     "acompte 3": "Acompte 3", "acompte3": "Acompte 3",
     "acompte 4": "Acompte 4", "acompte4": "Acompte 4",
-    "date acompte 1": "Date Acompte 1", "date acompte1": "Date Acompte 1",
+    "escrow": "Escrow",
     "dossier envoye": "Dossiers envoyé", "dossier approuve": "Dossier approuvé", "dossier refuse": "Dossier refusé",
     "rfe": "RFE", "commentaires": "Commentaires"
 }
@@ -426,6 +432,8 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
                 out[c] = 0
             elif c in ["Date de création", "Dernière modification", "Date", "Date Acompte 1", "Date Acompte 2"]:
                 out[c] = pd.NaT
+            elif c == "Escrow":
+                out[c] = 0
             else:
                 out[c] = ""
     try:
@@ -440,6 +448,8 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
                     safe[c] = 0.0
                 elif c in ["Date de création", "Dernière modification", "Date", "Date Acompte 1", "Date Acompte 2"]:
                     safe[c] = pd.NaT
+                elif c == "Escrow":
+                    safe[c] = 0
                 else:
                     safe[c] = ""
         return safe
@@ -516,31 +526,13 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         except Exception:
             pass
 
-    if "Date" in df_mapped.columns:
-        try:
-            df_mapped["Date"] = pd.to_datetime(df_mapped["Date"], dayfirst=True, errors="coerce")
-        except Exception:
-            pass
-    if "Date de création" in df_mapped.columns:
-        try:
-            df_mapped["Date de création"] = pd.to_datetime(df_mapped["Date de création"], errors="coerce")
-        except Exception:
-            pass
-    if "Dernière modification" in df_mapped.columns:
-        try:
-            df_mapped["Dernière modification"] = pd.to_datetime(df_mapped["Dernière modification"], errors="coerce")
-        except Exception:
-            pass
-    if "Date Acompte 1" in df_mapped.columns:
-        try:
-            df_mapped["Date Acompte 1"] = pd.to_datetime(df_mapped["Date Acompte 1"], errors="coerce")
-        except Exception:
-            pass
-    if "Date Acompte 2" in df_mapped.columns:
-        try:
-            df_mapped["Date Acompte 2"] = pd.to_datetime(df_mapped["Date Acompte 2"], errors="coerce")
-        except Exception:
-            pass
+    # parse known date cols
+    for dtc in ["Date","Date de création","Dernière modification","Date Acompte 1","Date Acompte 2"]:
+        if dtc in df_mapped.columns:
+            try:
+                df_mapped[dtc] = pd.to_datetime(df_mapped[dtc], errors="coerce")
+            except Exception:
+                pass
 
     df = _ensure_columns(df_mapped, COLS_CLIENTS)
 
@@ -571,7 +563,6 @@ def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
         df[montant_col] = df.get(montant_col, 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
         df[autres_col] = df.get(autres_col, 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
         df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
-        # canonical Solde and explicit Solde à percevoir
         df["Solde"] = df[montant_col] + df[autres_col] - df["Payé"]
         df["Solde à percevoir (US $)"] = df["Solde"].copy()
     except Exception:
@@ -648,6 +639,13 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         out["Solde"] = out.get("Solde",0).apply(lambda x: _to_num(x))
         out["Solde à percevoir (US $)"] = out.get("Solde à percevoir (US $)",0).apply(lambda x: _to_num(x))
+
+    # Ensure Escrow is integer 0/1
+    if "Escrow" in out.columns:
+        try:
+            out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else (1 if _to_num(x) == 1 else 0))
+        except Exception:
+            out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else 0)
 
     return out
 
@@ -1077,7 +1075,7 @@ with tabs[1]:
             if mismatches.empty:
                 st.write("Aucune ligne en écart détectée.")
             else:
-                disp_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie","Visa", montant_col, autres_col] + acomptes_cols + ["Payé","Solde","Solde à percevoir (US $)"]
+                disp_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie","Visa", montant_col, autres_col] + acomptes_cols + ["Payé","Solde","Solde à percevoir (US $)","Escrow"]
                 for c in ["_Montant_num_","_Autres_num_","_Acomptes_sum_","_Payé_num_","_Solde_calc_row_"]:
                     if c in mismatches.columns:
                         disp_cols.append(c)
@@ -1127,7 +1125,7 @@ with tabs[2]:
         else:
             st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
-# ---- Add tab (modified layout: Acompte 1 + date only, Solde à percevoir computed) ----
+# ---- Add tab (modified layout: Montant | Acompte1 | Date | Solde calc | Escrow checkbox) ----
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live()
@@ -1140,11 +1138,11 @@ with tabs[3]:
         else:
             categories_options = []
 
-    st.write("Formulaire d'ajout — présentation :")
+    st.write("Formulaire d'ajout — mise en page :")
     st.write("1) Dossier N — Date (événement)")
     st.write("2) Nom du client")
     st.write("3) Catégorie — Sous-catégorie — Visa")
-    st.write("Puis Montant/Autres/Total et Acompte 1 (avec date). La colonne 'Solde à percevoir (US $)' est calculée automatiquement.")
+    st.write("Ensuite sur une même ligne : Montant honoraires | Acompte 1 | Date (Acompte 1) | Solde (calculé) | Escrow (case)")
 
     # Line 1: Dossier N and Date
     r1c1, r1c2 = st.columns([1.8,1.2])
@@ -1183,34 +1181,30 @@ with tabs[3]:
         else:
             add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
 
-    # Montant / Autres / Total (computed) on same line
-    r4c1, r4c2, r4c3 = st.columns([1.2,1.2,1.2])
+    # Single line: Montant | Acompte1 | Date Acompte1 | Solde (computed) | Escrow checkbox
+    r4c1, r4c2, r4c3, r4c4, r4c5 = st.columns([1.2,1.0,1.0,1.0,0.8])
     with r4c1:
         add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
     with r4c2:
-        add_autres = st.text_input("Autres frais (US $)", value="0", key=skey("addtab","autres"))
-    # compute total and display
-    try:
-        total_calc_val = money_to_float(add_montant) + money_to_float(add_autres)
-        total_display = _fmt_money(total_calc_val)
-    except Exception:
-        total_display = _fmt_money(0)
-    with r4c3:
-        st.markdown("**Total (Montant + Autres)**")
-        st.markdown(f"**{total_display}**")
-
-    # Acompte 1: amount + date
-    ac1_col1, ac1_col2 = st.columns([1.2,1.0])
-    with ac1_col1:
         a1 = st.text_input("Acompte 1", value="0", key=skey("addtab","ac1"))
-    with ac1_col2:
+    with r4c3:
         a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
+    with r4c4:
+        # compute solde considering Autres frais (set to 0 for new rows) and only Acompte1
+        try:
+            montant_val = money_to_float(add_montant)
+            autres_val = 0.0  # we removed 'Autres' from Add, default to 0 for new rows
+            paid_val = money_to_float(a1)
+            solde_val = montant_val + autres_val - paid_val
+            solde_display = _fmt_money(solde_val)
+        except Exception:
+            solde_display = _fmt_money(0)
+        st.markdown("**Solde (Montant − Acompte 1)**")
+        st.markdown(f"**{solde_display}**")
+    with r4c5:
+        escrow_checked = st.checkbox("Escrow", value=False, key=skey("addtab","escrow"))
 
-    # Keep optional other acomptes simple (amount only)
-    a2 = st.text_input("Acompte 2 (optionnel)", value="0", key=skey("addtab","ac2"))
-    a3 = st.text_input("Acompte 3 (optionnel)", value="0", key=skey("addtab","ac3"))
-    a4 = st.text_input("Acompte 4 (optionnel)", value="0", key=skey("addtab","ac4"))
-
+    # Comments
     add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
 
     if st.button("Ajouter", key=skey("addtab","btn_add")):
@@ -1225,15 +1219,18 @@ with tabs[3]:
             new_row["Sous-categorie"] = add_sub.strip() if isinstance(add_sub, str) else add_sub
             new_row["Visa"] = add_visa
             new_row["Montant honoraires (US $)"] = money_to_float(add_montant)
-            new_row["Autres frais (US $)"] = money_to_float(add_autres)
+            # Autres frais intentionally set to 0 for adds (we removed field)
+            new_row["Autres frais (US $)"] = 0.0
             new_row["Acompte 1"] = money_to_float(a1)
             new_row["Date Acompte 1"] = pd.to_datetime(a1_date) if a1_date else pd.NaT
-            new_row["Acompte 2"] = money_to_float(a2)
-            new_row["Acompte 3"] = money_to_float(a3)
-            new_row["Acompte 4"] = money_to_float(a4)
+            # leave other acomptes at 0
+            new_row["Acompte 2"] = 0.0
+            new_row["Acompte 3"] = 0.0
+            new_row["Acompte 4"] = 0.0
+            # Escrow flag stored as 1/0
+            new_row["Escrow"] = 1 if escrow_checked else 0
             paid_sum = new_row["Acompte 1"] + new_row["Acompte 2"] + new_row["Acompte 3"] + new_row["Acompte 4"]
             new_row["Payé"] = paid_sum
-            # Solde canonical and explicit Solde à percevoir
             new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - paid_sum
             new_row["Solde à percevoir (US $)"] = new_row["Solde"]
             now = datetime.now()
@@ -1246,6 +1243,7 @@ with tabs[3]:
             ensure_flag_columns(df_live, flags_to_create)
             for opt in flags_to_create:
                 new_row[opt] = 0
+            # Append
             df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
             df_live = recalc_payments_and_solde(df_live)
             _set_df_live(df_live)
@@ -1259,8 +1257,8 @@ with tabs[4]:
     df_live = _get_df_live()
     for c in COLS_CLIENTS:
         if c not in df_live.columns:
+            # initialize missing cols
             df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
-
     if df_live is None or df_live.empty:
         st.info("Aucun dossier à modifier ou supprimer.")
     else:
@@ -1310,21 +1308,24 @@ with tabs[4]:
                 else:
                     e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa"))
 
-                # Montant / Autres / Total display in edit form
+                # Montant / Acompte1 / Date Acompte1 / Solde display / Escrow (edit)
                 e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
-                e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)",0)), key=skey("edit","autres"))
-                try:
-                    tval = money_to_float(e_montant) + money_to_float(e_autres)
-                    tdisp = _fmt_money(tval)
-                except Exception:
-                    tdisp = _fmt_money(0)
-                st.markdown(f"**Total (Montant + Autres) : {tdisp}**")
-
-                # Acompte 1 amount + date only (per request)
                 e_ac1 = st.text_input("Acompte 1", value=str(row.get("Acompte 1",0)), key=skey("edit","ac1"))
                 e_ac1_date = st.date_input("Date Acompte 1", value=_date_for_widget(row.get("Date Acompte 1")) if pd.notna(row.get("Date Acompte 1")) else None, key=skey("edit","ac1_date"))
+                try:
+                    montant_val = money_to_float(e_montant)
+                    autres_val = money_to_float(row.get("Autres frais (US $)",0))
+                    paid_val = money_to_float(e_ac1) + money_to_float(row.get("Acompte 2",0)) + money_to_float(row.get("Acompte 3",0)) + money_to_float(row.get("Acompte 4",0))
+                    solde_val = montant_val + autres_val - paid_val
+                    solde_disp = _fmt_money(solde_val)
+                except Exception:
+                    solde_disp = _fmt_money(0)
+                st.markdown(f"**Solde (Montant + Autres − Payé) : {solde_disp}**")
+                # Escrow checkbox
+                current_esc = bool(int(row.get("Escrow", 0))) if pd.notna(row.get("Escrow", 0)) else False
+                e_escrow = st.checkbox("Escrow", value=current_esc, key=skey("edit","escrow"))
 
-                # Optional other acomptes (amount only)
+                # Optional other acomptes (kept editable in Gestion)
                 e_ac2 = st.text_input("Acompte 2 (optionnel)", value=str(row.get("Acompte 2",0)), key=skey("edit","ac2"))
                 e_ac3 = st.text_input("Acompte 3 (optionnel)", value=str(row.get("Acompte 3",0)), key=skey("edit","ac3"))
                 e_ac4 = st.text_input("Acompte 4 (optionnel)", value=str(row.get("Acompte 4",0)), key=skey("edit","ac4"))
@@ -1340,12 +1341,13 @@ with tabs[4]:
                         df_live.at[idx, "Sous-categorie"] = e_sub
                         df_live.at[idx, "Visa"] = e_visa
                         df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
-                        df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres)
+                        # keep existing "Autres frais" if present
                         df_live.at[idx, "Acompte 1"] = money_to_float(e_ac1)
                         df_live.at[idx, "Date Acompte 1"] = pd.to_datetime(e_ac1_date) if e_ac1_date else pd.NaT
                         df_live.at[idx, "Acompte 2"] = money_to_float(e_ac2)
                         df_live.at[idx, "Acompte 3"] = money_to_float(e_ac3)
                         df_live.at[idx, "Acompte 4"] = money_to_float(e_ac4)
+                        df_live.at[idx, "Escrow"] = 1 if e_escrow else 0
                         df_live.at[idx, "Dernière modification"] = datetime.now()
                         df_live.at[idx, "Modifié par"] = CURRENT_USER
                         df_live = recalc_payments_and_solde(df_live)
@@ -1405,7 +1407,6 @@ with tabs[5]:
                 else:
                     df_for_export["_Acomptes_sum_"] = 0.0
                 df_for_export["Solde_formule"] = df_for_export["_Montant_num_"] + df_for_export["_Autres_num_"] - df_for_export["_Acomptes_sum_"]
-                # also propagate to Solde à percevoir column for Excel export (numeric)
                 df_for_export["Solde à percevoir (US $)"] = df_for_export["Solde_formule"]
             except Exception:
                 df_for_export["Solde_formule"] = df_for_export.get("Solde",0).apply(lambda x: _to_num(x))
