@@ -2,9 +2,9 @@
 # Complete Streamlit application (single file)
 # - Robust reading of Clients (CSV/XLSX) and Visa files (semicolon CSV supported)
 # - Add / Gestion UI with per-row form keys and submit buttons
-# - Dates always converted to native datetime.date or None for st.date_input
+# - Dates always converted to native datetime.date or None for st.date_input (avoids pandas.NaT/Timestamp errors)
 # - Flags checkboxes + "Date d'envoi"
-# - Solde allowed to be negative (stored & displayed)
+# - Solde allowed to be negative (stored & displayed) as requested
 # - Export CSV & XLSX; optional XLSX with formulas (openpyxl)
 #
 # Requirements: pip install streamlit pandas openpyxl (openpyxl optional)
@@ -152,6 +152,7 @@ def _date_for_widget(val: Any) -> Optional[date]:
     """
     if val is None:
         return None
+    # native date (but not datetime)
     if isinstance(val, date) and not isinstance(val, datetime):
         return val
     if isinstance(val, datetime):
@@ -342,7 +343,7 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
     return []
 
 # -------------------------
-# I/O helpers
+# I/O helpers (robust CSV/XLSX reading)
 # -------------------------
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
@@ -370,14 +371,12 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     if src is None:
         _log("read_any_table: src is None")
         return None
-    # Try multiple strategies robustly
     try:
         # bytes
         if isinstance(src, (bytes, bytearray)):
             df = try_read_excel_from_bytes(bytes(src), sheet)
             if df is not None:
                 return df
-            # try CSV semicolon then comma with utf-8 then latin-1
             for sep in [";", ","]:
                 for enc in ["utf-8", "latin-1", "cp1252"]:
                     try:
@@ -1248,6 +1247,7 @@ with tabs[4]:
                 e_escrow = st.checkbox("Escrow", value=bool(int(row.get("Escrow", 0))) if not pd.isna(row.get("Escrow", 0)) else False, key=skey("edit","escrow", str(idx)))
                 e_comments = st.text_area("Commentaires", value=txt(row.get("Commentaires","")), key=skey("edit","comments", str(idx)))
 
+                # submit
                 save = st.form_submit_button("Enregistrer modifications")
                 if save:
                     try:
