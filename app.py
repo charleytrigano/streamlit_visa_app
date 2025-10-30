@@ -1,14 +1,19 @@
 # Visa Manager - app.py
-# Full Streamlit application implementing:
+# Full Streamlit application with requested layout changes in the "Gestion" tab.
+# Key features:
 # - Clients & Visa upload + caching
 # - Auto Dossier N numeric sequence starting at 13057 (non-editable in Add)
 # - ID_Client generated as YYYYMMDD-<seq> (distinct from Dossier N)
 # - "Ajouter" tab: shows ID_Client and Dossier N, Date, Nom, Cat/Sub/Visa,
 #   Montant honoraires, Acompte 1, Date Acompte 1, Escrow (checkbox label "Escrow"), Solde (computed)
-# - "Gestion" tab: edit/delete rows, edit acomptes, Solde visible, Escrow checkbox
+# - "Gestion" tab: edit/delete rows with new layout:
+#     * First line (same row): ID Client | Dossier N | Date (événement)
+#     * Next line: Nom client (full width)
+#     * Next line: Catégorie | Sous-catégorie | Visa
+#     * Next line: Montant honoraires | Autres frais | Montant Total | Acompte 1 | Solde
+#   (other fields and metadata remain editable below)
 # - Recalculation of Payé and Solde after edits
-# - Export CSV & XLSX, optional XLSX with formulas if openpyxl installed
-# - Robust parsing and mapping helpers
+# - Export CSV & XLSX (optionally with formulas if openpyxl installed)
 #
 # Usage:
 #   pip install streamlit pandas openpyxl
@@ -32,7 +37,7 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# openpyxl for writing formulas
+# openpyxl for writing formulas (optional)
 try:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -120,7 +125,6 @@ def money_to_float(x: Any) -> float:
         s = re.sub(r"[^\d,.\-]", "", s)
         if s == "":
             return 0.0
-        # choose decimal logic
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."):
                 s = s.replace(".", "").replace(",", ".")
@@ -299,17 +303,15 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -------------------------
-# Visa options defaults and helper (uses visa_sub_options_map loaded later)
+# Visa options defaults and helper (visa_sub_options_map built later)
 # -------------------------
 DEFAULT_VISA_OPTIONS_BY_CAT_SUB: Dict[Tuple[str,str], List[str]] = {}
 for cat in ["Affaires", "Tourisme"]:
     for sub in ["B-1", "B-2"]:
         DEFAULT_VISA_OPTIONS_BY_CAT_SUB[(canonical_key(cat), canonical_key(sub))] = ["COS", "EOS"]
 
-# We'll define a get_visa_options that uses the visa_sub_options_map variable built after reading the Visa sheet.
 def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
     global visa_sub_options_map, visa_map, visa_map_norm
-    # prefer visa_sub_options_map if available
     try:
         if sub:
             k_sub = canonical_key(sub)
@@ -324,7 +326,6 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
                 return DEFAULT_VISA_OPTIONS_BY_CAT_SUB[key][:]
     except Exception:
         pass
-    # fallback: if sub is in visa_map_norm keys, return empty or related
     try:
         if sub:
             for (kcat, ksub), opts in DEFAULT_VISA_OPTIONS_BY_CAT_SUB.items():
@@ -576,7 +577,7 @@ def make_id_client_datebased(df: pd.DataFrame) -> str:
     return f"{datepart}-{seq}"
 
 # -------------------------
-# UI bootstrap and file upload caching
+# UI bootstrap: sidebar uploads & caches
 # -------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -743,7 +744,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         visa_sub_options_map = {}
 
 # -------------------------
-# Build live DF in session state
+# Build live DF in session
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -760,7 +761,7 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# small helpers
+# helpers
 def unique_nonempty(series):
     try:
         vals = series.dropna().astype(str).tolist()
@@ -1028,8 +1029,6 @@ with tabs[3]:
             new_row["Modifié par"] = CURRENT_USER
             new_row["Commentaires"] = add_comments
             flags_to_create = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
-            ensure_flag_columns = lambda df_, flags: [df_.__setitem__(f, 0) for f in flags] if isinstance(df_, pd.DataFrame) else None
-            # ensure flags exist in df_live before appending
             for f in flags_to_create:
                 if f not in df_live.columns:
                     df_live[f] = 0
@@ -1040,35 +1039,50 @@ with tabs[3]:
         except Exception as e:
             st.error(f"Erreur ajout: {e}")
 
-# ---- Gestion tab ----
+# ---- Gestion tab (UPDATED layout) ----
 with tabs[4]:
     st.subheader("✏️ / 🗑️ Gestion — Modifier / Supprimer")
     df_live = _get_df_live()
+    # ensure columns exist to avoid KeyError in display
     for c in COLS_CLIENTS:
         if c not in df_live.columns:
             df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
+
     if df_live is None or df_live.empty:
         st.info("Aucun dossier à modifier ou supprimer.")
     else:
+        # build selection list
         choices = [f"{i} | {df_live.at[i,'Dossier N'] if 'Dossier N' in df_live.columns else ''} | {df_live.at[i,'Nom'] if 'Nom' in df_live.columns else ''}" for i in range(len(df_live))]
         sel = st.selectbox("Sélectionner ligne à modifier", options=[""]+choices, key=skey("edit","select"))
         if sel:
             idx = int(sel.split("|")[0].strip())
             row = df_live.loc[idx].copy()
+
             st.write("Modifier la ligne sélectionnée :")
+
+            # Form with requested grouping layout
             with st.form(key=skey("form_edit")):
-                ecol1, ecol2 = st.columns(2)
-                with ecol1:
+                # First line: ID Client | Dossier N | Date (événement)
+                r1c1, r1c2, r1c3 = st.columns([1.4, 1.0, 1.2])
+                with r1c1:
                     st.markdown(f"**ID_Client :** {row.get('ID_Client','')}")
+                with r1c2:
                     e_dossier = st.text_input("Dossier N", value=str(row.get("Dossier N","")), key=skey("edit","dossier"))
-                    e_nom = st.text_input("Nom", value=str(row.get("Nom","")), key=skey("edit","nom"))
-                with ecol2:
+                with r1c3:
                     e_date = st.date_input("Date (événement)", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
+
+                # Second line: Nom client (full width)
+                e_nom = st.text_input("Nom du client", value=str(row.get("Nom","")), key=skey("edit","nom"))
+
+                # Third line: Categorie | Sous-categorie | Visa
+                r3c1, r3c2, r3c3 = st.columns([1.2,1.2,1.6])
+                with r3c1:
                     if visa_categories:
                         edit_categories_options = visa_categories
                     else:
                         edit_categories_options = unique_nonempty(df_live["Categories"]) if "Categories" in df_live.columns else []
-                    e_cat = st.selectbox("Categorie", options=[""]+edit_categories_options, index=([""]+edit_categories_options).index(str(row.get("Categories",""))) if str(row.get("Categories","")) in ([""]+edit_categories_options) else 0, key=skey("edit","cat"))
+                    e_cat = st.selectbox("Catégorie", options=[""]+edit_categories_options, index=([""]+edit_categories_options).index(str(row.get("Categories",""))) if str(row.get("Categories","")) in ([""]+edit_categories_options) else 0, key=skey("edit","cat"))
+                with r3c2:
                     e_sub_options = []
                     if isinstance(e_cat, str) and e_cat.strip():
                         cat_key = canonical_key(e_cat)
@@ -1082,39 +1096,61 @@ with tabs[4]:
                             e_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
                         except Exception:
                             e_sub_options = []
-                    e_sub = st.selectbox("Sous-categorie", options=[""]+e_sub_options, index=([""]+e_sub_options).index(str(row.get("Sous-categorie",""))) if str(row.get("Sous-categorie","")) in ([""]+e_sub_options) else 0, key=skey("edit","sub"))
-                edit_specific = get_visa_options(e_cat, e_sub)
-                if edit_specific:
-                    current = str(row.get("Visa","")).strip()
-                    options = [""] + edit_specific
+                    e_sub = st.selectbox("Sous-catégorie", options=[""]+e_sub_options, index=([""]+e_sub_options).index(str(row.get("Sous-categorie",""))) if str(row.get("Sous-categorie","")) in ([""]+e_sub_options) else 0, key=skey("edit","sub"))
+                with r3c3:
+                    edit_specific = get_visa_options(e_cat, e_sub)
+                    if edit_specific:
+                        current = str(row.get("Visa","")).strip()
+                        options = [""] + edit_specific
+                        try:
+                            init_idx = options.index(current) if current in options else 0
+                        except Exception:
+                            init_idx = 0
+                        e_visa = st.selectbox("Visa (options)", options=options, index=init_idx, key=skey("edit","visa"))
+                    else:
+                        e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa"))
+
+                # Fourth line: Montant honoraires | Autres frais | Montant Total | Acompte 1 | Solde
+                r4c1, r4c2, r4c3, r4c4, r4c5 = st.columns([1.2,1.0,1.0,1.0,1.0])
+                with r4c1:
+                    e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
+                with r4c2:
+                    e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)",0)), key=skey("edit","autres"))
+                with r4c3:
+                    # Montant Total = Montant honoraires + Autres frais (computed, shown readonly using st.text_input disabled)
                     try:
-                        init_idx = options.index(current) if current in options else 0
+                        total_montant = _to_num(e_montant) + _to_num(e_autres)
                     except Exception:
-                        init_idx = 0
-                    e_visa = st.selectbox("Visa (options)", options=options, index=init_idx, key=skey("edit","visa"))
-                else:
-                    e_visa = st.text_input("Visa", value=str(row.get("Visa","")), key=skey("edit","visa"))
-                e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)",0)), key=skey("edit","montant"))
-                e_ac1 = st.text_input("Acompte 1", value=str(row.get("Acompte 1",0)), key=skey("edit","ac1"))
-                e_ac1_date = st.date_input("Date Acompte 1", value=_date_for_widget(row.get("Date Acompte 1")) if pd.notna(row.get("Date Acompte 1")) else None, key=skey("edit","ac1_date"))
-                try:
-                    montant_val = money_to_float(e_montant)
-                    autres_val = money_to_float(row.get("Autres frais (US $)",0))
-                    paid_val = money_to_float(e_ac1) + money_to_float(row.get("Acompte 2",0)) + money_to_float(row.get("Acompte 3",0)) + money_to_float(row.get("Acompte 4",0))
-                    solde_val = montant_val + autres_val - paid_val
-                    solde_disp = _fmt_money(solde_val)
-                except Exception:
-                    solde_disp = _fmt_money(0)
-                st.markdown(f"**Solde (visible ici) : {solde_disp}**")
-                current_esc = bool(int(row.get("Escrow", 0))) if pd.notna(row.get("Escrow", 0)) else False
-                e_escrow = st.checkbox("Escrow", value=current_esc, key=skey("edit","escrow"))
+                        total_montant = _to_num(row.get("Montant honoraires (US $)",0)) + _to_num(row.get("Autres frais (US $)",0))
+                    st.text_input("Montant Total", value=str(total_montant), key=skey("edit","montant_total"), disabled=True)
+                with r4c4:
+                    e_ac1 = st.text_input("Acompte 1", value=str(row.get("Acompte 1",0)), key=skey("edit","ac1"))
+                with r4c5:
+                    # Solde = Montant Total - Payé (we show computed solde; allow editing of Solde via a separate field below if desired)
+                    try:
+                        # compute paid sum from existing other acomptes too
+                        paid_sum_preview = _to_num(e_ac1) + _to_num(row.get("Acompte 2",0)) + _to_num(row.get("Acompte 3",0)) + _to_num(row.get("Acompte 4",0))
+                        solde_preview = total_montant - paid_sum_preview
+                    except Exception:
+                        solde_preview = row.get("Solde", 0)
+                    st.text_input("Solde (calculé)", value=str(solde_preview), key=skey("edit","solde_preview"), disabled=True)
+
+                # Below: Escrow, other acomptes, comments, metadata
+                e_escrow = st.checkbox("Escrow", value=bool(int(row.get("Escrow", 0))) if pd.notna(row.get("Escrow", 0)) else False, key=skey("edit","escrow"))
                 e_ac2 = st.text_input("Acompte 2 (optionnel)", value=str(row.get("Acompte 2",0)), key=skey("edit","ac2"))
                 e_ac3 = st.text_input("Acompte 3 (optionnel)", value=str(row.get("Acompte 3",0)), key=skey("edit","ac3"))
                 e_ac4 = st.text_input("Acompte 4 (optionnel)", value=str(row.get("Acompte 4",0)), key=skey("edit","ac4"))
                 e_comments = st.text_area("Commentaires", value=str(row.get("Commentaires","")), key=skey("edit","comments"))
+
+                # metadata (read-only display, not editable)
+                st.markdown(f"Créé le: {row.get('Date de création','')} — Créé par: {row.get('Créé par','')}")
+                st.markdown(f"Dernière modification: {row.get('Dernière modification','')} — Modifié par: {row.get('Modifié par','')}")
+
+                # Save button
                 save = st.form_submit_button("Enregistrer modifications")
                 if save:
                     try:
+                        # write back values
                         df_live.at[idx, "Dossier N"] = e_dossier
                         df_live.at[idx, "Nom"] = e_nom
                         df_live.at[idx, "Date"] = pd.to_datetime(e_date)
@@ -1122,21 +1158,26 @@ with tabs[4]:
                         df_live.at[idx, "Sous-categorie"] = e_sub
                         df_live.at[idx, "Visa"] = e_visa
                         df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
+                        df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres)
+                        # update Acomptes
                         df_live.at[idx, "Acompte 1"] = money_to_float(e_ac1)
-                        df_live.at[idx, "Date Acompte 1"] = pd.to_datetime(e_ac1_date) if e_ac1_date else pd.NaT
                         df_live.at[idx, "Acompte 2"] = money_to_float(e_ac2)
                         df_live.at[idx, "Acompte 3"] = money_to_float(e_ac3)
                         df_live.at[idx, "Acompte 4"] = money_to_float(e_ac4)
+                        # Escrow
                         df_live.at[idx, "Escrow"] = 1 if e_escrow else 0
+                        # metadata
                         df_live.at[idx, "Dernière modification"] = datetime.now()
                         df_live.at[idx, "Modifié par"] = CURRENT_USER
+                        # recalc totals and solde
                         df_live = recalc_payments_and_solde(df_live)
                         df_live.at[idx, "Solde à percevoir (US $)"] = df_live.at[idx, "Solde"]
                         df_live.at[idx, "Commentaires"] = e_comments
                         _set_df_live(df_live)
-                        st.success("Modifications enregistrées (métadonnées mises à jour).")
+                        st.success("Modifications enregistrées.")
                     except Exception as e:
                         st.error(f"Erreur enregistrement: {e}")
+
     st.markdown("---")
     st.markdown("### Supprimer des dossiers")
     if df_live is None or df_live.empty:
