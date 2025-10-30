@@ -1,21 +1,17 @@
 # Visa Manager - app.py
-# Final consolidated script per your requests:
-# - Clients & Visa upload caching (no need to re-upload on code changes)
-# - Two uploaders (Clients & Visa)
-# - Metadata columns (Date de création, Créé par, Dernière modification, Modifié par)
-# - "Ajouter" tab layout:
-#     Line 1: Dossier N | Date (événement)
-#     Line 2: Nom du client
-#     Line 3: Catégorie | Sous-catégorie | Visa
-#     Single line: Montant honoraires | Acompte 1 | Date Acompte 1 | Escrow (checkbox)
-#   (Removed Autres frais and Acompte 2/3/4 from Add tab; Solde is NOT shown on Add as requested)
-# - Solde and "Solde à percevoir (US $)" are computed and stored, but Solde is shown/editable in Gestion tab (modify/delete)
-# - Escrow flag is associated with Acompte 1 (stored as "Escrow" column and editable in Gestion)
-# - Edit (Gestion) tab contains Solde display/edit and Escrow checkbox; exports include escrow and solde fields
-# - XLSX export with formulas option included (Payé & Solde)
+# Full application script — final version with:
+# - Clients & Visa upload caching (_clients_cache.bin, _visa_cache.bin)
+# - Always two uploaders (Clients & Visa)
+# - Automatic ID_Client generation and automatic Dossier N numbering starting at 13057 (non-editable on Add)
+# - "Ajouter" tab: auto Dossier N / ID_Client + Nom + Cat/Sub/Visa + Montant honoraires + Acompte 1 + Date Acompte 1 + Escrow checkbox + Comments
+# - Solde computed and stored (visible/editable in Gestion)
+# - Escrow associated to Acompte 1, editable in Gestion (to be unlocked when sending dossier)
+# - Edit (Gestion) tab supports Solde display/edit, Escrow checkbox, Acompte edits, metadata updates
+# - Export CSV/XLSX with optional formulas (openpyxl)
+# - Robust parsing and column heuristics
 #
 # Usage: streamlit run app.py
-# Requires: pandas, streamlit; openpyxl optional for XLSX with formulas.
+# Requires: pandas, streamlit; optional: openpyxl for XLSX formula exports.
 
 import os
 import json
@@ -840,8 +836,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
         visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
         visa_categories = sorted(list(visa_map.keys()))
-        # Build visa_sub_options_map: key = canonical_sub, value = list of column headers where the row has truthy value (1, x, yes, etc.)
-        visa_sub_options_map = {}
+        # visa_sub_options_map
         try:
             cols_to_skip = set(["Categories","Categorie","Sous-categorie"])
             cols_to_check = [c for c in df_visa_mapped.columns if c not in cols_to_skip]
@@ -876,7 +871,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
 else:
     visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 
-# Built-in fallback cross-table mapping (canonical keys)
+# built-in fallback mapping
 DEFAULT_VISA_OPTIONS_BY_CAT_SUB: Dict[Tuple[str,str], List[str]] = {}
 for cat in ["Affaires", "Tourisme"]:
     for sub in ["B-1", "B-2"]:
@@ -898,15 +893,8 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
                 return opts
     return []
 
-# Optional debug in sidebar to inspect mapping
-try:
-    st.sidebar.markdown("**DEBUG: visa_sub_options_map**")
-    st.sidebar.write(visa_sub_options_map)
-except Exception:
-    pass
-
 # -------------------------
-# Build live df and enforce canonical Payé/Solde
+# Build live df and session state
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -923,7 +911,7 @@ def _get_df_live() -> pd.DataFrame:
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# Helper unique non-empty
+# Helper unique_nonempty & kpi_html
 def unique_nonempty(series):
     try:
         vals = series.dropna().astype(str).tolist()
@@ -950,7 +938,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # -------------------------
-# Tabs UI (Dashboard, etc.)
+# Tabs UI (Files / Dashboard / Analyses / Add / Gestion / Export)
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -1007,7 +995,6 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("📊 Dashboard (totaux et diagnostics)")
     df_live_view = recalc_payments_and_solde(_get_df_live())
-
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
     else:
@@ -1063,7 +1050,6 @@ with tabs[1]:
         total_autres = float(view["_Autres_num_"].sum())
         total_paye = float(total_acomptes_sum)
         canonical_solde_sum = float(total_honoraires + total_autres - total_paye)
-        total_solde_recorded = float(view.get("Solde", 0).apply(safe_num).sum())
 
         cols_k = st.columns(4)
         cols_k[0].markdown(kpi_html("Dossiers (vue)", f"{len(view):,}"), unsafe_allow_html=True)
@@ -1075,24 +1061,6 @@ with tabs[1]:
         cols_k2 = st.columns(2)
         cols_k2[0].markdown(kpi_html("Montant payé (somme acomptes)", _fmt_money(total_paye)), unsafe_allow_html=True)
         cols_k2[1].markdown(kpi_html("Solde total (recalc)", _fmt_money(canonical_solde_sum)), unsafe_allow_html=True)
-
-        view["_Solde_calc_row_"] = view["_Montant_num_"] + view["_Autres_num_"] - view.get("Payé", view.get("_Acomptes_sum_", 0)).apply(safe_num)
-        mismatches = view[(view.get("Solde",0).apply(safe_num) - view["_Solde_calc_row_"]).abs() > 0.005]
-        with st.expander("DEBUG — Lignes où Solde != Montant + Autres − somme(Acomptes)"):
-            if mismatches.empty:
-                st.write("Aucune ligne en écart détectée.")
-            else:
-                disp_cols = ["ID_Client","Dossier N","Nom","Date","Categories","Sous-categorie","Visa", montant_col, autres_col] + acomptes_cols + ["Payé","Solde","Solde à percevoir (US $)","Escrow"]
-                for c in ["_Montant_num_","_Autres_num_","_Acomptes_sum_","_Payé_num_","_Solde_calc_row_"]:
-                    if c in mismatches.columns:
-                        disp_cols.append(c)
-                mshow = mismatches.reset_index(drop=True).copy()
-                try:
-                    mshow["_acomptes_raw_concat_"] = mshow[acomptes_cols].astype(str).agg(" | ".join, axis=1)
-                except Exception:
-                    mshow["_acomptes_raw_concat_"] = ""
-                st.dataframe(mshow[disp_cols + ["_acomptes_raw_concat_"]].head(200), use_container_width=True, height=360)
-                st.markdown("Téléchargez la vue filtrée si vous voulez que j'analyse plus en détail (onglet Export).")
 
         st.markdown("### Détails — clients correspondant aux filtres")
         display_df = view.copy()
@@ -1132,10 +1100,18 @@ with tabs[2]:
         else:
             st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
-# ---- Add tab (clean layout; Solde not shown; Escrow associated to Acompte 1) ----
+# ---- Add tab (auto ID & Dossier N, Montant/Acompte1/Date/Escrow) ----
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live()
+
+    # Determine next ID and next dossier number
+    next_id = get_next_client_id(df_live)
+    next_dossier = str(next_id)  # use same numeric sequence for Dossier N as ID
+    # show ID and Dossier N as auto fields (non-editable)
+    st.markdown(f"**ID_Client (auto)**: {next_id}")
+    st.markdown(f"**Dossier N (auto)**: {next_dossier}")
+
     if visa_categories:
         categories_options = visa_categories
     else:
@@ -1145,17 +1121,13 @@ with tabs[3]:
         else:
             categories_options = []
 
-    # Line 1: Dossier N and Date
-    r1c1, r1c2 = st.columns([1.8,1.2])
-    with r1c1:
-        add_dossier = st.text_input("Dossier N", value="", placeholder="Ex: D12345", key=skey("addtab","dossier"))
-    with r1c2:
-        add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
+    # Line: Date (event)
+    add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
 
-    # Line 2: Nom (full width)
+    # Name full width
     add_nom = st.text_input("Nom du client", value="", placeholder="Nom complet du client", key=skey("addtab","nom"))
 
-    # Line 3: Catégorie | Sous-catégorie | Visa (reactive)
+    # Category/Sub/Visa reactive
     r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
     with r3c1:
         categories_local = [""] + [c.strip() for c in categories_options]
@@ -1182,7 +1154,7 @@ with tabs[3]:
         else:
             add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
 
-    # Single line: Montant | Acompte1 | Date Acompte1 | Escrow (checkbox)
+    # Single line: Montant | Acompte1 | Date Acompte1 | Escrow checkbox
     r4c1, r4c2, r4c3, r4c4 = st.columns([1.2,1.0,1.0,0.8])
     with r4c1:
         add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
@@ -1191,32 +1163,28 @@ with tabs[3]:
     with r4c3:
         a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
     with r4c4:
-        escrow_checked = st.checkbox("Escrow", value=False, key=skey("addtab","escrow"))
+        escrow_checked = st.checkbox("Escrow (lié à Acompte 1)", value=False, key=skey("addtab","escrow"))
 
-    # Comments
     add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
 
     if st.button("Ajouter", key=skey("addtab","btn_add")):
         try:
-            next_id = get_next_client_id(df_live)
+            # Use next_id and next_dossier as generated above
             new_row = {c: "" for c in df_live.columns}
             new_row["ID_Client"] = str(next_id)
-            new_row["Dossier N"] = add_dossier
+            new_row["Dossier N"] = next_dossier
             new_row["Nom"] = add_nom
             new_row["Date"] = pd.to_datetime(add_date)
             new_row["Categories"] = add_cat.strip() if isinstance(add_cat, str) else add_cat
             new_row["Sous-categorie"] = add_sub.strip() if isinstance(add_sub, str) else add_sub
             new_row["Visa"] = add_visa
             new_row["Montant honoraires (US $)"] = money_to_float(add_montant)
-            # Autres frais intentionally set to 0 for adds (field removed)
             new_row["Autres frais (US $)"] = 0.0
             new_row["Acompte 1"] = money_to_float(a1)
             new_row["Date Acompte 1"] = pd.to_datetime(a1_date) if a1_date else pd.NaT
-            # leave other acomptes at 0
             new_row["Acompte 2"] = 0.0
             new_row["Acompte 3"] = 0.0
             new_row["Acompte 4"] = 0.0
-            # Escrow flag stored as 1/0 and associated with Acompte 1
             new_row["Escrow"] = 1 if escrow_checked else 0
             paid_sum = new_row["Acompte 1"] + new_row["Acompte 2"] + new_row["Acompte 3"] + new_row["Acompte 4"]
             new_row["Payé"] = paid_sum
@@ -1232,11 +1200,10 @@ with tabs[3]:
             ensure_flag_columns(df_live, flags_to_create)
             for opt in flags_to_create:
                 new_row[opt] = 0
-            # Append
             df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
             df_live = recalc_payments_and_solde(df_live)
             _set_df_live(df_live)
-            st.success("Dossier ajouté avec métadonnées de création.")
+            st.success(f"Dossier ajouté : ID {next_id} / Dossier N {next_dossier}")
         except Exception as e:
             st.error(f"Erreur ajout: {e}")
 
@@ -1246,8 +1213,8 @@ with tabs[4]:
     df_live = _get_df_live()
     for c in COLS_CLIENTS:
         if c not in df_live.columns:
-            # initialize missing cols
             df_live[c] = "" if c not in NUMERIC_TARGETS else 0.0
+
     if df_live is None or df_live.empty:
         st.info("Aucun dossier à modifier ou supprimer.")
     else:
@@ -1314,7 +1281,7 @@ with tabs[4]:
                 current_esc = bool(int(row.get("Escrow", 0))) if pd.notna(row.get("Escrow", 0)) else False
                 e_escrow = st.checkbox("Escrow (lié à Acompte 1)", value=current_esc, key=skey("edit","escrow"))
 
-                # Optional other acomptes (kept editable in Gestion)
+                # Other acomptes (editable here)
                 e_ac2 = st.text_input("Acompte 2 (optionnel)", value=str(row.get("Acompte 2",0)), key=skey("edit","ac2"))
                 e_ac3 = st.text_input("Acompte 3 (optionnel)", value=str(row.get("Acompte 3",0)), key=skey("edit","ac3"))
                 e_ac4 = st.text_input("Acompte 4 (optionnel)", value=str(row.get("Acompte 4",0)), key=skey("edit","ac4"))
@@ -1330,7 +1297,6 @@ with tabs[4]:
                         df_live.at[idx, "Sous-categorie"] = e_sub
                         df_live.at[idx, "Visa"] = e_visa
                         df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
-                        # keep existing "Autres frais" if present
                         df_live.at[idx, "Acompte 1"] = money_to_float(e_ac1)
                         df_live.at[idx, "Date Acompte 1"] = pd.to_datetime(e_ac1_date) if e_ac1_date else pd.NaT
                         df_live.at[idx, "Acompte 2"] = money_to_float(e_ac2)
@@ -1340,7 +1306,6 @@ with tabs[4]:
                         df_live.at[idx, "Dernière modification"] = datetime.now()
                         df_live.at[idx, "Modifié par"] = CURRENT_USER
                         df_live = recalc_payments_and_solde(df_live)
-                        # update explicit Solde à percevoir column
                         df_live.at[idx, "Solde à percevoir (US $)"] = df_live.at[idx, "Solde"]
                         df_live.at[idx, "Commentaires"] = e_comments
                         _set_df_live(df_live)
