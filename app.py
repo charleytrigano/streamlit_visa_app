@@ -1,7 +1,7 @@
 # Visa Manager - app.py
-# Robust Streamlit app with dynamic Visa options per Sous-categorie
-# - When a Sous-categorie is selected, Visa field proposes headers from the Visa sheet where value==1
-# - If no options for the Sous-categorie, Visa remains a free text input
+# Robust Streamlit app with dynamic Visa options per Catégorie/Sous-catégorie
+# - If Visa sheet maps options -> use them
+# - Fallback built-in cross-table: Affaires/Tourisme x B-1/B-2 -> ['COS','EOS']
 # - Always recalculates Payé and Solde from detected Acompte columns
 # - pandas >=2.0 compatible (pd.concat used), defensive parsing, export options
 #
@@ -632,7 +632,7 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 # =========================
-# Streamlit UI bootstrap
+# Read files, build visa maps, and provide fallback mapping
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -740,7 +740,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     except Exception:
         pass
 
-# Build visa maps
+# Build visa maps from Visa sheet
 visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
@@ -803,12 +803,45 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
 else:
     visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 
-# Helper: return visa options (column headers) for a given sous-categorie (by canonical key)
+# Built-in fallback cross-table mapping (canonical keys)
+# User requested: if Cat = Affaires or Tourisme and Sous-categorie = B-1 or B-2 => Visa options COS / EOS
+DEFAULT_VISA_OPTIONS_BY_CAT_SUB: Dict[Tuple[str,str], List[str]] = {}
+for cat in ["Affaires", "Tourisme"]:
+    for sub in ["B-1", "B-2"]:
+        DEFAULT_VISA_OPTIONS_BY_CAT_SUB[(canonical_key(cat), canonical_key(sub))] = ["COS", "EOS"]
+
 def get_sub_options_for(sub: str, visa_sub_map: Dict[str, List[str]]) -> List[str]:
+    """Return options from visa_sub_map for a sub (by canonical sub)."""
     if not sub:
         return []
     k = canonical_key(sub)
     return visa_sub_map.get(k, [])
+
+def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
+    """
+    Return Visa options for a given (cat, sub).
+    Priority:
+      1) visa_sub_options_map by sous-categorie (as collected from Visa sheet)
+      2) DEFAULT_VISA_OPTIONS_BY_CAT_SUB by (cat, sub)
+      3) empty list
+    """
+    # 1) try by sub from Visa sheet
+    if sub:
+        k_sub = canonical_key(sub)
+        opts = visa_sub_options_map.get(k_sub, [])
+        if opts:
+            return opts
+    # 2) try cat+sub defaults
+    if cat and sub:
+        key = (canonical_key(cat), canonical_key(sub))
+        if key in DEFAULT_VISA_OPTIONS_BY_CAT_SUB:
+            return DEFAULT_VISA_OPTIONS_BY_CAT_SUB[key]
+    # 3) try sub canonical against DEFAULT mapping irrespective of cat
+    if sub:
+        for (kcat, ksub), opts in DEFAULT_VISA_OPTIONS_BY_CAT_SUB.items():
+            if ksub == canonical_key(sub):
+                return opts
+    return []
 
 # Build live df and enforce canonical Payé/Solde
 df_all = normalize_clients_for_live(df_clients_raw)
@@ -1077,9 +1110,9 @@ with tabs[3]:
         r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
         with r3c1:
             add_date = st.date_input("Date", value=date.today(), key=skey("addtab","date"))
-        # Visa field: propose options from visa_sub_options_map when available for the selected sous-categorie
+        # Visa field: propose options from Visa sheet or fallback cross-table for (cat, sub)
         with r3c2:
-            specific_options = get_sub_options_for(add_sub, visa_sub_options_map)
+            specific_options = get_visa_options(add_cat, add_sub)
             if specific_options:
                 add_visa = st.selectbox("Visa (options)", options=[""] + specific_options, index=0, key=skey("addtab","visa"))
             else:
@@ -1157,8 +1190,8 @@ with tabs[4]:
                     e_date = st.date_input("Date", value=_date_for_widget(row.get("Date", date.today())), key=skey("edit","date"))
                     e_cat = st.text_input("Categorie", value=str(row.get("Categories","")), key=skey("edit","cat"))
                     e_sub = st.text_input("Sous-categorie", value=str(row.get("Sous-categorie","")), key=skey("edit","sub"))
-                # Visa: propose selectbox if sub has options
-                edit_specific = get_sub_options_for(row.get("Sous-categorie",""), visa_sub_options_map)
+                # Visa: propose selectbox if sub has options (Visa sheet or fallback mapping)
+                edit_specific = get_visa_options(row.get("Categories",""), row.get("Sous-categorie",""))
                 if edit_specific:
                     current = str(row.get("Visa","")).strip()
                     options = [""] + edit_specific
