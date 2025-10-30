@@ -1,12 +1,15 @@
 # Visa Manager - app.py
-# Robust Streamlit app with dynamic Visa options per Catégorie/Sous-catégorie
-# - If Visa sheet maps options -> use them
-# - Fallback built-in cross-table: Affaires/Tourisme x B-1/B-2 -> ['COS','EOS']
-# - Always recalculates Payé and Solde from detected Acompte columns
-# - pandas >=2.0 compatible (pd.concat used), defensive parsing, export options
+# Complete corrected Streamlit app
+# - Ignores source "Solde" column (keeps as Solde_source if present)
+# - Recomputes Payé = sum(detected Acompte columns)
+# - Computes Solde per row = Montant + Autres - sum(acompte cols)
+# - Dedicated "➕ Ajouter" tab and "✏️ / 🗑️ Gestion" for edit/delete
+# - Visa options come from Visa sheet mapping; fallback for Affaires/Tourisme × B-1/B-2 => ["COS","EOS"]
+# - Robust monetary parsing, defensive column detection, pd.concat used for pandas >= 2.0
+# - Exports CSV and XLSX with Solde_formule; optional XLSX with formulas (openpyxl)
 #
 # Usage: streamlit run app.py
-# Requires: pandas, streamlit, openpyxl (optional for formula export)
+# Requires: pandas, streamlit; openpyxl optional for XLSX writes with formulas.
 
 import os
 import json
@@ -19,7 +22,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Optional: plotly for charts
+# Optional plotly
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -27,7 +30,7 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# openpyxl for XLSX formula export (optional)
+# openpyxl for writing formulas
 try:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -58,7 +61,7 @@ def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
 # =========================
-# Helpers (parsing / formatting)
+# Helpers: normalization / formatting
 # =========================
 def normalize_header_text(s: Any) -> str:
     if s is None:
@@ -94,22 +97,26 @@ def canonical_key(s: Any) -> str:
     return s2
 
 def money_to_float(x: Any) -> float:
+    # Robust money parser: handles spaces, NBSP, €, $, commas, dots, negatives and strange strings
     try:
         if pd.isna(x):
             return 0.0
         s = str(x).strip()
         if s == "" or s in ("-", "—", "–", "NA", "N/A"):
             return 0.0
+        # remove NBSP and normal spaces then non-digit chars except separators and minus
         s = s.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
         s = re.sub(r"[^\d,.\-]", "", s)
         if s == "":
             return 0.0
+        # If both comma and dot present, infer decimal separator by last occurrence
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."):
                 s = s.replace(".", "").replace(",", ".")
             else:
                 s = s.replace(",", "")
         else:
+            # Only comma present: assume decimal if two digits after comma
             if "," in s and s.count(",") == 1 and "." not in s:
                 if len(s.split(",")[-1]) == 2:
                     s = s.replace(",", ".")
@@ -150,7 +157,7 @@ def _date_for_widget(val: Any) -> date:
         return date.today()
 
 # =========================
-# Column heuristics
+# Column heuristics & helpers
 # =========================
 COL_CANDIDATES = {
     "id client": "ID_Client", "idclient": "ID_Client",
@@ -183,6 +190,7 @@ NUMERIC_TARGETS = [
 ]
 
 def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
+    # Defensive mapping: returns (df, mapping)
     if not isinstance(df, pd.DataFrame):
         try:
             st.sidebar.warning("map_columns_heuristic: input is not a DataFrame — coercing to empty DataFrame.")
@@ -390,7 +398,7 @@ def detect_autres_column(df: pd.DataFrame) -> Optional[str]:
     return None
 
 # =========================
-# Ensure columns helper
+# Ensure columns helper (defensive)
 # =========================
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -462,6 +470,12 @@ def _normalize_status(df: Any) -> pd.DataFrame:
 # normalize_clients_for_live (defensive, drops source Solde)
 # =========================
 def normalize_clients_for_live(df_clients_raw: Any) -> pd.DataFrame:
+    """
+    Coerce input to DataFrame, map headers, normalize numeric columns, ensure acomptes exist,
+    compute Payé = sum(Acompte cols) and Solde = Montant + Autres - Payé.
+    If the input contains a "Solde" column it is renamed to "Solde_source" and dropped
+    so that the app always recalculates canonical Solde.
+    """
     if not isinstance(df_clients_raw, pd.DataFrame):
         try:
             maybe_df = read_any_table(df_clients_raw, sheet=None, debug_prefix="[normalize] ")
@@ -632,7 +646,7 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 # =========================
-# Read files, build visa maps, and provide fallback mapping
+# Read files, build visa maps, and fallback mapping
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -804,14 +818,12 @@ else:
     visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 
 # Built-in fallback cross-table mapping (canonical keys)
-# User requested: if Cat = Affaires or Tourisme and Sous-categorie = B-1 or B-2 => Visa options COS / EOS
 DEFAULT_VISA_OPTIONS_BY_CAT_SUB: Dict[Tuple[str,str], List[str]] = {}
 for cat in ["Affaires", "Tourisme"]:
     for sub in ["B-1", "B-2"]:
         DEFAULT_VISA_OPTIONS_BY_CAT_SUB[(canonical_key(cat), canonical_key(sub))] = ["COS", "EOS"]
 
 def get_sub_options_for(sub: str, visa_sub_map: Dict[str, List[str]]) -> List[str]:
-    """Return options from visa_sub_map for a sub (by canonical sub)."""
     if not sub:
         return []
     k = canonical_key(sub)
@@ -823,7 +835,7 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
     Priority:
       1) visa_sub_options_map by sous-categorie (as collected from Visa sheet)
       2) DEFAULT_VISA_OPTIONS_BY_CAT_SUB by (cat, sub)
-      3) empty list
+      3) []
     """
     # 1) try by sub from Visa sheet
     if sub:
@@ -842,6 +854,22 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
             if ksub == canonical_key(sub):
                 return opts
     return []
+
+# Optional debug in sidebar to inspect mapping (comment out in production)
+try:
+    st.sidebar.markdown("**DEBUG: visa_sub_options_map**")
+    st.sidebar.write(visa_sub_options_map)
+    st.sidebar.markdown("**DEBUG: DEFAULT_VISA_OPTIONS_BY_CAT_SUB**")
+    st.sidebar.write(DEFAULT_VISA_OPTIONS_BY_CAT_SUB)
+    st.sidebar.markdown("**DEBUG: sample get_visa_options**")
+    st.sidebar.write({
+        "Affaires/B-1": get_visa_options("Affaires", "B-1"),
+        "Affaires/B-2": get_visa_options("Affaires", "B-2"),
+        "Tourisme/B-1": get_visa_options("Tourisme", "B-1"),
+        "Tourisme/B-2": get_visa_options("Tourisme", "B-2")
+    })
+except Exception:
+    pass
 
 # Build live df and enforce canonical Payé/Solde
 df_all = normalize_clients_for_live(df_clients_raw)
@@ -875,7 +903,7 @@ def unique_nonempty(series):
         out.append(s)
     return sorted(list(dict.fromkeys(out)))
 
-# KPI small card html
+# KPI HTML small card
 def kpi_html(label: str, value: str, sub: str = "") -> str:
     html = f"""
     <div style="border:1px solid rgba(255,255,255,0.04); border-radius:6px; padding:8px 10px; margin:6px 4px;">
@@ -887,7 +915,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # =========================
-# Tabs UI (Files / Dashboard / Analyses / Add / Gestion / Export)
+# Tabs UI
 # =========================
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -1266,6 +1294,7 @@ with tabs[5]:
             csv_bytes = df_live.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
 
+        # XLSX export with numeric Solde_formule
         with col2:
             df_for_export = df_live.copy()
             try:
