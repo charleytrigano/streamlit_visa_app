@@ -1,15 +1,15 @@
-# app.py - Visa Manager (final, persistent ComptaCli import + search fix + XLSX export)
+# app.py - Visa Manager (final, consolidated and corrected)
 # - Support .csv/.xlsx/.xlsm, Escrow, ComptaCli import with manual "Importer la fiche" button
 # - Column normalization and extended heuristics for robust imports
 # - Compta Client: robust search by Nom or Dossier N (accent-insensitive) and XLSX export
-# - After importing a ComptaCli fiche, the clients table is saved to CACHE_CLIENTS so you don't need to re-upload the .xlsx
+# - Persist imported clients to CACHE_CLIENTS so you don't need to re-upload the .xlsx
 # Requirements: pip install streamlit pandas openpyxl
 # Run: streamlit run app.py
 
 import os
 import json
 import re
-from io import BytesIO, StringIO
+from io import BytesIO
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -55,7 +55,6 @@ SHEET_VISA = "Visa"
 SHEET_COMPTACLI = "ComptaCli"
 SID = "vmgr"
 DEFAULT_START_CLIENT_ID = 13057
-CURRENT_USER = "charleytrigano"
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 def skey(*parts: str) -> str:
@@ -215,7 +214,7 @@ def detect_acompte_columns(df: pd.DataFrame) -> List[str]:
 def detect_montant_column(df: pd.DataFrame) -> Optional[str]:
     if df is None or df.empty:
         return None
-    candidates = ["Montant honoraires (US $)", "Montant honoraires", "Montant", "Montant Total", "Montant Total"]
+    candidates = ["Montant honoraires (US $)", "Montant honoraires", "Montant", "Montant Total"]
     for c in candidates:
         if c in df.columns:
             return c
@@ -770,7 +769,6 @@ def _persist_clients_cache(df: pd.DataFrame) -> None:
         with open(CACHE_CLIENTS, "wb") as f:
             f.write(buf.getvalue())
     except Exception:
-        # best-effort persist; ignore errors (but could log)
         pass
 
 # -------------------------
@@ -821,7 +819,6 @@ if os.path.exists(CACHE_CLIENTS) and up_clients is None and not clients_path_in:
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
-        # try to parse sheets to detect ComptaCli
         try:
             xls_all = pd.read_excel(BytesIO(clients_bytes), sheet_name=None, engine="openpyxl")
         except Exception:
@@ -837,7 +834,6 @@ if up_clients is not None:
             for name, df_sheet in xls_all.items():
                 df_sheet = _normalize_incoming_columns(df_sheet)
                 if canonical_key(name) in (canonical_key(SHEET_CLIENTS), canonical_key("clients")) and isinstance(df_sheet, pd.DataFrame):
-                    # persist read clients to CACHE_CLIENTS so it becomes default next runs
                     buf = BytesIO()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                         df_sheet.to_excel(writer, index=False, sheet_name="Clients")
@@ -852,12 +848,10 @@ if up_clients is not None:
                         f.write(buf.getvalue())
                     visa_src_for_read = CACHE_VISA
             if clients_src_for_read is None:
-                # write full upload to cache just in case
                 with open(CACHE_CLIENTS, "wb") as f:
                     f.write(clients_bytes)
                 clients_src_for_read = CACHE_CLIENTS
         else:
-            # not an xlsx; persist raw bytes as CSV cache
             with open(CACHE_CLIENTS, "wb") as f:
                 f.write(clients_bytes)
             clients_src_for_read = CACHE_CLIENTS
@@ -971,10 +965,10 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
         visa_sub_options_map = {}
 
 globals().update({
-    "visa_map": visa_map,
-    "visa_map_norm": visa_map_norm,
-    "visa_categories": visa_categories,
-    "visa_sub_options_map": visa_sub_options_map
+    "visa_map": visa_map if 'visa_map' in locals() else {},
+    "visa_map_norm": visa_map_norm if 'visa_map_norm' in locals() else {},
+    "visa_categories": visa_categories if 'visa_categories' in locals() else [],
+    "visa_sub_options_map": visa_sub_options_map if 'visa_sub_options_map' in locals() else {}
 })
 
 # -------------------------
@@ -1059,7 +1053,6 @@ with tabs[0]:
             df_all2 = normalize_clients_for_live(df_clients_raw)
             df_all2 = recalc_payments_and_solde(df_all2)
             _set_df_live(df_all2)
-            # persist to cache so next reload keeps it
             try:
                 _persist_clients_cache(df_all2)
             except Exception:
@@ -1087,10 +1080,8 @@ with tabs[0]:
                 df_live = pd.concat([df_live, df_new], ignore_index=True)
                 df_live = recalc_payments_and_solde(df_live)
                 _set_df_live(df_live)
-                # Persist clients to cache so reloading the app or switching tabs does not require re-upload
                 _persist_clients_cache(df_live)
                 st.success("Fiche ComptaCli importée en mémoire et persistée.")
-                # force refresh to show new data in other tabs immediately
                 st.experimental_rerun()
             except Exception as e:
                 st.error(f"Erreur import fiche: {e}")
@@ -1161,7 +1152,7 @@ with tabs[3]:
     add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
     add_nom = st.text_input("Nom du client", value="", placeholder="Nom complet du client", key=skey("addtab","nom"))
 
-    categories_options = visa_categories if visa_categories else (unique_nonempty(df_live["Categories"]) if "Categories" in df_live.columns else [])
+    categories_options = visa_categories if 'visa_categories' in globals() else []
     r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
     with r3c1:
         add_cat = st.selectbox("Catégorie", options=[""] + categories_options, index=0, key=skey("addtab","cat"))
@@ -1244,7 +1235,6 @@ with tabs[3]:
             df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
             df_live = recalc_payments_and_solde(df_live)
             _set_df_live(df_live)
-            # persist the new table so ComptaCli imported manually and added via UI is kept
             _persist_clients_cache(df_live)
             st.success(f"Dossier ajouté : ID_Client {next_id_client} — Dossier N {next_dossier}")
         except Exception as e:
@@ -1448,7 +1438,6 @@ with tabs[4]:
                         df_live = recalc_payments_and_solde(df_live)
                         df_live.at[idx, "Solde à percevoir (US $)"] = df_live.at[idx, "Solde"]
                         _set_df_live(df_live)
-                        # persist after editing
                         _persist_clients_cache(df_live)
                         st.success("Modifications enregistrées.")
                     except Exception as e:
@@ -1566,10 +1555,139 @@ with tabs[5]:
                             st.write("Aucun acompte enregistré.")
                         st.markdown("---")
                         if st.button("Exporter relevé client (.xlsx)"):
-                            out_df = pd.DataFrame([{
-                                "ID_Client": row.get("ID_Client",""),
-                                "Dossier N": row.get(col_dossier,"") if col_dossier in row.index else "",
-                                "Nom": row.get(col_nom,""),
-                                "Montant honoraires": honoraires,
-                                "Autres frais": autres,
-                                "Total payé":
+                            try:
+                                out_df = pd.DataFrame([{
+                                    "ID_Client": row.get("ID_Client",""),
+                                    "Dossier N": row.get(col_dossier,"") if col_dossier in row.index else "",
+                                    "Nom": row.get(col_nom,""),
+                                    "Montant honoraires": honoraires,
+                                    "Autres frais": autres,
+                                    "Total payé": total_paye,
+                                    "Solde": solde
+                                }])
+                                buf = BytesIO()
+                                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                                    out_df.to_excel(writer, index=False, sheet_name="Releve")
+                                buf.seek(0)
+                                st.download_button(
+                                    "Télécharger XLSX",
+                                    data=buf.getvalue(),
+                                    file_name=f"releve_client_{str(row.get(col_dossier,'')).replace('/','-')}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                )
+                            except Exception as e:
+                                st.error(f"Erreur export XLSX: {e}")
+            else:
+                dossier_q = st.text_input("Dossier N (ou fragment)", value="", key=skey("compta","dossier"))
+                if not dossier_q:
+                    st.info("Saisis un numéro de dossier (ou fragment) pour lancer la recherche.")
+                else:
+                    qnorm = remove_accents(dossier_q).strip().lower()
+                    series_norm = normalize_search_series(df_live[col_dossier])
+                    mask = series_norm.str.contains(re.escape(qnorm), na=False)
+                    matches = df_live[mask].reset_index(drop=True)
+                    if matches.empty:
+                        st.warning("Aucun dossier trouvé.")
+                    else:
+                        st.dataframe(matches, use_container_width=True, height=240)
+                        sel_idx = st.number_input("Index (ligne) du client à visualiser", min_value=0, max_value=max(0,len(matches)-1), value=0, step=1, key=skey("compta","idx2"))
+                        row = matches.loc[int(sel_idx)]
+                        montant_col = detect_montant_column(df_live) or "Montant honoraires (US $)"
+                        autres_col = detect_autres_column(df_live) or "Autres frais (US $)"
+                        honoraires = _to_num(row.get(montant_col,0))
+                        autres = _to_num(row.get(autres_col,0))
+                        total_paye = _to_num(row.get("Payé",0))
+                        solde = _to_num(row.get("Solde", honoraires + autres - total_paye))
+                        st.markdown(f"### Fiche: {row.get(col_nom,'')} — Dossier {row.get(col_dossier,'')}")
+                        st.markdown(f"- Montant honoraires : {_fmt_money(honoraires)}")
+                        st.markdown(f"- Autres frais : {_fmt_money(autres)}")
+                        st.markdown(f"- Total payé : {_fmt_money(total_paye)}")
+                        st.markdown(f"**Solde dû : {_fmt_money(solde)}**")
+                        st.markdown("---")
+                        acomptes_cols = detect_acompte_columns(df_live)
+                        data_ac = []
+                        for ac in acomptes_cols:
+                            val = _to_num(row.get(ac,0))
+                            date_col = f"Date {ac}" if f"Date {ac}" in df_live.columns else ("Date Acompte 1" if ac=="Acompte 1" else "")
+                            dval = row.get(date_col, "")
+                            mode_col = "ModeReglement_Ac1" if ac=="Acompte 1" else f"ModeReglement_{ac.replace(' ','')}"
+                            mode = row.get(mode_col, "")
+                            if val and val != 0:
+                                dd = ""
+                                if isinstance(dval, pd.Timestamp):
+                                    dd = dval.date()
+                                elif isinstance(dval, str) and dval.strip():
+                                    dd = dval
+                                data_ac.append({"Acompte": ac, "Montant": _fmt_money(val), "Date": dd, "Mode": mode})
+                        if data_ac:
+                            st.table(data_ac)
+                        else:
+                            st.write("Aucun acompte enregistré.")
+                        st.markdown("---")
+                        if st.button("Exporter relevé client (.xlsx)"):
+                            try:
+                                out_df = pd.DataFrame([{
+                                    "ID_Client": row.get("ID_Client",""),
+                                    "Dossier N": row.get(col_dossier,""),
+                                    "Nom": row.get(col_nom,""),
+                                    "Montant honoraires": honoraires,
+                                    "Autres frais": autres,
+                                    "Total payé": total_paye,
+                                    "Solde": solde
+                                }])
+                                buf = BytesIO()
+                                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                                    out_df.to_excel(writer, index=False, sheet_name="Releve")
+                                buf.seek(0)
+                                st.download_button(
+                                    "Télécharger XLSX",
+                                    data=buf.getvalue(),
+                                    file_name=f"releve_client_{str(row.get(col_dossier,'')).replace('/','-')}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                )
+                            except Exception as e:
+                                st.error(f"Erreur export XLSX: {e}")
+
+# ---- Export tab ----
+with tabs[6]:
+    st.header("💾 Export")
+    df_live = _get_df_live_safe()
+    if df_live is None or df_live.empty:
+        st.info("Aucune donnée à exporter.")
+    else:
+        st.write(f"Vue en mémoire: {df_live.shape[0]} lignes, {df_live.shape[1]} colonnes")
+        col1, col2 = st.columns(2)
+        with col1:
+            csv_bytes = df_live.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
+        with col2:
+            df_for_export = df_live.copy()
+            try:
+                montant_col = detect_montant_column(df_for_export) or "Montant honoraires (US $)"
+                autres_col = detect_autres_column(df_for_export) or "Autres frais (US $)"
+                acomptes_cols = detect_acompte_columns(df_for_export)
+                df_for_export["_Montant_num_"] = df_for_export.get(montant_col,0).apply(lambda x: _to_num(x))
+                df_for_export["_Autres_num_"] = df_for_export.get(autres_col,0).apply(lambda x: _to_num(x))
+                for acc in acomptes_cols:
+                    df_for_export[f"_num_{acc}"] = df_for_export.get(acc,0).apply(lambda x: _to_num(x))
+                if acomptes_cols:
+                    df_for_export["_Acomptes_sum_"] = df_for_export[[f"_num_{acc}" for acc in acomptes_cols]].sum(axis=1)
+                else:
+                    df_for_export["_Acomptes_sum_"] = 0.0
+                df_for_export["Solde_formule"] = df_for_export["_Montant_num_"] + df_for_export["_Autres_num_"] - df_for_export["_Acomptes_sum_"]
+                df_for_export["Solde à percevoir (US $)"] = df_for_export["Solde_formule"]
+            except Exception:
+                df_for_export["Solde_formule"] = df_for_export.get("Solde",0).apply(lambda x: _to_num(x))
+                df_for_export["Solde à percevoir (US $)"] = df_for_export.get("Solde à percevoir (US $)",0).apply(lambda x: _to_num(x))
+            drop_cols = [c for c in df_for_export.columns if c.startswith("_num_") or c in ["_Montant_num_","_Autres_num_","_Acomptes_sum_"]]
+            try:
+                df_export_final = df_for_export.drop(columns=drop_cols)
+            except Exception:
+                df_export_final = df_for_export.copy()
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df_export_final.to_excel(writer, index=False, sheet_name="Clients")
+            out_bytes = buf.getvalue()
+            st.download_button("⬇️ Export XLSX (avec colonne Solde_formule)", data=out_bytes, file_name="Clients_export_with_Solde_formule.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# End of file
