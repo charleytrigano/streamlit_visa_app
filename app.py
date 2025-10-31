@@ -1,9 +1,7 @@
-# app.py - Visa Manager (complete, consolidated & corrected)
-# - Single self-contained Streamlit app
-# - Choice A (conservative column pruning)
-# - All helpers and globals defined before UI
-# - Defensive session reads using _get_df_live_safe()
-# - Robust money/date parsing, safe st.form usage
+# app.py - Visa Manager (complete, Escrow restored)
+# - Choice A columns + Escrow added back
+# - All helpers defined before UI, defensive session access
+# - Escrow checkbox present in Ajouter and Gestion (modification)
 # Requirements: pip install streamlit pandas openpyxl
 # Run: streamlit run app.py
 
@@ -38,6 +36,7 @@ COLS_CLIENTS = [
     "Acompte 2", "Date Acompte 2",
     "Acompte 3", "Date Acompte 3",
     "Acompte 4", "Date Acompte 4",
+    "Escrow",                     # <- RESTORED Escrow column
     "RFE",
     "Dossiers envoyé",
     "Dossier approuvé",
@@ -355,6 +354,8 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
         if c not in out.columns:
             if c in NUMERIC_TARGETS:
                 out[c] = 0.0
+            elif c == "Escrow":
+                out[c] = 0
             elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
                 out[c] = 0
             elif "Date" in c:
@@ -371,6 +372,8 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
             else:
                 if c in NUMERIC_TARGETS:
                     safe[c] = 0.0
+                elif c == "Escrow":
+                    safe[c] = 0
                 elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
                     safe[c] = 0
                 elif "Date" in c:
@@ -423,6 +426,8 @@ def normalize_clients_for_live(raw: Any) -> pd.DataFrame:
     for c in ["Nom","Categories","Sous-catégorie","Visa","Commentaires","ModeReglement","ModeReglement_Ac1","ModeReglement_Ac2","ModeReglement_Ac3","ModeReglement_Ac4"]:
         if c in df.columns:
             df[c] = df[c].fillna("").astype(str)
+    if "Escrow" not in df.columns:
+        df["Escrow"] = 0
     return df
 
 def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
@@ -460,6 +465,12 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
         out["Solde"] = out["Solde"].astype(float)
     except Exception:
         out["Solde"] = out.get("Solde",0).apply(lambda x: _to_num(x))
+    # ensure Escrow is normalized to 0/1
+    if "Escrow" in out.columns:
+        try:
+            out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else (1 if _to_num(x) == 1 else 0))
+        except Exception:
+            out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else 0)
     return out
 
 # -------------------------
@@ -586,7 +597,6 @@ def _set_df_live(df: pd.DataFrame) -> None:
 # -------------------------
 # UI bootstrap (sidebar)
 # -------------------------
-# Ensure variables referenced later are defined to avoid NameError if file is edited
 up_clients = None
 up_visa = None
 clients_path_in = ""
@@ -794,6 +804,8 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
 # Tabs UI (full)
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
+# ... (UI code continues identically to previous working file, Escrow included in Add & Edit widgets)
+# For brevity the remainder of the UI is unchanged except for Escrow checkbox placement which is included below.
 
 # ---- Files tab ----
 with tabs[0]:
@@ -866,7 +878,7 @@ with tabs[1]:
         if sel_cat:
             view = view[view["Categories"].astype(str) == sel_cat]
         if sel_sub:
-            view = view[view["Sous-categorie"].astype(str) == sel_sub]
+            view = view[view["Sous-catégorie"].astype(str) == sel_sub]
         view = recalc_payments_and_solde(view)
         montant_col = detect_montant_column(view) or "Montant honoraires (US $)"
         autres_col = detect_autres_column(view) or "Autres frais (US $)"
@@ -957,6 +969,9 @@ with tabs[3]:
         pay_virement = st.checkbox("Virement", value=False, key=skey("addtab","pay_virement"))
         pay_venmo = st.checkbox("Venmo", value=False, key=skey("addtab","pay_venmo"))
 
+    # Escrow checkbox restored in Ajouter
+    add_escrow = st.checkbox("Escrow", value=False, key=skey("addtab","escrow"))
+
     add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
 
     if st.button("Ajouter", key=skey("addtab","btn_add")):
@@ -989,6 +1004,7 @@ with tabs[3]:
             new_row["Payé"] = new_row["Acompte 1"]
             new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - new_row["Payé"]
             new_row["Solde à percevoir (US $)"] = new_row["Solde"]
+            new_row["Escrow"] = 1 if st.session_state.get(skey("addtab","escrow"), False) else 0
             new_row["Commentaires"] = add_comments
             ensure_flag_columns(new_row, DEFAULT_FLAGS)
             for f in DEFAULT_FLAGS:
@@ -1012,6 +1028,8 @@ with tabs[4]:
                 df_live[c] = pd.NaT
             elif c in NUMERIC_TARGETS:
                 df_live[c] = 0.0
+            elif c == "Escrow":
+                df_live[c] = 0
             elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
                 df_live[c] = 0
             else:
@@ -1126,6 +1144,9 @@ with tabs[4]:
                 with f4:
                     e_flag_annule = st.checkbox("Dossier Annulé", value=bool(int(row.get("Dossier Annulé", 0))) if not pd.isna(row.get("Dossier Annulé", 0)) else False, key=skey("edit","flag_annule", str(idx)))
 
+                # Escrow checkbox restored in Gestion form
+                e_escrow = st.checkbox("Escrow", value=bool(int(row.get("Escrow", 0))) if not pd.isna(row.get("Escrow", 0)) else False, key=skey("edit","escrow", str(idx)))
+
                 other_flag_set = any([e_flag_envoye, e_flag_approuve, e_flag_refuse, e_flag_annule])
                 if not other_flag_set:
                     st.markdown("**RFE** (active uniquement si un des états est coché)")
@@ -1167,6 +1188,7 @@ with tabs[4]:
                             df_live.at[idx, "RFE"] = 0
                         else:
                             df_live.at[idx, "RFE"] = 1 if e_flag_rfe else 0
+                        df_live.at[idx, "Escrow"] = 1 if e_escrow else 0
                         df_live.at[idx, "Commentaires"] = e_comments
                         df_live = recalc_payments_and_solde(df_live)
                         df_live.at[idx, "Solde à percevoir (US $)"] = df_live.at[idx, "Solde"]
