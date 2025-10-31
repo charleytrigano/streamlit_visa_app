@@ -1,9 +1,12 @@
-# app.py - Visa Manager (final, consolidated and corrected)
-# - Support .csv/.xlsx/.xlsm, Escrow, ComptaCli import with manual "Importer la fiche" button
-# - Column normalization and extended heuristics for robust imports
-# - Compta Client: robust search by Nom or Dossier N (accent-insensitive) and XLSX export
-# - Persist imported clients to CACHE_CLIENTS so you don't need to re-upload the .xlsx
-# Requirements: pip install streamlit pandas openpyxl
+# app.py - Visa Manager (complete)
+# - Features:
+#   * Import Clients/Visa (xlsx/csv), normalize columns, heuristic mapping
+#   * Import single ComptaCli fiche and persist to cache so re-upload not required
+#   * Session-backed clients table editable in "Gestion"
+#   * Compta Client tab: select a row (index | Dossier N | Nom) like Gestion and export .xlsx
+#   * Dashboard: filters by Category/Subcategory, Year, Month (with "Tous"), custom date range, and comparison between two periods
+#   * Analyses: multiple charts (time series monthly, heatmap year x month, category treemap, top-N clients, comparison bars)
+# Requirements: pip install streamlit pandas openpyxl plotly
 # Run: streamlit run app.py
 
 import os
@@ -15,6 +18,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+
+# optional plotly for richer charts
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except Exception:
+    PLOTLY_AVAILABLE = False
 
 # -------------------------
 # Configuration & constants
@@ -169,8 +180,7 @@ COL_CANDIDATES = {
     "mode reglement": "ModeReglement",
     "rfe": "RFE"
 }
-
-# Extend candidates with variants
+# extra variants
 COL_CANDIDATES.update({
     "montant honoraires us": "Montant honoraires (US $)",
     "montant honoraires (us $)": "Montant honoraires (US $)",
@@ -181,10 +191,9 @@ COL_CANDIDATES.update({
     "modereglement ac1": "ModeReglement_Ac1",
     "modereglement_ac1": "ModeReglement_Ac1",
     "mode reglement ac2": "ModeReglement_Ac2",
-    "modereglement ac2": "ModeReglement_Ac2",
-    "modereglement_ac2": "ModeReglement_Ac2",
     "mode reglement ac3": "ModeReglement_Ac3",
     "mode reglement ac4": "ModeReglement_Ac4",
+    "modereglement_ac2": "ModeReglement_Ac2",
     "modereglement_ac3": "ModeReglement_Ac3",
     "modereglement_ac4": "ModeReglement_Ac4",
     "escrow": "Escrow"
@@ -291,7 +300,7 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -------------------------
-# Visa maps (initialized early)
+# Visa maps init
 # -------------------------
 visa_map: Dict[str, List[str]] = {}
 visa_map_norm: Dict[str, List[str]] = {}
@@ -758,10 +767,6 @@ def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
 def _persist_clients_cache(df: pd.DataFrame) -> None:
-    """
-    Save the current clients dataframe to CACHE_CLIENTS as an XLSX file;
-    used so the imported ComptaCli remains available without re-upload.
-    """
     try:
         buf = BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -774,11 +779,6 @@ def _persist_clients_cache(df: pd.DataFrame) -> None:
 # -------------------------
 # UI bootstrap (sidebar)
 # -------------------------
-up_clients = None
-up_visa = None
-clients_path_in = ""
-visa_path_in = ""
-
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
@@ -810,9 +810,9 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
 # Save uploaded bytes and try to detect ComptaCli sheet
 clients_src_for_read = None
 visa_src_for_read = None
-uploaded_comptacli_df = None  # if parse succeeds we'll offer import
+uploaded_comptacli_df = None
 
-# If there is a persisted cache, load it as default clients source so the app remembers imports
+# If cached clients exist, use it by default (persisted from previous imports/edits)
 if os.path.exists(CACHE_CLIENTS) and up_clients is None and not clients_path_in:
     clients_src_for_read = CACHE_CLIENTS
 
@@ -830,7 +830,7 @@ if up_clients is not None:
                     parsed = parse_fiche_from_sheet(df_sheet)
                     if parsed is not None:
                         uploaded_comptacli_df = parsed
-            # save clients and visa sheets to cache files for fallback
+            # persist clients/visa sheets to cache files
             for name, df_sheet in xls_all.items():
                 df_sheet = _normalize_incoming_columns(df_sheet)
                 if canonical_key(name) in (canonical_key(SHEET_CLIENTS), canonical_key("clients")) and isinstance(df_sheet, pd.DataFrame):
@@ -901,7 +901,7 @@ try:
 except Exception:
     df_visa_raw = None
 
-# sanitize visa df and build maps if present
+# Build visa maps if visa sheet present
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
         df_visa_raw = df_visa_raw.fillna("")
@@ -983,7 +983,7 @@ else:
         st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 # -------------------------
-# UI helpers & Tabs
+# UI helpers
 # -------------------------
 def unique_nonempty(series):
     try:
@@ -1008,6 +1008,9 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     """
     return html
 
+# -------------------------
+# Tabs UI
+# -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export"])
 
 # ---- Files tab ----
@@ -1093,16 +1096,155 @@ with tabs[1]:
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
     else:
-        cats = unique_nonempty(df_live_view["Categories"]) if "Categories" in df_live_view.columns else []
-        subs = unique_nonempty(df_live_view["Sous-categorie"]) if "Sous-categorie" in df_live_view.columns else []
-        f1, f2, f3 = st.columns([1,1,1])
-        sel_cat = f1.selectbox("Catégorie", options=[""]+cats, index=0, key=skey("dash","cat"))
-        sel_sub = f2.selectbox("Sous-catégorie", options=[""]+subs, index=0, key=skey("dash","sub"))
-        view = df_live_view.copy()
-        if sel_cat:
-            view = view[view["Categories"].astype(str) == sel_cat]
-        if sel_sub:
-            view = view[view["Sous-categorie"].astype(str) == sel_sub]
+        # derive years and months from Date column
+        date_col_candidates = [c for c in df_live_view.columns if "date" in canonical_key(c)]
+        date_col = "Date" if "Date" in df_live_view.columns else (date_col_candidates[0] if date_col_candidates else None)
+        if date_col is None:
+            st.warning("Aucune colonne Date détectée — les filtres par année/mois et graphiques temporels sont désactivés.")
+            years = []
+        else:
+            df_live_view[date_col] = pd.to_datetime(df_live_view[date_col], errors="coerce")
+            df_live_view["_year_"] = df_live_view[date_col].dt.year
+            df_live_view["_month_"] = df_live_view[date_col].dt.month
+            years = sorted([int(y) for y in df_live_view["_year_"].dropna().unique().tolist()])
+
+        # Filters: Category, Subcategory, Year, Month or custom range
+        fcol1, fcol2, fcol3 = st.columns([1.2,1.2,1.6])
+        with fcol1:
+            cats = [""] + (unique_nonempty(df_live_view["Categories"]) if "Categories" in df_live_view.columns else [])
+            sel_cat = st.selectbox("Catégorie", options=cats, index=0, key=skey("dash","cat"))
+        with fcol2:
+            subs = [""] + (unique_nonempty(df_live_view["Sous-categorie"]) if "Sous-categorie" in df_live_view.columns else [])
+            sel_sub = st.selectbox("Sous-catégorie", options=subs, index=0, key=skey("dash","sub"))
+        with fcol3:
+            st.markdown("Filtrage temporel")
+            timeframe_mode = st.selectbox("Mode temporel", options=["Année+Mois (rapide)","Plage libre (from/to)","Comparer deux périodes"], index=0, key=skey("dash","tmode"))
+
+        # helper to filter by year+month or range
+        def apply_time_filter(df, mode="Année+Mois (rapide)", year=None, month=None, start=None, end=None):
+            out = df.copy()
+            if mode == "Année+Mois (rapide)":
+                if year:
+                    out = out[out["_year_"] == int(year)]
+                    if month and month != "Tous":
+                        out = out[out["_month_"] == int(month)]
+            elif mode == "Plage libre (from/to)":
+                if start:
+                    out = out[out[date_col] >= pd.to_datetime(start)]
+                if end:
+                    out = out[out[date_col] <= pd.to_datetime(end)]
+            return out
+
+        # UI for each mode
+        if timeframe_mode == "Année+Mois (rapide)":
+            c1, c2 = st.columns([1,1])
+            with c1:
+                yrs = [""] + [str(y) for y in years]
+                sel_year = st.selectbox("Année", options=yrs, index=0, key=skey("dash","year"))
+            with c2:
+                months = ["Tous"] + [str(i) for i in range(1,13)]
+                sel_month = st.selectbox("Mois", options=months, index=0, key=skey("dash","month"))
+            # filter view
+            view = df_live_view.copy()
+            if sel_cat:
+                view = view[view["Categories"].astype(str) == sel_cat]
+            if sel_sub:
+                view = view[view["Sous-categorie"].astype(str) == sel_sub]
+            if sel_year:
+                view = apply_time_filter(view, mode="Année+Mois (rapide)", year=int(sel_year), month=(None if sel_month=="Tous" else int(sel_month)))
+        elif timeframe_mode == "Plage libre (from/to)":
+            c1, c2 = st.columns([1,1])
+            with c1:
+                start_date = st.date_input("Date début", value=None, key=skey("dash","start"))
+            with c2:
+                end_date = st.date_input("Date fin", value=None, key=skey("dash","end"))
+            view = df_live_view.copy()
+            if sel_cat:
+                view = view[view["Categories"].astype(str) == sel_cat]
+            if sel_sub:
+                view = view[view["Sous-categorie"].astype(str) == sel_sub]
+            view = apply_time_filter(view, mode="Plage libre (from/to)", start=start_date, end=end_date)
+        else:  # Compare two periods
+            st.markdown("Période A")
+            a_col1, a_col2 = st.columns([1,1])
+            with a_col1:
+                yrs = [""] + [str(y) for y in years]
+                a_year = st.selectbox("Année A", options=yrs, index=0, key=skey("dash","ayear"))
+            with a_col2:
+                a_months = ["Tous"] + [str(i) for i in range(1,13)]
+                a_month = st.selectbox("Mois A", options=a_months, index=0, key=skey("dash","amonth"))
+            st.markdown("Période B")
+            b_col1, b_col2 = st.columns([1,1])
+            with b_col1:
+                b_year = st.selectbox("Année B", options=yrs, index=0, key=skey("dash","byear"))
+            with b_col2:
+                b_month = st.selectbox("Mois B", options=a_months, index=0, key=skey("dash","bmonth"))
+            # build views for A and B
+            base = df_live_view.copy()
+            if sel_cat:
+                base = base[base["Categories"].astype(str) == sel_cat]
+            if sel_sub:
+                base = base[base["Sous-categorie"].astype(str) == sel_sub]
+            viewA = base.copy()
+            viewB = base.copy()
+            if a_year:
+                viewA = apply_time_filter(viewA, mode="Année+Mois (rapide)", year=int(a_year), month=(None if a_month=="Tous" else int(a_month)))
+            if b_year:
+                viewB = apply_time_filter(viewB, mode="Année+Mois (rapide)", year=int(b_year), month=(None if b_month=="Tous" else int(b_month)))
+            # compute KPIs side-by-side
+            def compute_kpis(df):
+                montant_col = detect_montant_column(df) or "Montant honoraires (US $)"
+                autres_col = detect_autres_column(df) or "Autres frais (US $)"
+                total_honoraires = float(df.get(montant_col,0).apply(lambda x: _to_num(x)).sum())
+                total_autres = float(df.get(autres_col,0).apply(lambda x: _to_num(x)).sum())
+                acomptes_sum = 0.0
+                for ac in detect_acompte_columns(df):
+                    acomptes_sum += float(df.get(ac,0).apply(lambda x: _to_num(x)).sum())
+                count = len(df)
+                solde = total_honoraires + total_autres - acomptes_sum
+                return {"count":count,"hon":total_honoraires,"autres":total_autres,"acomptes":acomptes_sum,"solde":solde}
+            kpiA = compute_kpis(viewA)
+            kpiB = compute_kpis(viewB)
+            st.markdown("### Comparaison Période A vs B")
+            cA, cB = st.columns(2)
+            with cA:
+                st.markdown(f"**Période A** — {a_year or '—'} / {a_month or 'Tous'}")
+                st.markdown(f"- Dossiers: {kpiA['count']}")
+                st.markdown(f"- Honoraires: {_fmt_money(kpiA['hon'])}")
+                st.markdown(f"- Acomptes: {_fmt_money(kpiA['acomptes'])}")
+                st.markdown(f"- Solde: {_fmt_money(kpiA['solde'])}")
+            with cB:
+                st.markdown(f"**Période B** — {b_year or '—'} / {b_month or 'Tous'}")
+                st.markdown(f"- Dossiers: {kpiB['count']}")
+                st.markdown(f"- Honoraires: {_fmt_money(kpiB['hon'])}")
+                st.markdown(f"- Acomptes: {_fmt_money(kpiB['acomptes'])}")
+                st.markdown(f"- Solde: {_fmt_money(kpiB['solde'])}")
+            # small bar chart comparison
+            comp_df = pd.DataFrame([
+                {"metric":"Dossiers","A":kpiA["count"],"B":kpiB["count"]},
+                {"metric":"Honoraires","A":kpiA["hon"],"B":kpiB["hon"]},
+                {"metric":"Acomptes","A":kpiA["acomptes"],"B":kpiB["acomptes"]},
+                {"metric":"Solde","A":kpiA["solde"],"B":kpiB["solde"]}
+            ])
+            if PLOTLY_AVAILABLE:
+                fig = go.Figure(data=[
+                    go.Bar(name='Période A', x=comp_df['metric'], y=comp_df['A']),
+                    go.Bar(name='Période B', x=comp_df['metric'], y=comp_df['B'])
+                ])
+                fig.update_layout(barmode='group', height=360, title="Comparaison métriques")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.write(comp_df)
+            # show small tables of raw viewA/viewB if requested
+            if st.checkbox("Voir listes Période A / B", value=False):
+                st.markdown("Période A (extrait)")
+                st.dataframe(viewA.reset_index(drop=True), use_container_width=True, height=200)
+                st.markdown("Période B (extrait)")
+                st.dataframe(viewB.reset_index(drop=True), use_container_width=True, height=200)
+            # skip default charts for compare mode
+            st.stop()
+
+        # Default (non-compare) display of KPIs and small charts
         view = recalc_payments_and_solde(view)
         montant_col = detect_montant_column(view) or "Montant honoraires (US $)"
         autres_col = detect_autres_column(view) or "Autres frais (US $)"
@@ -1116,7 +1258,8 @@ with tabs[1]:
         cols_k[0].markdown(kpi_html("Dossiers", f"{len(view):,}"), unsafe_allow_html=True)
         cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
         cols_k[2].markdown(kpi_html("Solde total", _fmt_money(total_honoraires + total_autres - total_acomptes)), unsafe_allow_html=True)
-        st.markdown("### Clients (aperçu)")
+
+        st.markdown("### Aperçu clients (filtré)")
         try:
             display_df = view.copy()
             for mc in [montant_col, autres_col, "Payé", "Solde"]:
@@ -1129,15 +1272,114 @@ with tabs[1]:
 # ---- Analyses tab ----
 with tabs[2]:
     st.subheader("📈 Analyses")
-    df_ = _get_df_live_safe()
-    if isinstance(df_, pd.DataFrame) and not df_.empty and "Categories" in df_.columns:
-        try:
-            import plotly.express as px
-            cat_counts = df_["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
-            fig = px.pie(cat_counts, names="Categorie", values="Nombre", hole=0.4, title="Répartition par catégorie")
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception:
-            st.bar_chart(df_["Categories"].value_counts())
+    df_ = recalc_payments_and_solde(_get_df_live_safe())
+    if df_ is None or df_.empty:
+        st.info("Aucune donnée pour analyser.")
+    else:
+        # ensure date
+        date_col_candidates = [c for c in df_.columns if "date" in canonical_key(c)]
+        date_col = "Date" if "Date" in df_.columns else (date_col_candidates[0] if date_col_candidates else None)
+        if date_col is None:
+            st.warning("Aucune colonne 'Date' détectée - analyses temporelles désactivées.")
+        else:
+            df_[date_col] = pd.to_datetime(df_[date_col], errors="coerce")
+            df_["_year_"] = df_[date_col].dt.year
+            df_["_month_"] = df_[date_col].dt.month
+            # Time series: honoraires per month
+            monto = detect_montant_column(df_) or "Montant honoraires (US $)"
+            ts = df_.groupby([df_[date_col].dt.to_period("M")])[monto].sum().reset_index()
+            ts[date_col] = ts[date_col].dt.to_timestamp()
+            st.markdown("#### Série temporelle mensuelle - Montant honoraires")
+            if PLOTLY_AVAILABLE:
+                fig = px.line(ts, x=date_col, y=monto, markers=True, title="Montant honoraires par mois")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.line_chart(ts.set_index(date_col)[monto])
+            # Heatmap year x month
+            st.markdown("#### Heatmap Année x Mois (Montant honoraires)")
+            pivot = df_.groupby([df_["_year_"], df_["_month_"]])[monto].sum().unstack(fill_value=0)
+            if PLOTLY_AVAILABLE:
+                fig = go.Figure(data=go.Heatmap(
+                    z=pivot.values,
+                    x=[f"{m:02d}" for m in pivot.columns],
+                    y=[str(y) for y in pivot.index],
+                    colorscale="Viridis"
+                ))
+                fig.update_layout(title="Heatmap Montants par Mois/Année", xaxis_title="Mois", yaxis_title="Année", height=420)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.dataframe(pivot)
+            # Category treemap
+            st.markdown("#### Répartition par Catégorie")
+            cat_col = "Categories" if "Categories" in df_.columns else None
+            if cat_col:
+                cat_agg = df_.groupby(cat_col)[monto].sum().reset_index().sort_values(monto, ascending=False)
+                if PLOTLY_AVAILABLE:
+                    fig = px.treemap(cat_agg, path=[cat_col], values=monto, title="Montant par Catégorie")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.bar_chart(cat_agg.set_index(cat_col)[monto])
+            # Top N clients
+            st.markdown("#### Top N clients par Montant honoraires")
+            try:
+                topn = int(st.slider("Top N", 5, 50, 10, key=skey("anal","topn")))
+            except Exception:
+                topn = 10
+            top_clients = df_.groupby("Nom")[monto].sum().reset_index().sort_values(monto, ascending=False).head(topn)
+            if PLOTLY_AVAILABLE:
+                fig = px.bar(top_clients, x="Nom", y=monto, title=f"Top {topn} clients", labels={monto:"Montant"})
+                fig.update_layout(xaxis_tickangle=-45, height=420)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.dataframe(top_clients)
+            # Comparison A vs B quick UI (reuse dashboard choices)
+            st.markdown("#### Comparaison rapide de deux périodes (Année+Mois)")
+            colA1, colA2, colB1, colB2 = st.columns([1,1,1,1])
+            with colA1:
+                years = sorted(df_["_year_"].dropna().unique().astype(int).tolist())
+                a_year = st.selectbox("Année A", options=[""]+ [str(y) for y in years], index=0, key=skey("anal","ayear"))
+            with colA2:
+                a_month = st.selectbox("Mois A", options=["Tous"] + [str(i) for i in range(1,13)], index=0, key=skey("anal","amonth"))
+            with colB1:
+                b_year = st.selectbox("Année B", options=[""]+ [str(y) for y in years], index=0, key=skey("anal","byear"))
+            with colB2:
+                b_month = st.selectbox("Mois B", options=["Tous"] + [str(i) for i in range(1,13)], index=0, key=skey("anal","bmonth"))
+            if st.button("Comparer maintenant", key=skey("anal","compare_btn")):
+                base = df_.copy()
+                def subset(df, y, m):
+                    out = df.copy()
+                    if y:
+                        out = out[out["_year_"] == int(y)]
+                    if m and m != "Tous":
+                        out = out[out["_month_"] == int(m)]
+                    return out
+                A = subset(base, a_year, a_month)
+                B = subset(base, b_year, b_month)
+                def kpis(d):
+                    hon = float(d.get(monto,0).apply(lambda x: _to_num(x)).sum())
+                    acom = 0.0
+                    for ac in detect_acompte_columns(d):
+                        acom += float(d.get(ac,0).apply(lambda x: _to_num(x)).sum())
+                    return {"count":len(d),"hon":hon,"acom":acom,"solde":hon - acom}
+                ka = kpis(A); kb = kpis(B)
+                st.markdown(f"Période A: {a_year or '—'} / {a_month or 'Tous'} — Période B: {b_year or '—'} / {b_month or 'Tous'}")
+                c1,c2 = st.columns(2)
+                with c1:
+                    st.write(ka)
+                with c2:
+                    st.write(kb)
+                comp_df = pd.DataFrame([
+                    {"metric":"Dossiers","A":ka["count"],"B":kb["count"]},
+                    {"metric":"Honoraires","A":ka["hon"],"B":kb["hon"]},
+                    {"metric":"Acomptes","A":ka["acom"],"B":kb["acom"]},
+                    {"metric":"Solde","A":ka["solde"],"B":kb["solde"]}
+                ])
+                if PLOTLY_AVAILABLE:
+                    fig = go.Figure(data=[go.Bar(name='A', x=comp_df['metric'], y=comp_df['A']), go.Bar(name='B', x=comp_df['metric'], y=comp_df['B'])])
+                    fig.update_layout(barmode='group', height=420)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.dataframe(comp_df)
 
 # ---- Add tab ----
 with tabs[3]:
@@ -1152,7 +1394,7 @@ with tabs[3]:
     add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
     add_nom = st.text_input("Nom du client", value="", placeholder="Nom complet du client", key=skey("addtab","nom"))
 
-    categories_options = visa_categories if 'visa_categories' in globals() else []
+    categories_options = visa_categories if visa_categories else (unique_nonempty(df_live["Categories"]) if "Categories" in df_live.columns else [])
     r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
     with r3c1:
         add_cat = st.selectbox("Catégorie", options=[""] + categories_options, index=0, key=skey("addtab","cat"))
@@ -1471,7 +1713,7 @@ with tabs[5]:
     if df_live is None or df_live.empty:
         st.info("Aucune donnée en mémoire.")
     else:
-        # 1) try exact column names first (most reliable)
+        # detect Nom and Dossier columns
         col_nom = None
         col_dossier = None
         for c in df_live.columns:
@@ -1479,174 +1721,88 @@ with tabs[5]:
                 col_nom = c
             if c.strip().lower() in ("dossier n", "dossier", "dossier numéro", "dossier no", "dossier n°"):
                 col_dossier = c
-        # 2) fallback to canonical_key search if exact names not found
         if col_nom is None:
             for c in df_live.columns:
                 if "nom" in canonical_key(c) or "client" in canonical_key(c):
-                    col_nom = c
-                    break
+                    col_nom = c; break
         if col_dossier is None:
             for c in df_live.columns:
                 if "dossier" in canonical_key(c) or "num" in canonical_key(c) or "numero" in canonical_key(c):
-                    col_dossier = c
-                    break
-
-        # If still not found, show helpful debug
+                    col_dossier = c; break
         if col_nom is None and col_dossier is None:
-            st.warning("Impossible de trouver les colonnes 'Nom' ou 'Dossier N' dans les données. Colonnes disponibles :")
+            st.warning("Impossible de trouver les colonnes 'Nom' ou 'Dossier N'. Colonnes disponibles :")
             st.write(list(df_live.columns))
         else:
-            options = []
-            if col_nom is not None:
-                options.append("Nom")
-            if col_dossier is not None:
-                options.append("Dossier N")
-            search_by = st.radio("Rechercher par", options=options, index=0, key=skey("compta","by"))
-            def normalize_search_series(s: pd.Series) -> pd.Series:
-                try:
-                    return s.fillna("").astype(str).map(lambda x: remove_accents(x).strip().lower())
-                except Exception:
-                    return s.fillna("").astype(str)
-            if search_by == "Nom":
-                name_q = st.text_input("Nom du client (ou fragment)", value="", key=skey("compta","nom"))
-                if not name_q:
-                    st.info("Saisis un nom ou un fragment pour lancer la recherche.")
-                else:
-                    qnorm = remove_accents(name_q).strip().lower()
-                    series_norm = normalize_search_series(df_live[col_nom])
-                    mask = series_norm.str.contains(re.escape(qnorm), na=False)
-                    matches = df_live[mask].reset_index(drop=True)
-                    if matches.empty:
-                        st.warning("Aucun client trouvé pour ce nom.")
-                    else:
-                        st.dataframe(matches, use_container_width=True, height=240)
-                        sel_idx = st.number_input("Index (ligne) du client à visualiser", min_value=0, max_value=max(0,len(matches)-1), value=0, step=1, key=skey("compta","idx"))
-                        row = matches.loc[int(sel_idx)]
-                        montant_col = detect_montant_column(df_live) or "Montant honoraires (US $)"
-                        autres_col = detect_autres_column(df_live) or "Autres frais (US $)"
-                        honoraires = _to_num(row.get(montant_col,0))
-                        autres = _to_num(row.get(autres_col,0))
-                        total_paye = _to_num(row.get("Payé",0))
-                        solde = _to_num(row.get("Solde", honoraires + autres - total_paye))
-                        st.markdown(f"### Fiche: {row.get(col_nom,'')} — Dossier {row.get(col_dossier,'') if col_dossier in row.index else ''}")
-                        st.markdown(f"- Montant honoraires : {_fmt_money(honoraires)}")
-                        st.markdown(f"- Autres frais : {_fmt_money(autres)}")
-                        st.markdown(f"- Total payé : {_fmt_money(total_paye)}")
-                        st.markdown(f"**Solde dû : {_fmt_money(solde)}**")
-                        st.markdown("---")
-                        acomptes_cols = detect_acompte_columns(df_live)
-                        data_ac = []
-                        for ac in acomptes_cols:
-                            val = _to_num(row.get(ac,0))
-                            date_col = f"Date {ac}" if f"Date {ac}" in df_live.columns else ("Date Acompte 1" if ac=="Acompte 1" else "")
-                            dval = row.get(date_col, "")
-                            mode_col = "ModeReglement_Ac1" if ac=="Acompte 1" else f"ModeReglement_{ac.replace(' ','')}"
-                            mode = row.get(mode_col, "")
-                            if val and val != 0:
-                                dd = ""
-                                if isinstance(dval, pd.Timestamp):
-                                    dd = dval.date()
-                                elif isinstance(dval, str) and dval.strip():
-                                    dd = dval
-                                data_ac.append({"Acompte": ac, "Montant": _fmt_money(val), "Date": dd, "Mode": mode})
-                        if data_ac:
-                            st.table(data_ac)
-                        else:
-                            st.write("Aucun acompte enregistré.")
-                        st.markdown("---")
-                        if st.button("Exporter relevé client (.xlsx)"):
-                            try:
-                                out_df = pd.DataFrame([{
-                                    "ID_Client": row.get("ID_Client",""),
-                                    "Dossier N": row.get(col_dossier,"") if col_dossier in row.index else "",
-                                    "Nom": row.get(col_nom,""),
-                                    "Montant honoraires": honoraires,
-                                    "Autres frais": autres,
-                                    "Total payé": total_paye,
-                                    "Solde": solde
-                                }])
-                                buf = BytesIO()
-                                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                                    out_df.to_excel(writer, index=False, sheet_name="Releve")
-                                buf.seek(0)
-                                st.download_button(
-                                    "Télécharger XLSX",
-                                    data=buf.getvalue(),
-                                    file_name=f"releve_client_{str(row.get(col_dossier,'')).replace('/','-')}.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                            except Exception as e:
-                                st.error(f"Erreur export XLSX: {e}")
+            choices = []
+            for i in range(len(df_live)):
+                dn = str(df_live.at[i, col_dossier]) if col_dossier in df_live.columns else ""
+                nm = str(df_live.at[i, col_nom]) if col_nom in df_live.columns else ""
+                choices.append(f"{i} | {dn} | {nm}")
+            sel = st.selectbox("Sélectionner un client (par index | Dossier N | Nom)", options=[""] + choices, key=skey("compta","select"))
+            if not sel:
+                st.info("Sélectionne une ligne pour afficher le relevé.")
             else:
-                dossier_q = st.text_input("Dossier N (ou fragment)", value="", key=skey("compta","dossier"))
-                if not dossier_q:
-                    st.info("Saisis un numéro de dossier (ou fragment) pour lancer la recherche.")
+                idx = int(sel.split("|")[0].strip())
+                df_live = recalc_payments_and_solde(df_live)
+                if idx < 0 or idx >= len(df_live):
+                    st.error("Index sélectionné invalide.")
                 else:
-                    qnorm = remove_accents(dossier_q).strip().lower()
-                    series_norm = normalize_search_series(df_live[col_dossier])
-                    mask = series_norm.str.contains(re.escape(qnorm), na=False)
-                    matches = df_live[mask].reset_index(drop=True)
-                    if matches.empty:
-                        st.warning("Aucun dossier trouvé.")
+                    row = df_live.loc[idx]
+                    montant_col = detect_montant_column(df_live) or "Montant honoraires (US $)"
+                    autres_col = detect_autres_column(df_live) or "Autres frais (US $)"
+                    honoraires = _to_num(row.get(montant_col, 0))
+                    autres = _to_num(row.get(autres_col, 0))
+                    total_paye = _to_num(row.get("Payé", 0))
+                    solde = _to_num(row.get("Solde", honoraires + autres - total_paye))
+                    st.markdown(f"### Fiche: {row.get(col_nom,'')} — Dossier {row.get(col_dossier,'')}")
+                    st.markdown(f"- Montant honoraires : {_fmt_money(honoraires)}")
+                    st.markdown(f"- Autres frais : {_fmt_money(autres)}")
+                    st.markdown(f"- Total payé : {_fmt_money(total_paye)}")
+                    st.markdown(f"**Solde dû : {_fmt_money(solde)}**")
+                    st.markdown("---")
+                    acomptes_cols = detect_acompte_columns(df_live)
+                    data_ac = []
+                    for ac in acomptes_cols:
+                        val = _to_num(row.get(ac,0))
+                        date_col = f"Date {ac}" if f"Date {ac}" in df_live.columns else ("Date Acompte 1" if ac=="Acompte 1" else "")
+                        dval = row.get(date_col, "")
+                        mode_col = "ModeReglement_Ac1" if ac=="Acompte 1" else f"ModeReglement_{ac.replace(' ','')}"
+                        mode = row.get(mode_col, "")
+                        if val and val != 0:
+                            dd = ""
+                            if isinstance(dval, pd.Timestamp):
+                                dd = dval.date()
+                            elif isinstance(dval, str) and dval.strip():
+                                dd = dval
+                            data_ac.append({"Acompte": ac, "Montant": _fmt_money(val), "Date": dd, "Mode": mode})
+                    if data_ac:
+                        st.table(data_ac)
                     else:
-                        st.dataframe(matches, use_container_width=True, height=240)
-                        sel_idx = st.number_input("Index (ligne) du client à visualiser", min_value=0, max_value=max(0,len(matches)-1), value=0, step=1, key=skey("compta","idx2"))
-                        row = matches.loc[int(sel_idx)]
-                        montant_col = detect_montant_column(df_live) or "Montant honoraires (US $)"
-                        autres_col = detect_autres_column(df_live) or "Autres frais (US $)"
-                        honoraires = _to_num(row.get(montant_col,0))
-                        autres = _to_num(row.get(autres_col,0))
-                        total_paye = _to_num(row.get("Payé",0))
-                        solde = _to_num(row.get("Solde", honoraires + autres - total_paye))
-                        st.markdown(f"### Fiche: {row.get(col_nom,'')} — Dossier {row.get(col_dossier,'')}")
-                        st.markdown(f"- Montant honoraires : {_fmt_money(honoraires)}")
-                        st.markdown(f"- Autres frais : {_fmt_money(autres)}")
-                        st.markdown(f"- Total payé : {_fmt_money(total_paye)}")
-                        st.markdown(f"**Solde dû : {_fmt_money(solde)}**")
-                        st.markdown("---")
-                        acomptes_cols = detect_acompte_columns(df_live)
-                        data_ac = []
-                        for ac in acomptes_cols:
-                            val = _to_num(row.get(ac,0))
-                            date_col = f"Date {ac}" if f"Date {ac}" in df_live.columns else ("Date Acompte 1" if ac=="Acompte 1" else "")
-                            dval = row.get(date_col, "")
-                            mode_col = "ModeReglement_Ac1" if ac=="Acompte 1" else f"ModeReglement_{ac.replace(' ','')}"
-                            mode = row.get(mode_col, "")
-                            if val and val != 0:
-                                dd = ""
-                                if isinstance(dval, pd.Timestamp):
-                                    dd = dval.date()
-                                elif isinstance(dval, str) and dval.strip():
-                                    dd = dval
-                                data_ac.append({"Acompte": ac, "Montant": _fmt_money(val), "Date": dd, "Mode": mode})
-                        if data_ac:
-                            st.table(data_ac)
-                        else:
-                            st.write("Aucun acompte enregistré.")
-                        st.markdown("---")
-                        if st.button("Exporter relevé client (.xlsx)"):
-                            try:
-                                out_df = pd.DataFrame([{
-                                    "ID_Client": row.get("ID_Client",""),
-                                    "Dossier N": row.get(col_dossier,""),
-                                    "Nom": row.get(col_nom,""),
-                                    "Montant honoraires": honoraires,
-                                    "Autres frais": autres,
-                                    "Total payé": total_paye,
-                                    "Solde": solde
-                                }])
-                                buf = BytesIO()
-                                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                                    out_df.to_excel(writer, index=False, sheet_name="Releve")
-                                buf.seek(0)
-                                st.download_button(
-                                    "Télécharger XLSX",
-                                    data=buf.getvalue(),
-                                    file_name=f"releve_client_{str(row.get(col_dossier,'')).replace('/','-')}.xlsx",
-                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                            except Exception as e:
-                                st.error(f"Erreur export XLSX: {e}")
+                        st.write("Aucun acompte enregistré.")
+                    st.markdown("---")
+                    if st.button("Exporter relevé client (.xlsx)"):
+                        try:
+                            out_df = pd.DataFrame([{
+                                "ID_Client": row.get("ID_Client",""),
+                                "Dossier N": row.get(col_dossier,"") if col_dossier in row.index else "",
+                                "Nom": row.get(col_nom,""),
+                                "Montant honoraires": honoraires,
+                                "Autres frais": autres,
+                                "Total payé": total_paye,
+                                "Solde": solde
+                            }])
+                            buf = BytesIO()
+                            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                                out_df.to_excel(writer, index=False, sheet_name="Releve")
+                            buf.seek(0)
+                            st.download_button(
+                                "Télécharger XLSX",
+                                data=buf.getvalue(),
+                                file_name=f"releve_client_{str(row.get(col_dossier,'')).replace('/','-')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        except Exception as e:
+                            st.error(f"Erreur export XLSX: {e}")
 
 # ---- Export tab ----
 with tabs[6]:
