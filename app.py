@@ -1,6 +1,7 @@
-# app.py - Visa Manager (final, consolidated)
+# app.py - Visa Manager (final, ComptaCli import + recherche robuste + export XLSX)
 # - Support .csv/.xlsx/.xlsm, Escrow, ComptaCli import with manual "Importer la fiche" button
 # - Column normalization and extended heuristics for robust imports
+# - Compta Client: robust search by Nom or Dossier N (accent-insensitive) and XLSX export
 # Requirements: pip install streamlit pandas openpyxl
 # Run: streamlit run app.py
 
@@ -971,7 +972,7 @@ else:
         st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 # -------------------------
-# UI helpers & Tabs
+# UI helpers
 # -------------------------
 def unique_nonempty(series):
     try:
@@ -996,6 +997,9 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     """
     return html
 
+# -------------------------
+# Tabs UI (with Compta Client)
+# -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export"])
 
 # ---- Files tab ----
@@ -1082,7 +1086,7 @@ with tabs[1]:
         if sel_cat:
             view = view[view["Categories"].astype(str) == sel_cat]
         if sel_sub:
-            view = view[view["Sous-categorie"].astype(str) == sel_sub]
+            view = view[view["Sous-catégorie"].astype(str) == sel_sub]
         view = recalc_payments_and_solde(view)
         montant_col = detect_montant_column(view) or "Montant honoraires (US $)"
         autres_col = detect_autres_column(view) or "Autres frais (US $)"
@@ -1440,161 +1444,6 @@ with tabs[4]:
                     st.error(f"Erreur suppression: {e}")
             else:
                 st.warning("Aucune sélection pour suppression.")
-
-# ---- Compta Client tab ----
-with tabs[5]:
-    st.subheader("💳 Compta Client")
-    df_live = recalc_payments_and_solde(_get_df_live_safe())
-    if df_live is None or df_live.empty:
-        st.info("Aucune donnée en mémoire.")
-    else:
-        # dynamic detection of columns
-        col_nom = None
-        col_dossier = None
-        for c in df_live.columns:
-            k = canonical_key(c)
-            if not col_nom and ("nom" in k or "client" in k):
-                col_nom = c
-            if not col_dossier and ("dossier" in k or "dossier n" in k or "dossier n" in k):
-                col_dossier = c
-        if col_nom is None:
-            for c in df_live.columns:
-                if "nom" in canonical_key(c) or "name" in canonical_key(c):
-                    col_nom = c; break
-        if col_dossier is None:
-            for c in df_live.columns:
-                if "dossier" in canonical_key(c) or "file" in canonical_key(c):
-                    col_dossier = c; break
-        if col_nom is None and col_dossier is None:
-            st.warning("Impossible de trouver les colonnes Nom ou Dossier. Colonnes disponibles: " + ", ".join(list(df_live.columns)[:50]))
-        else:
-            options = []
-            if col_nom is not None:
-                options.append("Nom")
-            if col_dossier is not None:
-                options.append("Dossier N")
-            search_by = st.radio("Rechercher par", options=options, index=0, key=skey("compta","by"))
-            def normalize_search_series(s: pd.Series) -> pd.Series:
-                try:
-                    return s.fillna("").astype(str).map(lambda x: remove_accents(x).strip().lower())
-                except Exception:
-                    return s.fillna("").astype(str)
-            if search_by == "Nom":
-                name_q = st.text_input("Nom du client", value="", key=skey("compta","nom"))
-                if not name_q:
-                    st.info("Saisis un nom pour rechercher.")
-                else:
-                    qnorm = remove_accents(name_q).strip().lower()
-                    series_norm = normalize_search_series(df_live[col_nom])
-                    mask = series_norm.str.contains(re.escape(qnorm), na=False)
-                    matches = df_live[mask]
-                    if matches.empty:
-                        st.warning("Aucun client trouvé pour ce nom.")
-                    else:
-                        st.dataframe(matches.reset_index(drop=True), use_container_width=True, height=240)
-                        sel_idx = st.number_input("Index (ligne) du client à visualiser", min_value=0, max_value=max(0,len(matches)-1), value=0, step=1, key=skey("compta","idx"))
-                        row = matches.reset_index(drop=True).loc[int(sel_idx)]
-                        montant_col = detect_montant_column(df_live) or "Montant honoraires (US $)"
-                        autres_col = detect_autres_column(df_live) or "Autres frais (US $)"
-                        honoraires = _to_num(row.get(montant_col,0))
-                        autres = _to_num(row.get(autres_col,0))
-                        total_paye = _to_num(row.get("Payé",0))
-                        solde = _to_num(row.get("Solde", honoraires + autres - total_paye))
-                        st.markdown(f"### Fiche: {row.get(col_nom,'')} — Dossier {row.get(col_dossier,'') if col_dossier in row.index else ''}")
-                        st.markdown(f"- Montant honoraires : {_fmt_money(honoraires)}")
-                        st.markdown(f"- Autres frais : {_fmt_money(autres)}")
-                        st.markdown(f"- Total payé : {_fmt_money(total_paye)}")
-                        st.markdown(f"**Solde dû : {_fmt_money(solde)}**")
-                        st.markdown("---")
-                        acomptes_cols = detect_acompte_columns(df_live)
-                        data_ac = []
-                        for ac in acomptes_cols:
-                            val = _to_num(row.get(ac,0))
-                            date_col = f"Date {ac}" if f"Date {ac}" in df_live.columns else ("Date Acompte 1" if ac=="Acompte 1" else "")
-                            dval = row.get(date_col, "")
-                            mode_col = "ModeReglement_Ac1" if ac=="Acompte 1" else f"ModeReglement_{ac.replace(' ','')}"
-                            mode = row.get(mode_col, "")
-                            if val and val != 0:
-                                dd = ""
-                                if isinstance(dval, pd.Timestamp):
-                                    dd = dval.date()
-                                elif isinstance(dval, str) and dval.strip():
-                                    dd = dval
-                                data_ac.append({"Acompte": ac, "Montant": _fmt_money(val), "Date": dd, "Mode": mode})
-                        if data_ac:
-                            st.table(data_ac)
-                        else:
-                            st.write("Aucun acompte enregistré.")
-                        st.markdown("---")
-                        if st.button("Exporter relevé client (CSV)"):
-                            out_df = pd.DataFrame([{
-                                "ID_Client": row.get("ID_Client",""),
-                                "Dossier N": row.get(col_dossier,"") if col_dossier in row.index else "",
-                                "Nom": row.get(col_nom,""),
-                                "Montant honoraires": honoraires,
-                                "Autres frais": autres,
-                                "Total payé": total_paye,
-                                "Solde": solde
-                            }])
-                            st.download_button("Télécharger CSV", data=out_df.to_csv(index=False).encode("utf-8"), file_name=f"releve_client_{row.get(col_dossier,'')}.csv", mime="text/csv")
-            else:
-                dossier_q = st.text_input("Dossier N", value="", key=skey("compta","dossier"))
-                if not dossier_q:
-                    st.info("Saisis un numéro de dossier pour rechercher.")
-                else:
-                    qnorm = remove_accents(dossier_q).strip().lower()
-                    series_norm = normalize_search_series(df_live[col_dossier])
-                    mask = series_norm.str.contains(re.escape(qnorm), na=False)
-                    matches = df_live[mask]
-                    if matches.empty:
-                        st.warning("Aucun dossier trouvé.")
-                    else:
-                        st.dataframe(matches.reset_index(drop=True), use_container_width=True, height=240)
-                        sel_idx = st.number_input("Index (ligne) du client à visualiser", min_value=0, max_value=max(0,len(matches)-1), value=0, step=1, key=skey("compta","idx2"))
-                        row = matches.reset_index(drop=True).loc[int(sel_idx)]
-                        montant_col = detect_montant_column(df_live) or "Montant honoraires (US $)"
-                        autres_col = detect_autres_column(df_live) or "Autres frais (US $)"
-                        honoraires = _to_num(row.get(montant_col,0))
-                        autres = _to_num(row.get(autres_col,0))
-                        total_paye = _to_num(row.get("Payé",0))
-                        solde = _to_num(row.get("Solde", honoraires + autres - total_paye))
-                        st.markdown(f"### Fiche: {row.get(col_nom,'')} — Dossier {row.get(col_dossier,'')}")
-                        st.markdown(f"- Montant honoraires : {_fmt_money(honoraires)}")
-                        st.markdown(f"- Autres frais : {_fmt_money(autres)}")
-                        st.markdown(f"- Total payé : {_fmt_money(total_paye)}")
-                        st.markdown(f"**Solde dû : {_fmt_money(solde)}**")
-                        st.markdown("---")
-                        acomptes_cols = detect_acompte_columns(df_live)
-                        data_ac = []
-                        for ac in acomptes_cols:
-                            val = _to_num(row.get(ac,0))
-                            date_col = f"Date {ac}" if f"Date {ac}" in df_live.columns else ("Date Acompte 1" if ac=="Acompte 1" else "")
-                            dval = row.get(date_col, "")
-                            mode_col = "ModeReglement_Ac1" if ac=="Acompte 1" else f"ModeReglement_{ac.replace(' ','')}"
-                            mode = row.get(mode_col, "")
-                            if val and val != 0:
-                                dd = ""
-                                if isinstance(dval, pd.Timestamp):
-                                    dd = dval.date()
-                                elif isinstance(dval, str) and dval.strip():
-                                    dd = dval
-                                data_ac.append({"Acompte": ac, "Montant": _fmt_money(val), "Date": dd, "Mode": mode})
-                        if data_ac:
-                            st.table(data_ac)
-                        else:
-                            st.write("Aucun acompte enregistré.")
-                        st.markdown("---")
-                        if st.button("Exporter relevé client (CSV)"):
-                            out_df = pd.DataFrame([{
-                                "ID_Client": row.get("ID_Client",""),
-                                "Dossier N": row.get(col_dossier,""),
-                                "Nom": row.get(col_nom,""),
-                                "Montant honoraires": honoraires,
-                                "Autres frais": autres,
-                                "Total payé": total_paye,
-                                "Solde": solde
-                            }])
-                            st.download_button("Télécharger CSV", data=out_df.to_csv(index=False).encode("utf-8"), file_name=f"releve_client_{row.get(col_dossier,'')}.csv", mime="text/csv")
 
 # ---- Export tab ----
 with tabs[6]:
