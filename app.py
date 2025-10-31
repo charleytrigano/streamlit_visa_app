@@ -1,19 +1,12 @@
-# app.py - Visa Manager (complete corrected)
-# - Single authoritative _date_or_none_safe conversion used for all st.date_input calls
-# - All with st.form(...) blocks include st.form_submit_button(...) inside them
-# - Global variables initialized at top to avoid NameError after assembly
-# - Defensive retrieval of session DataFrame via _get_df_live_safe to avoid None/NameErrors
-# - Robust CSV/XLSX reading, header normalization, numeric parsing, and exports retained
+# app.py - Visa Manager (final corrected)
+# - All st.date_input use _date_or_none_safe or safe local wrapper
+# - All forms include st.form_submit_button inside the with block
+# - Global variables initialized at top to avoid NameError
+# - Defensive accessors to session DataFrame
+# - Handles missing date columns in source files gracefully
 #
-# Notes on debugging:
-# - Potential sources of earlier errors were:
-#   1) df_clients_raw / df_visa_raw being referenced before initialization (NameError). Fixed by initializing globals early.
-#   2) st.date_input receiving pandas.Timestamp / pandas.NaT. Fixed by _date_or_none_safe and using it on every date_input value=.
-#   3) Missing st.form_submit_button inside some with st.form(...) blocks. Fixed by ensuring save = st.form_submit_button(...) inside each form.
-#   4) Variables like df_live not being DataFrames at usage. Fixed by _get_df_live_safe() and local fallbacks before using.
-#
-# Run: pip install streamlit pandas openpyxl
-#       streamlit run app.py
+# Requirements: pip install streamlit pandas openpyxl
+# Run: streamlit run app.py
 
 import os
 import json
@@ -25,13 +18,15 @@ from typing import Tuple, Dict, Any, List, Optional
 import pandas as pd
 import streamlit as st
 
-# ---- Ensure global vars exist immediately to avoid NameError when assembling parts ----
+# -------------------------
+# Quick globals to avoid NameError after assembly
+# -------------------------
 df_clients_raw: Optional[pd.DataFrame] = None
 df_visa_raw: Optional[pd.DataFrame] = None
 clients_src_for_read = None
 visa_src_for_read = None
 
-# Optional plotly for charts
+# Optional libs
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -39,7 +34,6 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# Optional openpyxl for advanced XLSX export
 try:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -79,7 +73,7 @@ def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
 # -------------------------
-# Utility helpers
+# Helpers
 # -------------------------
 def normalize_header_text(s: Any) -> str:
     if s is None:
@@ -159,12 +153,12 @@ def _fmt_money(v: Any) -> str:
         return "$0.00"
 
 # -------------------------
-# Safe date converter (authoritative)
+# Single authoritative date converter
 # -------------------------
 def _date_or_none_safe(v: Any) -> Optional[date]:
     """
     Return a native datetime.date or None for any input v.
-    Guarantees never to return pandas.Timestamp or pandas.NaT.
+    Never returns pandas.Timestamp/pd.NaT.
     """
     try:
         if v is None:
@@ -173,7 +167,6 @@ def _date_or_none_safe(v: Any) -> Optional[date]:
             return v
         if isinstance(v, datetime):
             return v.date()
-        # Convert strings, numpy datetime64, pandas.Timestamp
         d = pd.to_datetime(v, errors="coerce")
         if pd.isna(d):
             return None
@@ -307,7 +300,7 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -------------------------
-# Visa sheet mapping (optional)
+# Visa map builders
 # -------------------------
 visa_sub_options_map: Dict[str, List[str]] = {}
 visa_map: Dict[str, List[str]] = {}
@@ -334,7 +327,7 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
     return []
 
 # -------------------------
-# Robust I/O helpers
+# I/O helpers
 # -------------------------
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
@@ -430,7 +423,7 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     return None
 
 # -------------------------
-# Ensure columns & normalize dataset
+# Normalize & ensure
 # -------------------------
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -594,14 +587,13 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
             df[f] = 0
 
 # -------------------------
-# Safe accessors for session DataFrame
+# Session-safe accessors
 # -------------------------
 DF_LIVE_KEY = skey("df_live")
 if DF_LIVE_KEY not in st.session_state:
     st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 def _get_df_live() -> pd.DataFrame:
-    # always return a copy to avoid direct mutation
     df = st.session_state.get(DF_LIVE_KEY)
     if df is None or not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(columns=COLS_CLIENTS)
@@ -609,19 +601,18 @@ def _get_df_live() -> pd.DataFrame:
     return df.copy()
 
 def _get_df_live_safe() -> pd.DataFrame:
-    # wrapper used where df_live may be undefined in assembly; ensures DataFrame
     try:
-        df = _get_df_live()
+        return _get_df_live()
     except Exception:
         df = pd.DataFrame(columns=COLS_CLIENTS)
         st.session_state[DF_LIVE_KEY] = df
-    return df
+        return df.copy()
 
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
 # -------------------------
-# UI bootstrap & file handling
+# UI bootstrap: sidebar file inputs and caches
 # -------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -651,7 +642,7 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
-# Save uploaded bytes to cache and set source variables
+# store uploaded bytes and set clients_src_for_read / visa_src_for_read
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
@@ -691,7 +682,7 @@ else:
     visa_src_for_read = None
 
 # -------------------------
-# Read raw tables (if provided)
+# Read raw tables (safe)
 # -------------------------
 try:
     if clients_src_for_read is not None:
@@ -713,7 +704,7 @@ try:
 except Exception:
     df_visa_raw = df_visa_raw if df_visa_raw is not None else pd.DataFrame()
 
-# sanitize visa raw sheet
+# sanitize visa df
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
         df_visa_raw = df_visa_raw.fillna("")
@@ -725,7 +716,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     except Exception:
         pass
 
-# build visa maps if visa sheet provided
+# build visa maps if present
 visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
@@ -786,7 +777,7 @@ globals()['visa_categories'] = visa_categories
 globals()['visa_sub_options_map'] = visa_sub_options_map
 
 # -------------------------
-# Put live df into session state (initial)
+# Initialize live DF in session state
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -797,7 +788,7 @@ else:
         st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 # -------------------------
-# Small helpers
+# Small UI helpers
 # -------------------------
 def unique_nonempty(series):
     try:
@@ -823,7 +814,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # -------------------------
-# UI Tabs
+# Tabs UI
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -990,7 +981,6 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live_safe()
-    # ensure df_live is a DataFrame
     if df_live is None or not isinstance(df_live, pd.DataFrame):
         df_live = pd.DataFrame(columns=COLS_CLIENTS)
     next_dossier_num = get_next_dossier_numeric(df_live)
@@ -1039,7 +1029,13 @@ with tabs[3]:
     with r4c2:
         a1 = st.text_input("Acompte 1", value="0", key=skey("addtab","ac1"))
     with r4c3:
-        a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
+        # safe: allow None
+        a1_date_val = None
+        try:
+            a1_date_val = _date_or_none_safe(None)
+        except Exception:
+            a1_date_val = None
+        a1_date = st.date_input("Date Acompte 1", value=a1_date_val, key=skey("addtab","ac1_date"))
     with r4c4:
         escrow_checked = st.checkbox("Escrow", value=False, key=skey("addtab","escrow"))
     try:
@@ -1095,7 +1091,7 @@ with tabs[3]:
         except Exception as e:
             st.error(f"Erreur ajout: {e}")
 
-# ---- Gestion tab ----
+# ---- Gestion tab (edit form) ----
 with tabs[4]:
     st.subheader("✏️ / 🗑️ Gestion — Modifier / Supprimer")
     df_live = _get_df_live_safe()
@@ -1121,6 +1117,28 @@ with tabs[4]:
                 return str(v)
 
             st.write("Modifier la ligne sélectionnée :")
+
+            # local safe helper for date fields (handles missing column)
+            def _safe_row_date_local(colname: str):
+                raw = None
+                try:
+                    raw = row.get(colname) if isinstance(row, (pd.Series, dict)) else None
+                except Exception:
+                    raw = None
+                d = _date_or_none_safe(raw)
+                if d is None:
+                    return None
+                if isinstance(d, date) and not isinstance(d, datetime):
+                    return d
+                # final fallback
+                try:
+                    d2 = pd.to_datetime(d, errors="coerce")
+                    if pd.isna(d2):
+                        return None
+                    return date(int(d2.year), int(d2.month), int(d2.day))
+                except Exception:
+                    return None
+
             with st.form(key=skey("form_edit", str(idx))):
                 r1c1, r1c2, r1c3 = st.columns([1.4,1.0,1.2])
                 with r1c1:
@@ -1128,7 +1146,7 @@ with tabs[4]:
                 with r1c2:
                     e_dossier = st.text_input("Dossier N", value=txt(row.get("Dossier N","")), key=skey("edit","dossier", str(idx)))
                 with r1c3:
-                    e_date = st.date_input("Date (événement)", value=_date_or_none_safe(row.get("Date")), key=skey("edit","date", str(idx)))
+                    e_date = st.date_input("Date (événement)", value=_safe_row_date_local("Date"), key=skey("edit","date", str(idx)))
 
                 e_nom = st.text_input("Nom du client", value=txt(row.get("Nom","")), key=skey("edit","nom", str(idx)))
 
@@ -1206,11 +1224,11 @@ with tabs[4]:
 
                 r6c1, r6c2, r6c3 = st.columns([1.0,1.0,1.0])
                 with r6c1:
-                    e_ac2_date = st.date_input("Date Acompte 2", value=_date_or_none_safe(row.get("Date Acompte 2")), key=skey("edit","ac2_date", str(idx)))
+                    e_ac2_date = st.date_input("Date Acompte 2", value=_safe_row_date_local("Date Acompte 2"), key=skey("edit","ac2_date", str(idx)))
                 with r6c2:
-                    e_ac3_date = st.date_input("Date Acompte 3", value=_date_or_none_safe(row.get("Date Acompte 3")), key=skey("edit","ac3_date", str(idx)))
+                    e_ac3_date = st.date_input("Date Acompte 3", value=_safe_row_date_local("Date Acompte 3"), key=skey("edit","ac3_date", str(idx)))
                 with r6c3:
-                    e_ac4_date = st.date_input("Date Acompte 4", value=_date_or_none_safe(row.get("Date Acompte 4")), key=skey("edit","ac4_date", str(idx)))
+                    e_ac4_date = st.date_input("Date Acompte 4", value=_safe_row_date_local("Date Acompte 4"), key=skey("edit","ac4_date", str(idx)))
 
                 f1, f2, f3, f4, f5 = st.columns([1.0,1.0,1.0,1.0,0.6])
                 with f1:
@@ -1225,7 +1243,7 @@ with tabs[4]:
                     e_flag_rfe = st.checkbox("RFE", value=bool(int(row.get("RFE", 0))) if not pd.isna(row.get("RFE", 0)) else False, key=skey("edit","flag_rfe", str(idx)))
                 d1, d2 = st.columns([1.6, 1.0])
                 with d1:
-                    e_flags_date = st.date_input("Date d'envoi / Date état", value=_date_or_none_safe(row.get("Date d'envoi")), key=skey("edit","flags_date", str(idx)))
+                    e_flags_date = st.date_input("Date d'envoi / Date état", value=_safe_row_date_local("Date d'envoi"), key=skey("edit","flags_date", str(idx)))
                 with d2:
                     st.markdown(" ")
 
