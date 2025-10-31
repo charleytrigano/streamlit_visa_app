@@ -1,10 +1,9 @@
 # Visa Manager - app.py
-# Complete Streamlit application (single file)
-# - Robust reading of Clients (CSV/XLSX) and Visa files (semicolon CSV supported)
-# - All st.date_input receive native datetime.date or None via _date_or_none_safe
-# - Gestion form uses per-row keys and includes st.form_submit_button
-# - Solde allowed to be negative (as requested)
-# - Exports CSV and XLSX; optional XLSX with formulas via openpyxl
+# Final corrected Streamlit application (single file)
+# - Ensures every st.date_input gets a native datetime.date or None via _date_or_none_safe
+# - Every form has a st.form_submit_button
+# - Robust CSV/XLSX reading (semicolon supported), heuristic mapping
+# - Allows negative Solde, per-user request
 #
 # Requirements: pip install streamlit pandas openpyxl
 # Run: streamlit run app.py
@@ -19,7 +18,7 @@ from typing import Tuple, Dict, Any, List, Optional
 import pandas as pd
 import streamlit as st
 
-# Optional plotting
+# Optional plotly
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -60,14 +59,13 @@ SHEET_CLIENTS = "Clients"
 SHEET_VISA = "Visa"
 SID = "vmgr"
 DEFAULT_START_CLIENT_ID = 13057
-
 CURRENT_USER = "charleytrigano"
 
 def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
 # -------------------------
-# Helpers: parsing/formatting
+# Basic helpers
 # -------------------------
 def normalize_header_text(s: Any) -> str:
     if s is None:
@@ -182,7 +180,7 @@ def _date_or_none_safe(v: Any) -> Optional[date]:
         return None
 
 # -------------------------
-# Column heuristics & detection
+# Column heuristics & detectors
 # -------------------------
 COL_CANDIDATES = {
     "id client": "ID_Client", "idclient": "ID_Client",
@@ -318,10 +316,6 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
 # Visa helper
 # -------------------------
 DEFAULT_VISA_OPTIONS_BY_CAT_SUB: Dict[Tuple[str,str], List[str]] = {}
-for cat in ["Affaires", "Tourisme"]:
-    for sub in ["B-1", "B-2"]:
-        DEFAULT_VISA_OPTIONS_BY_CAT_SUB[(canonical_key(cat), canonical_key(sub))] = ["COS", "EOS"]
-
 visa_sub_options_map: Dict[str, List[str]] = {}
 visa_map: Dict[str, List[str]] = {}
 visa_map_norm: Dict[str, List[str]] = {}
@@ -363,7 +357,7 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
     return []
 
 # -------------------------
-# I/O helpers
+# I/O helpers (robust)
 # -------------------------
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
@@ -459,7 +453,7 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     return None
 
 # -------------------------
-# Ensure columns & normalize
+# Ensure & normalize
 # -------------------------
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -624,7 +618,7 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 # -------------------------
-# UI bootstrap and file upload handling
+# UI bootstrap: sidebar uploads & caching
 # -------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -654,7 +648,6 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
-# persist uploaded bytes
 clients_bytes = None
 visa_bytes = None
 if up_clients is not None:
@@ -699,7 +692,7 @@ else:
     visa_src_for_read = None
 
 # -------------------------
-# Read raw tables
+# Read input tables
 # -------------------------
 df_clients_raw = None
 df_visa_raw = None
@@ -721,7 +714,7 @@ if df_visa_raw is None and visa_src_for_read is not None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# sanitize visa raw
+# sanitize visa
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
         df_visa_raw = df_visa_raw.fillna("")
@@ -794,7 +787,7 @@ globals()['visa_categories'] = visa_categories
 globals()['visa_sub_options_map'] = visa_sub_options_map
 
 # -------------------------
-# Build live DF in session
+# Build live df and session
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -836,11 +829,11 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # -------------------------
-# Tabs UI
+# Tabs UI: Files / Dashboard / Analyses / Add / Gestion / Export
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
-# ---- Files tab ----
+# Files (preview)
 with tabs[0]:
     st.header("📂 Fichiers")
     c1, c2 = st.columns(2)
@@ -901,12 +894,12 @@ with tabs[0]:
             except Exception:
                 pass
 
-# ---- Dashboard tab ----
+# Dashboard (summary)
 with tabs[1]:
     st.subheader("📊 Dashboard (totaux et diagnostics)")
     df_live_view = recalc_payments_and_solde(_get_df_live())
     if df_live_view is None or df_live_view.empty:
-        st.info("Aucune donnée en mémoire.")
+        st.info("Aucune donnée en mémoire. Vérifiez l'onglet Fichiers et chargez le CSV correctement.")
     else:
         cats = unique_nonempty(df_live_view["Categories"]) if "Categories" in df_live_view.columns else []
         subs = unique_nonempty(df_live_view["Sous-catégorie"]) if "Sous-catégorie" in df_live_view.columns else []
@@ -1125,7 +1118,6 @@ with tabs[4]:
             idx = int(sel.split("|")[0].strip())
             row = df_live.loc[idx].copy()
 
-            # safe helpers
             def txt(v):
                 if pd.isna(v):
                     return ""
@@ -1389,5 +1381,3 @@ with tabs[5]:
                     out_buf = BytesIO()
                     wb.save(out_buf)
                     st.download_button("⬇️ Export XLSX (avec formules Payé & Solde)", data=out_buf.getvalue(), file_name="Clients_export_with_formulas.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-# End of file
