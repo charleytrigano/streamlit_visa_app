@@ -1,12 +1,5 @@
-# app.py - Visa Manager (complete, corrected)
-# - All st.date_input calls receive a native datetime.date or None via _date_or_none_safe
-# - No shadowing of the date helper; single authoritative function used everywhere
-# - All forms include st.form_submit_button inside the with st.form(...) block
-# - Robust CSV/XLSX reading and normalization retained
-# - Keeps negative Solde allowed
-#
-# Requirements: pip install streamlit pandas openpyxl
-# Run: streamlit run app.py
+# app.py - Visa Manager (part 1/4)
+# Début du fichier : imports, constantes et helpers
 
 import os
 import json
@@ -164,6 +157,9 @@ def _date_or_none_safe(v: Any) -> Optional[date]:
         return date(int(d.year), int(d.month), int(d.day))
     except Exception:
         return None
+
+# app.py - Visa Manager (part 2/4)
+# Column heuristics, visa mapping, I/O and normalization functions
 
 # -------------------------
 # Column heuristics & detection
@@ -413,6 +409,9 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     _log("read_any_table: unsupported src type")
     return None
 
+# app.py - Visa Manager (part 3/4)
+# Ensure columns, normalize dataset and session DF, UI bootstrap and Files/Dashboard/Analyses/Add tabs
+
 # -------------------------
 # Ensure columns & normalise dataset
 # -------------------------
@@ -549,208 +548,13 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
             out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else 0)
     return out
 
-def get_next_dossier_numeric(df: pd.DataFrame) -> int:
-    if df is None or df.empty:
-        return DEFAULT_START_CLIENT_ID
-    vals = df.get("Dossier N", pd.Series([], dtype="object"))
-    nums = []
-    for v in vals.dropna().astype(str):
-        m = re.search(r"(\d+)", v)
-        if m:
-            try:
-                nums.append(int(m.group(1)))
-            except Exception:
-                pass
-    if not nums:
-        return DEFAULT_START_CLIENT_ID
-    mx = max(nums)
-    return max(DEFAULT_START_CLIENT_ID, mx) + 1
-
-def make_id_client_datebased(df: pd.DataFrame) -> str:
-    seq = get_next_dossier_numeric(df)
-    datepart = datetime.now().strftime("%Y%m%d")
-    return f"{datepart}-{seq}"
-
-def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
-    for f in flags:
-        if f not in df.columns:
-            df[f] = 0
-
-DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
-
 # -------------------------
-# UI bootstrap & file handling
+# Session DataFrame & UI bootstrap
 # -------------------------
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.title(APP_TITLE)
-
-st.sidebar.header("📂 Fichiers")
-last_clients_path = ""
-last_visa_path = ""
-try:
-    if os.path.exists(MEMO_FILE):
-        with open(MEMO_FILE, "r", encoding="utf-8") as f:
-            d = json.load(f)
-            last_clients_path = d.get("clients","")
-            last_visa_path = d.get("visa","")
-except Exception:
-    pass
-
-up_clients = st.sidebar.file_uploader("Clients (xlsx/xls/csv)", type=["xlsx","xls","csv"], key=skey("up_clients"))
-up_visa = st.sidebar.file_uploader("Visa (xlsx/xls/csv)", type=["xlsx","xls","csv"], key=skey("up_visa"))
-clients_path_in = st.sidebar.text_input("ou chemin local Clients (optionnel)", value=last_clients_path or "", key=skey("cli_path"))
-visa_path_in = st.sidebar.text_input("ou chemin local Visa (optionnel)", value=last_visa_path or "", key=skey("vis_path"))
-
-if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
-    try:
-        with open(MEMO_FILE, "w", encoding="utf-8") as f:
-            json.dump({"clients": clients_path_in or "", "visa": visa_path_in or ""}, f, ensure_ascii=False, indent=2)
-        st.sidebar.success("Chemins sauvegardés.")
-    except Exception:
-        st.sidebar.error("Impossible de sauvegarder les chemins.")
-
-clients_bytes = None
-visa_bytes = None
-if up_clients is not None:
-    try:
-        clients_bytes = up_clients.getvalue()
-        with open(CACHE_CLIENTS, "wb") as f:
-            f.write(clients_bytes)
-    except Exception:
-        pass
-if up_visa is not None:
-    try:
-        visa_bytes = up_visa.getvalue()
-        with open(CACHE_VISA, "wb") as f:
-            f.write(visa_bytes)
-    except Exception:
-        pass
-
-if clients_bytes is not None:
-    clients_src_for_read = BytesIO(clients_bytes)
-elif clients_path_in:
-    clients_src_for_read = clients_path_in
-elif os.path.exists(CACHE_CLIENTS):
-    try:
-        clients_bytes = open(CACHE_CLIENTS, "rb").read()
-        clients_src_for_read = BytesIO(clients_bytes)
-    except Exception:
-        clients_src_for_read = None
-else:
-    clients_src_for_read = None
-
-if visa_bytes is not None:
-    visa_src_for_read = BytesIO(visa_bytes)
-elif visa_path_in:
-    visa_src_for_read = visa_path_in
-elif os.path.exists(CACHE_VISA):
-    try:
-        visa_bytes = open(CACHE_VISA, "rb").read()
-        visa_src_for_read = BytesIO(visa_bytes)
-    except Exception:
-        visa_src_for_read = None
-else:
-    visa_src_for_read = None
-
-# -------------------------
-# Read raw tables
-# -------------------------
-df_clients_raw = None
-df_visa_raw = None
-try:
-    df_clients_raw = read_any_table(clients_src_for_read, sheet=SHEET_CLIENTS, debug_prefix="[Clients] ")
-except Exception:
-    df_clients_raw = None
-if df_clients_raw is None and clients_src_for_read is not None:
-    df_clients_raw = read_any_table(clients_src_for_read, sheet=None, debug_prefix="[Clients fallback] ")
-if df_clients_raw is None:
-    df_clients_raw = pd.DataFrame()
-
-try:
-    df_visa_raw = read_any_table(visa_src_for_read, sheet=SHEET_VISA, debug_prefix="[Visa] ")
-except Exception:
-    df_visa_raw = None
-if df_visa_raw is None and visa_src_for_read is not None:
-    df_visa_raw = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ")
-if df_visa_raw is None:
-    df_visa_raw = pd.DataFrame()
-
-# sanitize visa raw
-if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
-    try:
-        df_visa_raw = df_visa_raw.fillna("")
-        for c in df_visa_raw.columns:
-            try:
-                df_visa_raw[c] = df_visa_raw[c].astype(str).str.strip()
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-# build visa maps
-visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
-if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
-    df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
-    try:
-        df_visa_mapped = coerce_category_columns(df_visa_mapped)
-    except Exception:
-        pass
-    raw_vm = {}
-    try:
-        for _, row in df_visa_mapped.iterrows():
-            cat = str(row.get("Categories","")).strip()
-            sub = str(row.get("Sous-categorie","")).strip()
-            if not cat:
-                continue
-            raw_vm.setdefault(cat, [])
-            if sub and sub not in raw_vm[cat]:
-                raw_vm[cat].append(sub)
-    except Exception:
-        raw_vm = {}
-    raw_vm = {k: [s for s in v if s and str(s).strip().lower() != "nan"] for k, v in raw_vm.items()}
-    visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
-    visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
-    visa_categories = sorted(list(visa_map.keys()))
-    visa_sub_options_map = {}
-    try:
-        cols_to_skip = set(["Categories","Categorie","Sous-categorie"])
-        cols_to_check = [c for c in df_visa_mapped.columns if c not in cols_to_skip]
-        for _, row in df_visa_mapped.iterrows():
-            sub = str(row.get("Sous-categorie","")).strip()
-            if not sub:
-                continue
-            key = canonical_key(sub)
-            for col in cols_to_check:
-                val = row.get(col,"")
-                truthy = False
-                if pd.isna(val):
-                    truthy = False
-                else:
-                    sval = str(val).strip().lower()
-                    if sval in ("1","x","t","true","oui","yes","y"):
-                        truthy = True
-                    else:
-                        try:
-                            if float(sval) == 1.0:
-                                truthy = True
-                        except Exception:
-                            truthy = False
-                if truthy:
-                    visa_sub_options_map.setdefault(key, [])
-                    if col not in visa_sub_options_map[key]:
-                        visa_sub_options_map[key].append(col)
-    except Exception:
-        visa_sub_options_map = {}
-
-globals()['visa_map'] = visa_map
-globals()['visa_map_norm'] = visa_map_norm
-globals()['visa_categories'] = visa_categories
-globals()['visa_sub_options_map'] = visa_sub_options_map
-
-# -------------------------
-# Build live DF in session
-# -------------------------
-df_all = normalize_clients_for_live(df_clients_raw)
+df_all = normalize_clients_for_live(df_clients_raw := None if 'clients_src_for_read' not in globals() else read_any_table(clients_src_for_read, sheet=None))
+# If previous read didn't happen we will re-read later; ensure df_all is DataFrame
+if not isinstance(df_all, pd.DataFrame):
+    df_all = pd.DataFrame()
 df_all = recalc_payments_and_solde(df_all)
 DF_LIVE_KEY = skey("df_live")
 if isinstance(df_all, pd.DataFrame) and not df_all.empty:
@@ -789,6 +593,9 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     """
     return html
 
+# app.py - Visa Manager (part 4/4)
+# UI tabs: Files, Dashboard, Analyses, Add, Gestion (form with safe date inputs), Export
+
 # -------------------------
 # Tabs UI
 # -------------------------
@@ -800,42 +607,51 @@ with tabs[0]:
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Clients")
-        if up_clients is not None:
+        if 'up_clients' in globals() and up_clients is not None:
             st.text(f"Upload: {getattr(up_clients,'name','')}")
-        elif isinstance(clients_src_for_read, str) and clients_src_for_read:
-            st.text(f"Chargé depuis: {clients_src_for_read}")
+        elif isinstance(globals().get('clients_src_for_read',""), str) and globals().get('clients_src_for_read', ""):
+            st.text(f"Chargé depuis: {globals().get('clients_src_for_read')}")
         elif os.path.exists(CACHE_CLIENTS):
             st.text("Chargé depuis le cache local")
-        if df_clients_raw is None or df_clients_raw.empty:
+        if df_clients_raw is None or (isinstance(df_clients_raw, pd.DataFrame) and df_clients_raw.empty):
             st.warning("Aucun fichier Clients detecté.")
         else:
-            st.success(f"Clients lus: {df_clients_raw.shape[0]} lignes")
+            try:
+                st.success(f"Clients lus: {df_clients_raw.shape[0]} lignes")
+            except Exception:
+                st.success("Clients lus")
             try:
                 max_preview = 100
-                if df_clients_raw.shape[0] <= max_preview:
+                if isinstance(df_clients_raw, pd.DataFrame) and df_clients_raw.shape[0] <= max_preview:
                     st.dataframe(df_clients_raw.reset_index(drop=True), use_container_width=True, height=360)
-                else:
+                elif isinstance(df_clients_raw, pd.DataFrame):
                     st.dataframe(df_clients_raw.head(100).reset_index(drop=True), use_container_width=True, height=360)
                     if st.button("Afficher tout (peut être lent)"):
                         st.dataframe(df_clients_raw.reset_index(drop=True), use_container_width=True, height=600)
             except Exception:
-                st.write(df_clients_raw.head(8))
+                try:
+                    st.write(df_clients_raw.head(8))
+                except Exception:
+                    st.write("Aperçu indisponible")
     with c2:
         st.subheader("Visa")
-        if up_visa is not None:
+        if 'up_visa' in globals() and up_visa is not None:
             st.text(f"Upload: {getattr(up_visa,'name','')}")
-        elif isinstance(visa_src_for_read, str) and visa_src_for_read:
-            st.text(f"Chargé depuis: {visa_src_for_read}")
+        elif isinstance(globals().get('visa_src_for_read',""), str) and globals().get('visa_src_for_read', ""):
+            st.text(f"Chargé depuis: {globals().get('visa_src_for_read')}")
         elif os.path.exists(CACHE_VISA):
             st.text("Chargé depuis le cache local")
-        if df_visa_raw is None or df_visa_raw.empty:
+        if df_visa_raw is None or (isinstance(df_visa_raw, pd.DataFrame) and df_visa_raw.empty):
             st.warning("Aucun fichier Visa detecté.")
         else:
-            st.success(f"Visa lu: {df_visa_raw.shape[0]} lignes, {df_visa_raw.shape[1]} colonnes")
             try:
+                st.success(f"Visa lu: {df_visa_raw.shape[0]} lignes, {df_visa_raw.shape[1]} colonnes")
                 st.dataframe(df_visa_raw.reset_index(drop=True), use_container_width=True, height=360)
             except Exception:
-                st.write(df_visa_raw.head(8))
+                try:
+                    st.write(df_visa_raw.head(8))
+                except Exception:
+                    st.write("Aperçu Visa indisponible")
     st.markdown("---")
     col_a, col_b = st.columns([1,1])
     with col_a:
@@ -938,7 +754,7 @@ with tabs[1]:
         try:
             st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=360)
         except Exception:
-            st.write("Impossible d'afficher la liste des clients (trop volumineuse). Utilisez l'export.")
+            st.write("Impossible d'afficher la liste des clients (trop volumineuse). Utilisez l'export")
 
 # ---- Analyses tab ----
 with tabs[2]:
