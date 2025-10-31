@@ -1,9 +1,10 @@
-# app.py - Visa Manager (updated per your latest requests)
-# - In "Gestion -> Modifier" restores the RFE checkbox and enforces that it only can be checked if at least one of the other flags (Dossiers envoyé, Dossier approuvé, Dossier refusé, Dossier Annulé) is checked. If user tries to check RFE when none of those flags are set, RFE will be disabled and a warning shown.
-# - In "Ajouter" tab keeps ONLY Acompte 1 and Date Acompte 1 (removes Acompte 2/3/4 and their dates from the Add UI). The underlying data model still supports the other acomptes (columns remain in COLS_CLIENTS) but they are no longer exposed on Add.
-# - Keeps safe date handling (_date_or_none_safe) and safe session accessors.
-# - Adds per-acompte payment mode columns and Date reponse as previously requested.
-#
+# app.py - Visa Manager (final)
+# Complete application with:
+# - safe date handling (_date_or_none_safe)
+# - defensive session DataFrame access
+# - Add tab: only Acompte 1 + Date Acompte 1, Date & Mode on same line
+# - Gestion tab: edit form with Montant/Autres/Total, Acompte1..4 and dates/modes, RFE constraint, Date d'envoi + Date réponse
+# - New columns: ModeReglement, ModeReglement_Ac1..Ac4, Date reponse
 # Requirements: pip install streamlit pandas openpyxl
 # Run: streamlit run app.py
 
@@ -163,7 +164,7 @@ def _date_or_none_safe(v: Any) -> Optional[date]:
         return None
 
 # -------------------------
-# Column heuristics / map helpers (kept as before)
+# Column heuristics / map helpers
 # -------------------------
 COL_CANDIDATES = {
     "id client": "ID_Client", "idclient": "ID_Client",
@@ -281,7 +282,7 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -------------------------
-# Visa mapping and I/O helpers (kept robust)
+# Visa mapping and I/O helpers
 # -------------------------
 visa_sub_options_map: Dict[str, List[str]] = {}
 visa_map: Dict[str, List[str]] = {}
@@ -766,7 +767,7 @@ else:
         st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 # -------------------------
-# UI helpers
+# Small UI helpers
 # -------------------------
 def unique_nonempty(series):
     try:
@@ -955,7 +956,7 @@ with tabs[2]:
         else:
             st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
-# ---- Add tab (updated: only Acompte 1 kept) ----
+# ---- Add tab (updated: only Acompte 1 kept, Date Acompte 1 and Mode on same line) ----
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
     df_live = _get_df_live_safe()
@@ -970,7 +971,6 @@ with tabs[3]:
     add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
     add_nom = st.text_input("Nom du client", value="", placeholder="Nom complet du client", key=skey("addtab","nom"))
 
-    # categories/sub/visa (same as before)
     if visa_categories:
         categories_options = visa_categories
     else:
@@ -1005,25 +1005,21 @@ with tabs[3]:
         else:
             add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
 
-    # Montant + only Acompte 1 and its date
+    # Montant + Acompte1
     r4c1, r4c2 = st.columns([1.4,1.0])
     with r4c1:
         add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
     with r4c2:
         a1 = st.text_input("Acompte 1", value="0", key=skey("addtab","ac1"))
-    # Date Acompte 1 directly under
-    a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
-
-    # Mode règlement checkboxes
-    st.markdown("Mode de règlement (sélectionnez les moyens utilisés) :")
-    pay_col1, pay_col2, pay_col3, pay_col4 = st.columns([1,1,1,1])
-    with pay_col1:
+    # Date Acompte 1 and modes on same line (compact)
+    r5c1, r5c2 = st.columns([1.6,1.0])
+    with r5c1:
+        a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
+    with r5c2:
+        st.caption("Mode de règlement")
         pay_cb = st.checkbox("CB", value=False, key=skey("addtab","pay_cb"))
-    with pay_col2:
         pay_cheque = st.checkbox("Cheque", value=False, key=skey("addtab","pay_cheque"))
-    with pay_col3:
         pay_virement = st.checkbox("Virement", value=False, key=skey("addtab","pay_virement"))
-    with pay_col4:
         pay_venmo = st.checkbox("Venmo", value=False, key=skey("addtab","pay_venmo"))
 
     add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
@@ -1040,17 +1036,14 @@ with tabs[3]:
             new_row["Visa"] = add_visa
             new_row["Montant honoraires (US $)"] = money_to_float(add_montant)
             new_row["Autres frais (US $)"] = 0.0
-            # Only Ac1 in add
             new_row["Acompte 1"] = money_to_float(a1)
             new_row["Date Acompte 1"] = pd.to_datetime(a1_date) if a1_date else pd.NaT
-            # leave other acomptes empty (0)
             new_row["Acompte 2"] = 0.0
             new_row["Acompte 3"] = 0.0
             new_row["Acompte 4"] = 0.0
             new_row["Date Acompte 2"] = pd.NaT
             new_row["Date Acompte 3"] = pd.NaT
             new_row["Date Acompte 4"] = pd.NaT
-            # payment modes: store general mode and set ModeReglement_Ac1 to this selection
             modes = []
             if pay_cb: modes.append("CB")
             if pay_cheque: modes.append("Cheque")
@@ -1061,7 +1054,7 @@ with tabs[3]:
             new_row["ModeReglement_Ac2"] = ""
             new_row["ModeReglement_Ac3"] = ""
             new_row["ModeReglement_Ac4"] = ""
-            new_row["Payé"] = new_row["Acompte 1"] + new_row["Acompte 2"] + new_row["Acompte 3"] + new_row["Acompte 4"]
+            new_row["Payé"] = new_row["Acompte 1"]
             new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - new_row["Payé"]
             new_row["Solde à percevoir (US $)"] = new_row["Solde"]
             now = datetime.now()
@@ -1108,26 +1101,12 @@ with tabs[4]:
                     return ""
                 return str(v)
 
-            st.write("Modifier la ligne sélectionnée :")
-
             def _safe_row_date_local(colname: str):
-                raw = None
                 try:
-                    raw = row.get(colname) if isinstance(row, (pd.Series, dict)) else None
+                    raw = row.get(colname)
                 except Exception:
                     raw = None
-                d = _date_or_none_safe(raw)
-                if d is None:
-                    return None
-                if isinstance(d, date) and not isinstance(d, datetime):
-                    return d
-                try:
-                    d2 = pd.to_datetime(d, errors="coerce")
-                    if pd.isna(d2):
-                        return None
-                    return date(int(d2.year), int(d2.month), int(d2.day))
-                except Exception:
-                    return None
+                return _date_or_none_safe(raw)
 
             def _parse_modes(raw):
                 try:
@@ -1147,6 +1126,17 @@ with tabs[4]:
             row_mode_ac4 = _parse_modes(row.get("ModeReglement_Ac4", ""))
 
             with st.form(key=skey("form_edit", str(idx))):
+                # Name (larger) and Solde on same line
+                c_name, c_solde = st.columns([2.5,1])
+                with c_name:
+                    st.markdown(f"### {txt(row.get('Nom',''))}")
+                with c_solde:
+                    try:
+                        sol_due = _fmt_money(_to_num(row.get("Solde à percevoir (US $)", row.get("Solde", 0))))
+                    except Exception:
+                        sol_due = _fmt_money(row.get("Solde", 0))
+                    st.markdown(f"**Solde dû**: {sol_due}")
+
                 r1c1, r1c2, r1c3 = st.columns([1.4,1.0,1.2])
                 with r1c1:
                     st.markdown(f"**ID_Client :** {txt(row.get('ID_Client',''))}")
@@ -1155,9 +1145,20 @@ with tabs[4]:
                 with r1c3:
                     e_date = st.date_input("Date (événement)", value=_safe_row_date_local("Date"), key=skey("edit","date", str(idx)))
 
-                e_nom = st.text_input("Nom du client", value=txt(row.get("Nom","")), key=skey("edit","nom", str(idx)))
+                # Montants
+                m1, m2, m3 = st.columns([1.2,1.0,1.0])
+                with m1:
+                    e_montant = st.text_input("Montant honoraires (US $)", value=str(row.get("Montant honoraires (US $)", 0)), key=skey("edit","montant", str(idx)))
+                with m2:
+                    e_autres = st.text_input("Autres frais (US $)", value=str(row.get("Autres frais (US $)", 0)), key=skey("edit","autres", str(idx)))
+                with m3:
+                    try:
+                        total_montant = _to_num(e_montant) + _to_num(e_autres)
+                    except Exception:
+                        total_montant = _to_num(row.get("Montant honoraires (US $)",0)) + _to_num(row.get("Autres frais (US $)",0))
+                    st.text_input("Montant Total", value=str(total_montant), key=skey("edit","montant_total", str(idx)), disabled=True)
 
-                # Acompte 1..4 on same line (show values). Acompte 2..4 editable here if needed
+                # Acomptes
                 r_ac_1, r_ac_2, r_ac_3, r_ac_4 = st.columns([1.0,1.0,1.0,1.0])
                 with r_ac_1:
                     e_ac1 = st.text_input("Acompte 1", value=txt(row.get("Acompte 1",0)), key=skey("edit","ac1", str(idx)))
@@ -1168,7 +1169,7 @@ with tabs[4]:
                 with r_ac_4:
                     e_ac4 = st.text_input("Acompte 4", value=txt(row.get("Acompte 4",0)), key=skey("edit","ac4", str(idx)))
 
-                # Dates + modes under each acompte; Acompte1 date appears under Acompte1
+                # Dates + modes
                 r_d1, r_d2, r_d3, r_d4 = st.columns([1.0,1.0,1.0,1.0])
                 with r_d1:
                     e_mode_ac1 = st.multiselect("Mode A1", options=["CB","Cheque","Virement","Venmo"], default=row_mode_ac1, key=skey("edit","mode_ac1", str(idx)))
@@ -1183,8 +1184,8 @@ with tabs[4]:
                     e_mode_ac4 = st.multiselect("Mode A4", options=["CB","Cheque","Virement","Venmo"], default=row_mode_ac4, key=skey("edit","mode_ac4", str(idx)))
                     e_ac4_date = st.date_input("Date Acompte 4", value=_safe_row_date_local("Date Acompte 4"), key=skey("edit","ac4_date", str(idx)))
 
-                # Flags row (including RFE). RFE must be enabled only if at least one other main flag is checked.
-                f1, f2, f3, f4, f5 = st.columns([1.0,1.0,1.0,1.0,0.6])
+                # Flags row
+                f1, f2, f3, f4 = st.columns([1.0,1.0,1.0,1.0])
                 with f1:
                     e_flag_envoye = st.checkbox("Dossiers envoyé", value=bool(int(row.get("Dossiers envoyé", 0))) if not pd.isna(row.get("Dossiers envoyé", 0)) else False, key=skey("edit","flag_envoye", str(idx)))
                 with f2:
@@ -1193,17 +1194,14 @@ with tabs[4]:
                     e_flag_refuse = st.checkbox("Dossier refusé", value=bool(int(row.get("Dossier refusé", 0))) if not pd.isna(row.get("Dossier refusé", 0)) else False, key=skey("edit","flag_refuse", str(idx)))
                 with f4:
                     e_flag_annule = st.checkbox("Dossier Annulé", value=bool(int(row.get("Dossier Annulé", 0))) if not pd.isna(row.get("Dossier Annulé", 0)) else False, key=skey("edit","flag_annule", str(idx)))
-                # RFE checkbox behavior: only enabled if any of the above flags is True
+
                 other_flag_set = any([e_flag_envoye, e_flag_approuve, e_flag_refuse, e_flag_annule])
                 if not other_flag_set:
-                    # Show disabled RFE and a small warning
                     st.markdown("**RFE** (active uniquement si un des états est coché)")
                     e_flag_rfe = st.checkbox("RFE", value=bool(int(row.get("RFE", 0))) if not pd.isna(row.get("RFE", 0)) else False, key=skey("edit","flag_rfe", str(idx)), disabled=True)
-                    st.warning("La case RFE ne peut être activée que si un des états (envoyé/approuvé/refusé/annulé) est coché.")
                 else:
                     e_flag_rfe = st.checkbox("RFE", value=bool(int(row.get("RFE", 0))) if not pd.isna(row.get("RFE", 0)) else False, key=skey("edit","flag_rfe", str(idx)))
 
-                # Date d'envoi / Date état and Date reponse on same line
                 dcol1, dcol2 = st.columns([1.5,1.0])
                 with dcol1:
                     e_flags_date = st.date_input("Date d'envoi / Date état", value=_safe_row_date_local("Date d'envoi"), key=skey("edit","flags_date", str(idx)))
@@ -1216,41 +1214,30 @@ with tabs[4]:
                 save = st.form_submit_button("Enregistrer modifications")
                 if save:
                     try:
-                        # Basic fields
                         df_live.at[idx, "Dossier N"] = e_dossier
                         df_live.at[idx, "Nom"] = e_nom
                         df_live.at[idx, "Date"] = pd.to_datetime(e_date)
-                        # amounts if present in locals (we keep previous logic defensively)
-                        try:
-                            df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant) if 'e_montant' in locals() else df_live.at[idx,"Montant honoraires (US $)"]
-                            df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres) if 'e_autres' in locals() else df_live.at[idx,"Autres frais (US $)"]
-                        except Exception:
-                            pass
-                        # acomptes
+                        df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
+                        df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres)
                         df_live.at[idx, "Acompte 1"] = money_to_float(e_ac1)
                         df_live.at[idx, "Acompte 2"] = money_to_float(e_ac2)
                         df_live.at[idx, "Acompte 3"] = money_to_float(e_ac3)
                         df_live.at[idx, "Acompte 4"] = money_to_float(e_ac4)
-                        # dates
                         df_live.at[idx, "Date Acompte 1"] = pd.to_datetime(e_ac1_date) if e_ac1_date else pd.NaT
                         df_live.at[idx, "Date Acompte 2"] = pd.to_datetime(e_ac2_date) if e_ac2_date else pd.NaT
                         df_live.at[idx, "Date Acompte 3"] = pd.to_datetime(e_ac3_date) if e_ac3_date else pd.NaT
                         df_live.at[idx, "Date Acompte 4"] = pd.to_datetime(e_ac4_date) if e_ac4_date else pd.NaT
-                        # modes per acompte
                         df_live.at[idx, "ModeReglement_Ac1"] = ",".join(e_mode_ac1) if isinstance(e_mode_ac1, (list,tuple)) else str(e_mode_ac1)
                         df_live.at[idx, "ModeReglement_Ac2"] = ",".join(e_mode_ac2) if isinstance(e_mode_ac2, (list,tuple)) else str(e_mode_ac2)
                         df_live.at[idx, "ModeReglement_Ac3"] = ",".join(e_mode_ac3) if isinstance(e_mode_ac3, (list,tuple)) else str(e_mode_ac3)
                         df_live.at[idx, "ModeReglement_Ac4"] = ",".join(e_mode_ac4) if isinstance(e_mode_ac4, (list,tuple)) else str(e_mode_ac4)
-                        # update general modes (merge)
                         old_general = _parse_modes(row.get("ModeReglement",""))
                         combined = set(old_general + list(e_mode_ac1))
                         df_live.at[idx, "ModeReglement"] = ",".join(sorted(list(combined)))
-                        # flags - enforce RFE only if allowed
                         df_live.at[idx, "Dossiers envoyé"] = 1 if e_flag_envoye else 0
                         df_live.at[idx, "Dossier approuvé"] = 1 if e_flag_approuve else 0
                         df_live.at[idx, "Dossier refusé"] = 1 if e_flag_refuse else 0
                         df_live.at[idx, "Dossier Annulé"] = 1 if e_flag_annule else 0
-                        # RFE enforcement: if RFE checked but no other flag set, override and warn (shouldn't happen because UI disabled it)
                         if e_flag_rfe and not any([e_flag_envoye, e_flag_approuve, e_flag_refuse, e_flag_annule]):
                             st.warning("RFE n'a pas été activé car aucun état (envoyé/approuvé/refusé/annulé) n'est coché.")
                             df_live.at[idx, "RFE"] = 0
@@ -1269,27 +1256,7 @@ with tabs[4]:
                     except Exception as e:
                         st.error(f"Erreur enregistrement: {e}")
 
-    st.markdown("---")
-    st.markdown("### Supprimer des dossiers")
-    if df_live is None or df_live.empty:
-        st.info("Aucun dossier à supprimer.")
-    else:
-        choices_del = [f"{i} | {df_live.at[i,'Dossier N'] if 'Dossier N' in df_live.columns else ''} | {df_live.at[i,'Nom'] if 'Nom' in df_live.columns else ''}" for i in range(len(df_live))]
-        selected_to_del = st.multiselect("Sélectionnez les lignes à supprimer", options=choices_del, key=skey("del","select"))
-        if st.button("Supprimer sélection"):
-            if selected_to_del:
-                idxs = [int(s.split("|")[0].strip()) for s in selected_to_del]
-                try:
-                    df_live = df_live.drop(index=idxs).reset_index(drop=True)
-                    df_live = recalc_payments_and_solde(df_live)
-                    _set_df_live(df_live)
-                    st.success(f"{len(idxs)} ligne(s) supprimée(s).")
-                except Exception as e:
-                    st.error(f"Erreur suppression: {e}")
-            else:
-                st.warning("Aucune sélection pour suppression.")
-
-# ---- Export tab (unchanged) ----
+# ---- Export tab ----
 with tabs[5]:
     st.header("💾 Export")
     df_live = _get_df_live_safe()
