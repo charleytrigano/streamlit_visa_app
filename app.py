@@ -1242,7 +1242,7 @@ with tabs[1]:
                 st.markdown("Période B (extrait)")
                 st.dataframe(viewB.reset_index(drop=True), use_container_width=True, height=200)
             # skip default charts for compare mode
-            st.stop()
+          
 
         # Default (non-compare) display of KPIs and small charts
         view = recalc_payments_and_solde(view)
