@@ -1,9 +1,9 @@
-# app.py - Visa Manager (complete corrected file)
+# app.py - Visa Manager (complete, corrected)
 # - All st.date_input calls receive a native datetime.date or None via _date_or_none_safe
 # - No shadowing of the date helper; single authoritative function used everywhere
 # - All forms include st.form_submit_button inside the with st.form(...) block
 # - Robust CSV/XLSX reading and normalization retained
-# - Allows negative Solde
+# - Keeps negative Solde allowed
 #
 # Requirements: pip install streamlit pandas openpyxl
 # Run: streamlit run app.py
@@ -291,7 +291,7 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -------------------------
-# Visa sheet mapping (optional)
+# Visa mapping
 # -------------------------
 visa_sub_options_map: Dict[str, List[str]] = {}
 visa_map: Dict[str, List[str]] = {}
@@ -579,7 +579,7 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 # -------------------------
-# UI: sidebar uploads and cache
+# UI bootstrap & file handling
 # -------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -675,7 +675,7 @@ if df_visa_raw is None and visa_src_for_read is not None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# sanitize visa raw sheet
+# sanitize visa raw
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
         df_visa_raw = df_visa_raw.fillna("")
@@ -687,7 +687,7 @@ if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     except Exception:
         pass
 
-# build visa maps if visa sheet provided
+# build visa maps
 visa_map = {}; visa_map_norm = {}; visa_categories = []; visa_sub_options_map = {}
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
@@ -748,7 +748,7 @@ globals()['visa_categories'] = visa_categories
 globals()['visa_sub_options_map'] = visa_sub_options_map
 
 # -------------------------
-# Put live df into session state
+# Build live DF in session
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -790,7 +790,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # -------------------------
-# UI tabs (Files / Dashboard / Analyses / Add / Gestion / Export)
+# Tabs UI
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -1092,7 +1092,6 @@ with tabs[4]:
                 with r1c2:
                     e_dossier = st.text_input("Dossier N", value=txt(row.get("Dossier N","")), key=skey("edit","dossier", str(idx)))
                 with r1c3:
-                    # ALWAYS pass native date or None
                     e_date = st.date_input("Date (événement)", value=_date_or_none_safe(row.get("Date")), key=skey("edit","date", str(idx)))
 
                 e_nom = st.text_input("Nom du client", value=txt(row.get("Nom","")), key=skey("edit","nom", str(idx)))
