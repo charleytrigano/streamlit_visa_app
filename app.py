@@ -1,11 +1,19 @@
-# app.py - Visa Manager (complete)
-# - Ensures all st.date_input calls receive a native datetime.date or None via _date_or_none_safe
-# - Single authoritative date converter used everywhere
-# - Each with st.form(...) contains st.form_submit_button(...) inside the block
-# - Robust CSV/XLSX reading and normalization retained
+# app.py - Visa Manager (complete corrected)
+# - Single authoritative _date_or_none_safe conversion used for all st.date_input calls
+# - All with st.form(...) blocks include st.form_submit_button(...) inside them
+# - Global variables initialized at top to avoid NameError after assembly
+# - Defensive retrieval of session DataFrame via _get_df_live_safe to avoid None/NameErrors
+# - Robust CSV/XLSX reading, header normalization, numeric parsing, and exports retained
 #
-# Requirements: pip install streamlit pandas openpyxl
-# Run: streamlit run app.py
+# Notes on debugging:
+# - Potential sources of earlier errors were:
+#   1) df_clients_raw / df_visa_raw being referenced before initialization (NameError). Fixed by initializing globals early.
+#   2) st.date_input receiving pandas.Timestamp / pandas.NaT. Fixed by _date_or_none_safe and using it on every date_input value=.
+#   3) Missing st.form_submit_button inside some with st.form(...) blocks. Fixed by ensuring save = st.form_submit_button(...) inside each form.
+#   4) Variables like df_live not being DataFrames at usage. Fixed by _get_df_live_safe() and local fallbacks before using.
+#
+# Run: pip install streamlit pandas openpyxl
+#       streamlit run app.py
 
 import os
 import json
@@ -17,7 +25,7 @@ from typing import Tuple, Dict, Any, List, Optional
 import pandas as pd
 import streamlit as st
 
-# Ensure key globals exist early to avoid NameError after assembly
+# ---- Ensure global vars exist immediately to avoid NameError when assembling parts ----
 df_clients_raw: Optional[pd.DataFrame] = None
 df_visa_raw: Optional[pd.DataFrame] = None
 clients_src_for_read = None
@@ -65,6 +73,7 @@ SHEET_VISA = "Visa"
 SID = "vmgr"
 DEFAULT_START_CLIENT_ID = 13057
 CURRENT_USER = "charleytrigano"
+DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
@@ -149,7 +158,9 @@ def _fmt_money(v: Any) -> str:
     except Exception:
         return "$0.00"
 
-# Single authoritative safe date converter used everywhere
+# -------------------------
+# Safe date converter (authoritative)
+# -------------------------
 def _date_or_none_safe(v: Any) -> Optional[date]:
     """
     Return a native datetime.date or None for any input v.
@@ -296,7 +307,7 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # -------------------------
-# Visa mapping
+# Visa sheet mapping (optional)
 # -------------------------
 visa_sub_options_map: Dict[str, List[str]] = {}
 visa_map: Dict[str, List[str]] = {}
@@ -419,7 +430,7 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     return None
 
 # -------------------------
-# Ensure columns & normalise dataset
+# Ensure columns & normalize dataset
 # -------------------------
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -555,57 +566,62 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
             out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else 0)
     return out
 
-# Initialize session DF properly (ensure df_clients_raw / df_visa_raw exist)
-try:
-    df_clients_raw = df_clients_raw if df_clients_raw is not None else pd.DataFrame()
-except Exception:
-    df_clients_raw = pd.DataFrame()
-try:
-    df_visa_raw = df_visa_raw if df_visa_raw is not None else pd.DataFrame()
-except Exception:
-    df_visa_raw = pd.DataFrame()
+def get_next_dossier_numeric(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return DEFAULT_START_CLIENT_ID
+    vals = df.get("Dossier N", pd.Series([], dtype="object"))
+    nums = []
+    for v in vals.dropna().astype(str):
+        m = re.search(r"(\d+)", v)
+        if m:
+            try:
+                nums.append(int(m.group(1)))
+            except Exception:
+                pass
+    if not nums:
+        return DEFAULT_START_CLIENT_ID
+    mx = max(nums)
+    return max(DEFAULT_START_CLIENT_ID, mx) + 1
 
-df_all = normalize_clients_for_live(df_clients_raw)
-df_all = recalc_payments_and_solde(df_all)
+def make_id_client_datebased(df: pd.DataFrame) -> str:
+    seq = get_next_dossier_numeric(df)
+    datepart = datetime.now().strftime("%Y%m%d")
+    return f"{datepart}-{seq}"
+
+def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
+    for f in flags:
+        if f not in df.columns:
+            df[f] = 0
+
+# -------------------------
+# Safe accessors for session DataFrame
+# -------------------------
 DF_LIVE_KEY = skey("df_live")
-if isinstance(df_all, pd.DataFrame) and not df_all.empty:
-    st.session_state[DF_LIVE_KEY] = df_all.copy()
-else:
-    if DF_LIVE_KEY not in st.session_state or st.session_state[DF_LIVE_KEY] is None:
-        st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
+if DF_LIVE_KEY not in st.session_state:
+    st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 def _get_df_live() -> pd.DataFrame:
-    return st.session_state[DF_LIVE_KEY].copy()
+    # always return a copy to avoid direct mutation
+    df = st.session_state.get(DF_LIVE_KEY)
+    if df is None or not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(columns=COLS_CLIENTS)
+        st.session_state[DF_LIVE_KEY] = df
+    return df.copy()
+
+def _get_df_live_safe() -> pd.DataFrame:
+    # wrapper used where df_live may be undefined in assembly; ensures DataFrame
+    try:
+        df = _get_df_live()
+    except Exception:
+        df = pd.DataFrame(columns=COLS_CLIENTS)
+        st.session_state[DF_LIVE_KEY] = df
+    return df
 
 def _set_df_live(df: pd.DataFrame) -> None:
     st.session_state[DF_LIVE_KEY] = df.copy()
 
-# small helpers
-def unique_nonempty(series):
-    try:
-        vals = series.dropna().astype(str).tolist()
-    except Exception:
-        vals = []
-    out = []
-    for v in vals:
-        s = str(v).strip()
-        if s == "" or s.lower() == "nan":
-            continue
-        out.append(s)
-    return sorted(list(dict.fromkeys(out)))
-
-def kpi_html(label: str, value: str, sub: str = "") -> str:
-    html = f"""
-    <div style="border:1px solid rgba(255,255,255,0.04); border-radius:6px; padding:8px 10px; margin:6px 4px;">
-      <div style="font-size:12px; color:#666;">{label}</div>
-      <div style="font-size:18px; font-weight:700; margin-top:4px;">{value}</div>
-      <div style="font-size:11px; color:#888; margin-top:4px;">{sub}</div>
-    </div>
-    """
-    return html
-
 # -------------------------
-# UI: sidebar uploads and cache (file inputs)
+# UI bootstrap & file handling
 # -------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -635,6 +651,7 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
+# Save uploaded bytes to cache and set source variables
 if up_clients is not None:
     try:
         clients_bytes = up_clients.getvalue()
@@ -674,29 +691,29 @@ else:
     visa_src_for_read = None
 
 # -------------------------
-# Read raw tables if provided
+# Read raw tables (if provided)
 # -------------------------
-if clients_src_for_read is not None:
-    try:
-        maybe = read_any_table(clients_src_for_read, sheet=SHEET_CLIENTS, debug_prefix="[Clients]")
+try:
+    if clients_src_for_read is not None:
+        maybe = read_any_table(clients_src_for_read, sheet=SHEET_CLIENTS, debug_prefix="[Clients] ")
         if maybe is None:
-            maybe = read_any_table(clients_src_for_read, sheet=None, debug_prefix="[Clients fallback]")
+            maybe = read_any_table(clients_src_for_read, sheet=None, debug_prefix="[Clients fallback] ")
         if isinstance(maybe, pd.DataFrame):
             df_clients_raw = maybe
-    except Exception:
-        df_clients_raw = df_clients_raw if df_clients_raw is not None else pd.DataFrame()
+except Exception:
+    df_clients_raw = df_clients_raw if df_clients_raw is not None else pd.DataFrame()
 
-if visa_src_for_read is not None:
-    try:
-        maybe = read_any_table(visa_src_for_read, sheet=SHEET_VISA, debug_prefix="[Visa]")
+try:
+    if visa_src_for_read is not None:
+        maybe = read_any_table(visa_src_for_read, sheet=SHEET_VISA, debug_prefix="[Visa] ")
         if maybe is None:
-            maybe = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback]")
+            maybe = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ")
         if isinstance(maybe, pd.DataFrame):
             df_visa_raw = maybe
-    except Exception:
-        df_visa_raw = df_visa_raw if df_visa_raw is not None else pd.DataFrame()
+except Exception:
+    df_visa_raw = df_visa_raw if df_visa_raw is not None else pd.DataFrame()
 
-# sanitize visa raw
+# sanitize visa raw sheet
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
         df_visa_raw = df_visa_raw.fillna("")
@@ -769,7 +786,7 @@ globals()['visa_categories'] = visa_categories
 globals()['visa_sub_options_map'] = visa_sub_options_map
 
 # -------------------------
-# Put live df into session state (update after possible reads)
+# Put live df into session state (initial)
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -780,7 +797,33 @@ else:
         st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
 
 # -------------------------
-# UI tabs (Files / Dashboard / Analyses / Add / Gestion / Export)
+# Small helpers
+# -------------------------
+def unique_nonempty(series):
+    try:
+        vals = series.dropna().astype(str).tolist()
+    except Exception:
+        vals = []
+    out = []
+    for v in vals:
+        s = str(v).strip()
+        if s == "" or s.lower() == "nan":
+            continue
+        out.append(s)
+    return sorted(list(dict.fromkeys(out)))
+
+def kpi_html(label: str, value: str, sub: str = "") -> str:
+    html = f"""
+    <div style="border:1px solid rgba(255,255,255,0.04); border-radius:6px; padding:8px 10px; margin:6px 4px;">
+      <div style="font-size:12px; color:#666;">{label}</div>
+      <div style="font-size:18px; font-weight:700; margin-top:4px;">{value}</div>
+      <div style="font-size:11px; color:#888; margin-top:4px;">{sub}</div>
+    </div>
+    """
+    return html
+
+# -------------------------
+# UI Tabs
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -848,7 +891,7 @@ with tabs[0]:
 # ---- Dashboard tab ----
 with tabs[1]:
     st.subheader("📊 Dashboard (totaux et diagnostics)")
-    df_live_view = recalc_payments_and_solde(_get_df_live())
+    df_live_view = recalc_payments_and_solde(_get_df_live_safe())
     if df_live_view is None or df_live_view.empty:
         st.info("Aucune donnée en mémoire.")
     else:
@@ -934,7 +977,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("📈 Analyses")
     st.info("Graphiques et analyses basiques.")
-    df_ = _get_df_live()
+    df_ = _get_df_live_safe()
     if isinstance(df_, pd.DataFrame) and not df_.empty and "Categories" in df_.columns:
         cat_counts = df_["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
         if HAS_PLOTLY and px is not None:
@@ -946,7 +989,10 @@ with tabs[2]:
 # ---- Add tab ----
 with tabs[3]:
     st.subheader("➕ Ajouter un nouveau client")
-    df_live = _get_df_live()
+    df_live = _get_df_live_safe()
+    # ensure df_live is a DataFrame
+    if df_live is None or not isinstance(df_live, pd.DataFrame):
+        df_live = pd.DataFrame(columns=COLS_CLIENTS)
     next_dossier_num = get_next_dossier_numeric(df_live)
     next_dossier = str(next_dossier_num)
     next_id_client = make_id_client_datebased(df_live)
@@ -1008,7 +1054,7 @@ with tabs[3]:
     add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
     if st.button("Ajouter", key=skey("addtab","btn_add")):
         try:
-            new_row = {c: "" for c in _get_df_live().columns}
+            new_row = {c: "" for c in df_live.columns}
             new_row["ID_Client"] = next_id_client
             new_row["Dossier N"] = next_dossier
             new_row["Nom"] = add_nom
@@ -1037,12 +1083,11 @@ with tabs[3]:
             new_row["Dernière modification"] = now
             new_row["Modifié par"] = CURRENT_USER
             new_row["Commentaires"] = add_comments
-            flags_to_create = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
-            ensure_flag_columns(_get_df_live(), flags_to_create)
-            for opt in flags_to_create:
+            ensure_flag_columns(df_live, DEFAULT_FLAGS)
+            for opt in DEFAULT_FLAGS:
                 new_row[opt] = 0
             new_row["Date d'envoi"] = pd.NaT
-            df_live = _get_df_live()
+            df_live = _get_df_live_safe()
             df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
             df_live = recalc_payments_and_solde(df_live)
             _set_df_live(df_live)
@@ -1053,7 +1098,7 @@ with tabs[3]:
 # ---- Gestion tab ----
 with tabs[4]:
     st.subheader("✏️ / 🗑️ Gestion — Modifier / Supprimer")
-    df_live = _get_df_live()
+    df_live = _get_df_live_safe()
     for c in COLS_CLIENTS:
         if c not in df_live.columns:
             if c in ["Date Acompte 2","Date Acompte 3","Date Acompte 4","Date d'envoi","Date de création","Dernière modification"]:
@@ -1245,7 +1290,7 @@ with tabs[4]:
 # ---- Export tab ----
 with tabs[5]:
     st.header("💾 Export")
-    df_live = _get_df_live()
+    df_live = _get_df_live_safe()
     if df_live is None or df_live.empty:
         st.info("Aucune donnée à exporter.")
     else:
