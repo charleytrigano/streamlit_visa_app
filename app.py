@@ -1,10 +1,8 @@
-# Visa Manager - app.py
-# Final corrected Streamlit application (single file)
-# - Ensures every st.date_input gets a native datetime.date or None via _date_or_none_safe
-# - All date_input calls use _date_or_none_safe(...) directly (no intermediate wrappers that might be shadowed)
-# - Gestion form includes st.form_submit_button
-# - Robust CSV/XLSX reading (semicolon supported), heuristic mapping
-# - Allows negative Solde
+# app.py - Visa Manager (corrigé)
+# - Toutes les st.date_input reçoivent un datetime.date natif ou None via _date_or_none_safe
+# - st.form_submit_button présent dans les formulaires
+# - Lecture CSV/XLSX robuste
+# - Conserver logique existante (soldes, acomptes, export)
 #
 # Requirements: pip install streamlit pandas openpyxl
 # Run: streamlit run app.py
@@ -19,7 +17,7 @@ from typing import Tuple, Dict, Any, List, Optional
 import pandas as pd
 import streamlit as st
 
-# Optional plotting
+# Optional libs
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -27,7 +25,6 @@ except Exception:
     px = None
     HAS_PLOTLY = False
 
-# Optional openpyxl for XLSX formula exports
 try:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
@@ -35,9 +32,7 @@ try:
 except Exception:
     HAS_OPENPYXL = False
 
-# -------------------------
-# Configuration & constants
-# -------------------------
+# -------- CONFIG --------
 APP_TITLE = "🛂 Visa Manager"
 COLS_CLIENTS = [
     "ID_Client", "Dossier N", "Nom", "Date",
@@ -60,15 +55,12 @@ SHEET_CLIENTS = "Clients"
 SHEET_VISA = "Visa"
 SID = "vmgr"
 DEFAULT_START_CLIENT_ID = 13057
-
 CURRENT_USER = "charleytrigano"
 
 def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
 
-# -------------------------
-# Helpers: parsing/formatting
-# -------------------------
+# -------- HELPERS --------
 def normalize_header_text(s: Any) -> str:
     if s is None:
         return ""
@@ -146,11 +138,8 @@ def _fmt_money(v: Any) -> str:
     except Exception:
         return "$0.00"
 
+# Single, authoritative safe date converter — ALWAYS return datetime.date or None
 def _date_or_none_safe(v: Any) -> Optional[date]:
-    """
-    Strict safe wrapper: always return a native datetime.date or None.
-    Use this for all st.date_input value=... calls to avoid pandas types.
-    """
     try:
         if v is None:
             return None
@@ -158,18 +147,15 @@ def _date_or_none_safe(v: Any) -> Optional[date]:
             return v
         if isinstance(v, datetime):
             return v.date()
-        # pandas Timestamp, numpy datetime64, string -> convert via pandas then build native date
+        # handle pandas Timestamp or numpy datetime64 or strings
         d = pd.to_datetime(v, errors="coerce")
         if pd.isna(d):
             return None
-        # Ensure we return a Python datetime.date
         return date(int(d.year), int(d.month), int(d.day))
     except Exception:
         return None
 
-# -------------------------
-# Column heuristics & detectors
-# -------------------------
+# -------- COLUMN DETECTION --------
 COL_CANDIDATES = {
     "id client": "ID_Client", "idclient": "ID_Client",
     "dossier n": "Dossier N", "dossier": "Dossier N",
@@ -215,8 +201,7 @@ def detect_acompte_columns(df: pd.DataFrame) -> List[str]:
     def sort_key(name):
         m = re.search(r"(\d+)", name)
         return int(m.group(1)) if m else 999
-    cols = sorted(cols, key=sort_key)
-    return cols
+    return sorted(cols, key=sort_key)
 
 def detect_montant_column(df: pd.DataFrame) -> Optional[str]:
     if df is None or df.empty:
@@ -258,9 +243,7 @@ def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
                 if cand_key in key:
                     mapped = std
                     break
-        if mapped is None:
-            mapped = normalize_header_text(c)
-        mapping[c] = mapped
+        mapping[c] = mapped or normalize_header_text(c)
     new_names = {}
     seen = {}
     for orig, new in mapping.items():
@@ -282,10 +265,9 @@ def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
 def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
-    cols = list(df.columns)
     rename_map = {}
     def _ck(x): return canonical_key(str(x))
-    for c in cols:
+    for c in list(df.columns):
         k = _ck(c)
         if ("sous" in k and "categorie" in k) or ("souscategorie" in k):
             if "Sous-categorie" not in df.columns:
@@ -300,9 +282,7 @@ def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
             pass
     return df
 
-# -------------------------
-# Visa helper
-# -------------------------
+# -------- VISA MAP --------
 DEFAULT_VISA_OPTIONS_BY_CAT_SUB: Dict[Tuple[str,str], List[str]] = {}
 visa_sub_options_map: Dict[str, List[str]] = {}
 visa_map: Dict[str, List[str]] = {}
@@ -310,11 +290,10 @@ visa_map_norm: Dict[str, List[str]] = {}
 visa_categories: List[str] = []
 
 def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
-    global visa_sub_options_map, visa_map, visa_map_norm, DEFAULT_VISA_OPTIONS_BY_CAT_SUB
     try:
         if sub:
             ksub = canonical_key(sub)
-            if isinstance(visa_sub_options_map, dict) and ksub in visa_sub_options_map:
+            if ksub in visa_sub_options_map:
                 opts = visa_sub_options_map.get(ksub, [])
                 if opts:
                     return opts[:]
@@ -323,7 +302,7 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
     try:
         if cat:
             kcat = canonical_key(cat)
-            if isinstance(visa_map_norm, dict) and kcat in visa_map_norm:
+            if kcat in visa_map_norm:
                 return visa_map_norm.get(kcat, [])[:]
     except Exception:
         pass
@@ -344,9 +323,7 @@ def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
         pass
     return []
 
-# -------------------------
-# I/O helpers (robust)
-# -------------------------
+# -------- I/O --------
 def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
     bio = BytesIO(b)
     try:
@@ -440,9 +417,7 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     _log("read_any_table: unsupported src type")
     return None
 
-# -------------------------
-# Ensure & normalize
-# -------------------------
+# -------- NORMALIZE & ENSURE --------
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame()
@@ -605,9 +580,7 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
-# -------------------------
-# UI bootstrap & upload handling
-# -------------------------
+# -------- UI BOOTSTRAP --------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
@@ -636,7 +609,7 @@ if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
-# persist uploaded bytes
+# persist upload bytes
 clients_bytes = None
 visa_bytes = None
 if up_clients is not None:
@@ -680,9 +653,7 @@ elif os.path.exists(CACHE_VISA):
 else:
     visa_src_for_read = None
 
-# -------------------------
-# Read raw tables
-# -------------------------
+# -------- READ RAW TABLES --------
 df_clients_raw = None
 df_visa_raw = None
 try:
@@ -703,7 +674,7 @@ if df_visa_raw is None and visa_src_for_read is not None:
 if df_visa_raw is None:
     df_visa_raw = pd.DataFrame()
 
-# sanitize visa raw
+# sanitize visa sheet
 if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
     try:
         df_visa_raw = df_visa_raw.fillna("")
@@ -775,9 +746,7 @@ globals()['visa_map_norm'] = visa_map_norm
 globals()['visa_categories'] = visa_categories
 globals()['visa_sub_options_map'] = visa_sub_options_map
 
-# -------------------------
-# Build live DF in session
-# -------------------------
+# -------- BUILD LIVE DF IN SESSION --------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
 DF_LIVE_KEY = skey("df_live")
@@ -817,9 +786,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     """
     return html
 
-# -------------------------
-# Tabs UI: Files / Dashboard / Analyses / Add / Gestion / Export
-# -------------------------
+# -------- TABS UI (Files / Dashboard / Analyses / Add / Gestion / Export) --------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
 # ---- Files tab ----
@@ -1120,7 +1087,7 @@ with tabs[4]:
                 with r1c2:
                     e_dossier = st.text_input("Dossier N", value=txt(row.get("Dossier N","")), key=skey("edit","dossier", str(idx)))
                 with r1c3:
-                    # IMPORTANT: use _date_or_none_safe(...) directly
+                    # ALWAYS pass native date or None
                     e_date = st.date_input("Date (événement)", value=_date_or_none_safe(row.get("Date")), key=skey("edit","date", str(idx)))
 
                 e_nom = st.text_input("Nom du client", value=txt(row.get("Nom","")), key=skey("edit","nom", str(idx)))
@@ -1151,7 +1118,7 @@ with tabs[4]:
                         except Exception:
                             e_sub_options = []
                     try:
-                        init_sub_index = ([""]+e_sub_options).index(txt(row.get("Sous-categorie",""))) if txt(row.get("Sous-categorie","")) in ([""]+e_sub_options) else 0
+                        init_sub_index = ([""]+e_sub_options).index(txt(row.get("Sous-catégorie",""))) if txt(row.get("Sous-catégorie","")) in ([""]+e_sub_options) else 0
                     except Exception:
                         init_sub_index = 0
                     e_sub = st.selectbox("Sous-catégorie", options=[""]+e_sub_options, index=init_sub_index, key=skey("edit","sub", str(idx)))
