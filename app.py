@@ -1,9 +1,10 @@
 # Visa Manager - app.py
-# Final corrected Streamlit application (single file)
-# - All st.date_input calls receive a native datetime.date or None via _date_or_none_safe
-# - Gestion form has st.form_submit_button
-# - Robust CSV/XLSX reading (semicolon supported), heuristic mapping
-# - Solde allowed to be negative (per user)
+# Complete Streamlit application (single file)
+# - Robust reading of Clients (CSV/XLSX) and Visa files (semicolon CSV supported)
+# - All st.date_input receive native datetime.date or None via _date_or_none_safe
+# - Gestion form uses per-row keys and includes st.form_submit_button
+# - Solde allowed to be negative (as requested)
+# - Exports CSV and XLSX; optional XLSX with formulas via openpyxl
 #
 # Requirements: pip install streamlit pandas openpyxl
 # Run: streamlit run app.py
@@ -18,7 +19,7 @@ from typing import Tuple, Dict, Any, List, Optional
 import pandas as pd
 import streamlit as st
 
-# Optional plotly
+# Optional plotting
 try:
     import plotly.express as px
     HAS_PLOTLY = True
@@ -458,7 +459,7 @@ def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = ""
     return None
 
 # -------------------------
-# Ensure columns & normalization
+# Ensure columns & normalize
 # -------------------------
 def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     if not isinstance(df, pd.DataFrame):
@@ -466,7 +467,8 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
         if c not in out.columns:
-            if c in ["Payé", "Solde", "Solde à percevoir (US $)", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
+            if c in ["Payé", "Solde", "Solde à percevoir (US $)", "Montant honoraires (US $)", "Autres frais (US $)",
+                     "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
                 out[c] = 0.0
             elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
                 out[c] = 0
@@ -484,7 +486,8 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
             if c in out.columns:
                 safe[c] = out[c]
             else:
-                if c in ["Payé", "Solde", "Solde à percevoir (US $)", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
+                if c in ["Payé", "Solde", "Solde à percevoir (US $)", "Montant honoraires (US $)", "Autres frais (US $)",
+                         "Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
                     safe[c] = 0.0
                 elif c in ["Date de création", "Dernière modification", "Date", "Date Acompte 1", "Date Acompte 2", "Date Acompte 3", "Date Acompte 4", "Date d'envoi"]:
                     safe[c] = pd.NaT
@@ -621,7 +624,7 @@ def ensure_flag_columns(df: pd.DataFrame, flags: List[str]) -> None:
 DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
 # -------------------------
-# UI bootstrap
+# UI bootstrap and file upload handling
 # -------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -696,7 +699,7 @@ else:
     visa_src_for_read = None
 
 # -------------------------
-# Read tables
+# Read raw tables
 # -------------------------
 df_clients_raw = None
 df_visa_raw = None
@@ -791,7 +794,7 @@ globals()['visa_categories'] = visa_categories
 globals()['visa_sub_options_map'] = visa_sub_options_map
 
 # -------------------------
-# Build live df (session)
+# Build live DF in session
 # -------------------------
 df_all = normalize_clients_for_live(df_clients_raw)
 df_all = recalc_payments_and_solde(df_all)
@@ -833,7 +836,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
     return html
 
 # -------------------------
-# Tabs UI: Files / Dashboard / Analyses / Add / Gestion / Export
+# Tabs UI
 # -------------------------
 tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💾 Export"])
 
@@ -903,7 +906,7 @@ with tabs[1]:
     st.subheader("📊 Dashboard (totaux et diagnostics)")
     df_live_view = recalc_payments_and_solde(_get_df_live())
     if df_live_view is None or df_live_view.empty:
-        st.info("Aucune donnée en mémoire. Vérifiez l'onglet Fichiers et chargez le CSV correctement.")
+        st.info("Aucune donnée en mémoire.")
     else:
         cats = unique_nonempty(df_live_view["Categories"]) if "Categories" in df_live_view.columns else []
         subs = unique_nonempty(df_live_view["Sous-catégorie"]) if "Sous-catégorie" in df_live_view.columns else []
@@ -983,8 +986,18 @@ with tabs[1]:
         except Exception:
             st.write("Impossible d'afficher la liste des clients (trop volumineuse). Utilisez l'export.")
 
-# The rest of the UI (Add, Gestion, Export) follows — Gestion uses _date_or_none_safe for all date_input values
-# and includes st.form_submit_button in the form. See above definitions for helpers and ensure they are used.
+# ---- Analyses tab ----
+with tabs[2]:
+    st.subheader("📈 Analyses")
+    st.info("Graphiques et analyses basiques.")
+    df_ = _get_df_live()
+    if isinstance(df_, pd.DataFrame) and not df_.empty and "Categories" in df_.columns:
+        cat_counts = df_["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
+        if HAS_PLOTLY and px is not None:
+            fig = px.pie(cat_counts, names="Categorie", values="Nombre", hole=0.4, title="Répartition par catégorie")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.bar_chart(cat_counts.set_index("Categorie")["Nombre"])
 
 # ---- Add tab ----
 with tabs[3]:
