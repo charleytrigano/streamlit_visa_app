@@ -1804,6 +1804,29 @@ with tabs[5]:
                         except Exception as e:
                             st.error(f"Erreur export XLSX: {e}")
 
+
+# ---- Onglet ESCROW (à insérer après Compta Client) ----
+with st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💼 ESCROW","💾 Export"])[6]:
+    st.header("💼 ESCROW")
+    df_live = recalc_payments_and_solde(_get_df_live_safe())
+    escrow_rows = df_live[df_live["Escrow"]==1].copy()
+    escrow_rows["Etat"] = escrow_rows.apply(lambda r: "Réclamé" if pd.notna(r.get("Date Acompte 1")) and r.get("Date Acompte 1" ) else "À réclamer", axis=1)
+    escrow_rows["Montant escrow"] = escrow_rows["Acompte 1"].apply(_to_num)
+    total_escrow = escrow_rows["Montant escrow"].sum()
+    st.markdown(f"**Total dossiers en escrow : {len(escrow_rows)}**")
+    st.markdown(f"**Total montants escrow : {_fmt_money(total_escrow)}**")
+    st.dataframe(escrow_rows[["Nom","Dossier N","Date","Date Acompte 1","Montant escrow","Etat"]].reset_index(drop=True), use_container_width=True, height=380)
+    st.markdown("#### Historique escrow")
+    st.dataframe(escrow_rows[["Nom","Dossier N","Date","Montant escrow","Date Acompte 1","Etat"]].sort_values("Date").reset_index(drop=True), use_container_width=True, height=220)
+    # Export XLSX
+    if st.button("Exporter les dossiers escrow en XLSX"):
+        buf = BytesIO()
+        escrow_export = escrow_rows[["Nom","Dossier N","Date","Date Acompte 1","Montant escrow","Etat"]]
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            escrow_export.to_excel(writer, index=False, sheet_name="Escrow")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX", data=buf.getvalue(), file_name="escrow_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 # ---- Export tab ----
 with tabs[6]:
     st.header("💾 Export")
