@@ -1,1872 +1,2405 @@
-# app.py - Visa Manager (complete)
-# - Features:
-#   * Import Clients/Visa (xlsx/csv), normalize columns, heuristic mapping
-#   * Import single ComptaCli fiche and persist to cache so re-upload not required
-#   * Session-backed clients table editable in "Gestion"
-#   * Compta Client tab: select a row (index | Dossier N | Nom) like Gestion and export .xlsx
-#   * Dashboard: filters by Category/Subcategory, Year, Month (with "Tous"), custom date range, and comparison between two periods
-#   * Analyses: multiple charts (time series monthly, heatmap year x month, category treemap, top-N clients, comparison bars)
-# Requirements: pip install streamlit pandas openpyxl plotly
-# Run: streamlit run app.py
-
 import os
 import json
 import re
+import io
 from io import BytesIO
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Tuple, Dict, Any, List, Optional
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-# optional plotly for richer charts
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-    PLOTLY_AVAILABLE = True
-except Exception:
-    PLOTLY_AVAILABLE = False
-
-# -------------------------
-# Configuration & constants
-# -------------------------
+# =========================
+# Constantes et configuration
+# =========================
 APP_TITLE = "🛂 Visa Manager"
+
 COLS_CLIENTS = [
-    "ID_Client",
-    "Dossier N",
-    "Nom",
-    "Date",
-    "Categories",
-    "Sous-categorie",
-    "Visa",
-    "Montant honoraires (US $)",
-    "Autres frais (US $)",
-    "Payé",
-    "Solde",
-    "Solde à percevoir (US $)",
-    "Acompte 1", "Date Acompte 1",
-    "Acompte 2", "Date Acompte 2",
-    "Acompte 3", "Date Acompte 3",
-    "Acompte 4", "Date Acompte 4",
-    "Escrow",
-    "RFE",
-    "Dossiers envoyé",
-    "Dossier approuvé",
-    "Dossier refusé",
-    "Dossier Annulé",
-    "Commentaires",
-    "ModeReglement",
-    "ModeReglement_Ac1", "ModeReglement_Ac2", "ModeReglement_Ac3", "ModeReglement_Ac4"
+    "ID_Client", "Dossier N", "Nom", "Date",
+    "Categories", "Sous-categorie", "Visa",
+    "Montant honoraires (US $)", "Autres frais (US $)",
+    "Payé", "Solde", "Acompte 1", "Acompte 2",
+    "RFE", "Dossiers envoyé", "Dossier approuvé",
+    "Dossier refusé", "Dossier Annulé", "Commentaires",
+    "Escrow"
 ]
+
 MEMO_FILE = "_vmemory.json"
-CACHE_CLIENTS = "_clients_cache.xlsx"
-CACHE_VISA = "_visa_cache.xlsx"
 SHEET_CLIENTS = "Clients"
 SHEET_VISA = "Visa"
-SHEET_COMPTACLI = "ComptaCli"
 SID = "vmgr"
-DEFAULT_START_CLIENT_ID = 13057
-DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
 
-def skey(*parts: str) -> str:
-    return f"{SID}_" + "_".join([p for p in parts if p])
+# =========================
+# Fonctions utilitaires
+# =========================
 
-# -------------------------
-# Basic helpers (parsing / formatting)
-# -------------------------
-def normalize_header_text(s: Any) -> str:
-    if s is None:
-        return ""
-    s = str(s).strip()
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-def remove_accents(s: Any) -> str:
-    if s is None:
-        return ""
-    s2 = str(s)
-    replace_map = {"é":"e","è":"e","ê":"e","ë":"e","à":"a","â":"a","î":"i","ï":"i","ô":"o","ö":"o","ù":"u","û":"u","ü":"u","ç":"c"}
-    for k,v in replace_map.items():
-        s2 = s2.replace(k, v)
-    return s2
-
-def canonical_key(s: Any) -> str:
-    if s is None:
-        return ""
-    s2 = normalize_header_text(str(s)).lower()
-    s2 = remove_accents(s2)
-    s2 = re.sub(r"[^a-z0-9 ]", " ", s2)
-    s2 = re.sub(r"\s+", " ", s2).strip()
-    return s2
-
-def money_to_float(x: Any) -> float:
+def _safe_str(x: Any) -> str:
     try:
-        if x is None:
-            return 0.0
-        try:
-            if pd.isna(x):
-                return 0.0
-        except Exception:
-            pass
-        if isinstance(x, (int, float)):
-            return float(x)
-        s = str(x).strip()
-        if s == "" or s.lower() in ("na","n/a","nan","none","null"):
-            return 0.0
-        s = s.replace("\u202f", "").replace("\xa0", "").replace(" ", "")
-        s = re.sub(r"[^\d,.\-]", "", s)
-        if s == "":
-            return 0.0
-        if "," in s and "." in s:
-            if s.rfind(",") > s.rfind("."):
-                s = s.replace(".", "").replace(",", ".")
-            else:
-                s = s.replace(",", "")
-        else:
-            if "," in s and s.count(",") == 1 and "." not in s:
-                if len(s.split(",")[-1]) == 2:
-                    s = s.replace(",", ".")
-                else:
-                    s = s.replace(",", "")
-            else:
-                s = s.replace(",", ".")
-        return float(s)
+        return "" if x is None else str(x)
     except Exception:
-        try:
-            return float(re.sub(r"[^0-9.\-]", "", str(x)) or 0.0)
-        except Exception:
-            return 0.0
+        return ""
 
 def _to_num(x: Any) -> float:
-    if isinstance(x, (int, float)) and (not pd.isna(x)):
+    if isinstance(x, (int, float)):
         return float(x)
-    return money_to_float(x)
+    s = _safe_str(x)
+    if not s:
+        return 0.0
+    s = re.sub(r"[^\d,.-]", "", s)
+    s = s.replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
 
-def _fmt_money(v: Any) -> str:
+def _fmt_money(v: float) -> str:
     try:
         return "${:,.2f}".format(float(v))
     except Exception:
         return "$0.00"
 
-def _date_or_none_safe(v: Any) -> Optional[date]:
+def _date_for_widget(val: Any) -> date:
+    if isinstance(val, date):
+        return val
+    if isinstance(val, datetime):
+        return val.date()
     try:
-        if v is None:
-            return None
-        if isinstance(v, date) and not isinstance(v, datetime):
-            return v
-        if isinstance(v, datetime):
-            return v.date()
-        d = pd.to_datetime(v, dayfirst=True, errors="coerce")
+        d = pd.to_datetime(val, errors="coerce")
         if pd.isna(d):
-            return None
-        return date(int(d.year), int(d.month), int(d.day))
+            return date.today()
+        return d.date()
     except Exception:
-        return None
+        return date.today()
 
-# -------------------------
-# Column heuristics & detection
-# -------------------------
-COL_CANDIDATES = {
-    "id client": "ID_Client", "idclient": "ID_Client",
-    "dossier n": "Dossier N", "dossier": "Dossier N",
-    "nom": "Nom", "date": "Date",
-    "categories": "Categories", "categorie": "Categories",
-    "sous categorie": "Sous-categorie", "sous-categorie": "Sous-categorie", "souscategorie": "Sous-categorie",
-    "visa": "Visa",
-    "montant": "Montant honoraires (US $)", "montant honoraires": "Montant honoraires (US $)",
-    "autres frais": "Autres frais (US $)", "autre frais": "Autres frais (US $)",
-    "payé": "Payé", "paye": "Payé",
-    "solde": "Solde",
-    "mode reglement": "ModeReglement",
-    "rfe": "RFE"
-}
-# extra variants
-COL_CANDIDATES.update({
-    "montant honoraires us": "Montant honoraires (US $)",
-    "montant honoraires (us $)": "Montant honoraires (US $)",
-    "montant total": "Montant honoraires (US $)",
-    "autre frais": "Autres frais (US $)",
-    "autres frais": "Autres frais (US $)",
-    "mode reglement ac1": "ModeReglement_Ac1",
-    "modereglement ac1": "ModeReglement_Ac1",
-    "modereglement_ac1": "ModeReglement_Ac1",
-    "mode reglement ac2": "ModeReglement_Ac2",
-    "mode reglement ac3": "ModeReglement_Ac3",
-    "mode reglement ac4": "ModeReglement_Ac4",
-    "modereglement_ac2": "ModeReglement_Ac2",
-    "modereglement_ac3": "ModeReglement_Ac3",
-    "modereglement_ac4": "ModeReglement_Ac4",
-    "escrow": "Escrow"
-})
-
-NUMERIC_TARGETS = [
-    "Montant honoraires (US $)",
-    "Autres frais (US $)",
-    "Payé",
-    "Solde",
-    "Solde à percevoir (US $)",
-    "Acompte 1",
-    "Acompte 2",
-    "Acompte 3",
-    "Acompte 4"
-]
-
-def detect_acompte_columns(df: pd.DataFrame) -> List[str]:
-    if df is None or df.empty:
-        return []
-    cols = [c for c in df.columns if "acompte" in canonical_key(c)]
-    def sort_key(name):
-        m = re.search(r"(\d+)", name)
-        return int(m.group(1)) if m else 999
-    return sorted(cols, key=sort_key)
-
-def detect_montant_column(df: pd.DataFrame) -> Optional[str]:
-    if df is None or df.empty:
-        return None
-    candidates = ["Montant honoraires (US $)", "Montant honoraires", "Montant", "Montant Total"]
-    for c in candidates:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        k = canonical_key(c)
-        if "montant" in k or "honorair" in k:
-            return c
-    return None
-
-def detect_autres_column(df: pd.DataFrame) -> Optional[str]:
-    if df is None or df.empty:
-        return None
-    candidates = ["Autres frais (US $)", "Autres frais", "Autres", "Autre frais"]
-    for c in candidates:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        k = canonical_key(c)
-        if "autre" in k or "frais" in k:
-            return c
-    return None
-
-def map_columns_heuristic(df: Any) -> Tuple[pd.DataFrame, Dict[str,str]]:
-    if not isinstance(df, pd.DataFrame):
-        return pd.DataFrame(), {}
-    mapping: Dict[str,str] = {}
-    for c in list(df.columns):
-        key = canonical_key(c)
-        mapped = None
-        if key in COL_CANDIDATES:
-            mapped = COL_CANDIDATES[key]
-        else:
-            for cand_key, std in sorted(COL_CANDIDATES.items(), key=lambda t: -len(t[0])):
-                if cand_key in key:
-                    mapped = std
-                    break
-        mapping[c] = mapped or normalize_header_text(c)
-    new_names = {}
-    seen = {}
-    for orig, new in mapping.items():
-        base = new
-        cnt = seen.get(base, 0)
-        if cnt:
-            new_name = f"{base}_{cnt+1}"
-            seen[base] = cnt+1
-        else:
-            new_name = base
-            seen[base] = 1
-        new_names[orig] = new_name
-    try:
-        df = df.rename(columns=new_names)
-    except Exception:
-        pass
-    return df, new_names
-
-def coerce_category_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    rename_map = {}
-    def _ck(x): return canonical_key(str(x))
-    for c in list(df.columns):
-        k = _ck(c)
-        if ("sous" in k and "categorie" in k) or ("souscategorie" in k):
-            if "Sous-categorie" not in df.columns:
-                rename_map[c] = "Sous-categorie"
-        elif ("categorie" in k or "categories" in k) and "sous" not in k:
-            if "Categories" not in df.columns:
-                rename_map[c] = "Categories"
-    if rename_map:
-        try:
-            df = df.rename(columns=rename_map)
-        except Exception:
-            pass
-    return df
-
-# -------------------------
-# Visa maps init
-# -------------------------
-visa_map: Dict[str, List[str]] = {}
-visa_map_norm: Dict[str, List[str]] = {}
-visa_sub_options_map: Dict[str, List[str]] = {}
-visa_categories: List[str] = []
-
-def get_visa_options(cat: Optional[str], sub: Optional[str]) -> List[str]:
-    try:
-        if sub:
-            ksub = canonical_key(sub)
-            if ksub in visa_sub_options_map:
-                opts = visa_sub_options_map.get(ksub, [])
-                if opts:
-                    return opts[:]
-    except Exception:
-        pass
-    try:
-        if cat:
-            kcat = canonical_key(cat)
-            if kcat in visa_map_norm:
-                return visa_map_norm.get(kcat, [])[:]
-    except Exception:
-        pass
-    return []
-
-def parse_modes_global(raw: Any) -> List[str]:
-    try:
-        if pd.isna(raw) or raw is None:
-            return []
-        s = str(raw).strip()
-        if not s:
-            return []
-        return [p.strip() for p in s.split(",") if p.strip()]
-    except Exception:
-        return []
-
-# -------------------------
-# Finance helpers
-# -------------------------
-def get_next_dossier_numeric(df: pd.DataFrame) -> int:
-    try:
-        if df is None or df.empty:
-            return DEFAULT_START_CLIENT_ID
-        vals = df.get("Dossier N", pd.Series([], dtype="object"))
-        nums: List[int] = []
-        for v in vals.dropna().astype(str):
-            m = re.search(r"(\d+)", v)
-            if m:
-                try:
-                    nums.append(int(m.group(1)))
-                except Exception:
-                    pass
-        if not nums:
-            return DEFAULT_START_CLIENT_ID
-        mx = max(nums)
-        return max(DEFAULT_START_CLIENT_ID, mx) + 1
-    except Exception:
-        return DEFAULT_START_CLIENT_ID
-
-def make_id_client_datebased(df: pd.DataFrame) -> str:
-    seq = get_next_dossier_numeric(df)
-    datepart = datetime.now().strftime("%Y%m%d")
-    return f"{datepart}-{seq}"
-
-def ensure_flag_columns(df_like: Any, flags: List[str]) -> None:
-    if isinstance(df_like, pd.DataFrame):
-        for f in flags:
-            if f not in df_like.columns:
-                df_like[f] = 0
-    elif isinstance(df_like, dict):
-        for f in flags:
-            if f not in df_like:
-                df_like[f] = 0
-
-# -------------------------
-# Normalize & recalc dataset
-# -------------------------
-def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
-    if not isinstance(df, pd.DataFrame):
-        df = pd.DataFrame()
+def _ensure_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     out = df.copy()
     for c in cols:
         if c not in out.columns:
-            if c in NUMERIC_TARGETS:
+            if c in ["Payé", "Solde", "Montant honoraires (US $)", "Autres frais (US $)", "Acompte 1", "Acompte 2"]:
                 out[c] = 0.0
-            elif c == "Escrow":
-                out[c] = 0
             elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
                 out[c] = 0
-            elif "Date" in c:
-                out[c] = pd.NaT
+            elif c == "Escrow":
+                out[c] = 0
             else:
                 out[c] = ""
-    try:
-        return out[cols]
-    except Exception:
-        safe = pd.DataFrame(columns=cols)
-        for c in cols:
-            if c in out.columns:
-                safe[c] = out[c]
-            else:
-                if c in NUMERIC_TARGETS:
-                    safe[c] = 0.0
-                elif c == "Escrow":
-                    safe[c] = 0
-                elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
-                    safe[c] = 0
-                elif "Date" in c:
-                    safe[c] = pd.NaT
-                else:
-                    safe[c] = ""
-        return safe
+    return out[cols]
 
-def normalize_clients_for_live(raw: Any) -> pd.DataFrame:
-    df_raw = raw
-    if not isinstance(df_raw, pd.DataFrame):
-        maybe = read_any_table(df_raw, sheet=None, debug_prefix="[normalize] ")
-        df_raw = maybe if isinstance(maybe, pd.DataFrame) else pd.DataFrame()
-    df_mapped, _ = map_columns_heuristic(df_raw)
-    for dtc in [c for c in df_mapped.columns if "Date" in c]:
-        try:
-            df_mapped[dtc] = pd.to_datetime(df_mapped[dtc], dayfirst=True, errors="coerce")
-        except Exception:
-            pass
-    df = _ensure_columns(df_mapped, COLS_CLIENTS)
-    # numeric coercion
-    for c in NUMERIC_TARGETS:
+def _normalize_clients_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    num_cols = ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde", "Acompte 1", "Acompte 2"]
+    for c in num_cols:
         if c in df.columns:
-            try:
-                df[c] = df[c].apply(lambda x: _to_num(x))
-            except Exception:
-                df[c] = 0.0
-    # ensure acomptes exist
-    for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
-        if acc not in df.columns:
-            df[acc] = 0.0
-    acomptes_cols = detect_acompte_columns(df)
-    if acomptes_cols:
-        try:
-            df["Payé"] = df[acomptes_cols].fillna(0).apply(lambda row: sum([_to_num(row[c]) for c in acomptes_cols]), axis=1)
-        except Exception:
-            df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x))
+            df[c] = df[c].apply(_to_num)
+    if "Montant honoraires (US $)" in df.columns and "Autres frais (US $)" in df.columns:
+        total = df["Montant honoraires (US $)"] + df["Autres frais (US $)"]
+        paye = df["Payé"] if "Payé" in df.columns else 0.0
+        df["Solde"] = (total - paye).clip(lower=0.0)
+    return df
+
+def _normalize_status(df: pd.DataFrame) -> pd.DataFrame:
+    for c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
+        if c in df.columns:
+            df[c] = df[c].apply(lambda x: 1 if str(x).strip() in ["1", "True", "true", "OUI", "Oui", "oui", "X", "x"] else 0)
+        else:
+            df[c] = 0
+    if "Escrow" in df.columns:
+        df["Escrow"] = df["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ["1", "true", "t", "yes", "oui", "y", "x"] else 0)
     else:
-        df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x))
-    try:
-        montant_col = detect_montant_column(df) or "Montant honoraires (US $)"
-        autres_col = detect_autres_column(df) or "Autres frais (US $)"
-        df[montant_col] = df.get(montant_col, 0).apply(lambda x: _to_num(x))
-        df[autres_col] = df.get(autres_col, 0).apply(lambda x: _to_num(x))
-        df["Solde"] = df[montant_col] + df[autres_col] - df["Payé"]
-        df["Solde à percevoir (US $)"] = df["Solde"].copy()
-    except Exception:
-        df["Solde"] = df.get("Solde", 0).apply(lambda x: _to_num(x))
-        df["Solde à percevoir (US $)"] = df.get("Solde à percevoir (US $)", 0).apply(lambda x: _to_num(x))
-    for c in ["Nom","Categories","Sous-categorie","Visa","Commentaires","ModeReglement","ModeReglement_Ac1","ModeReglement_Ac2","ModeReglement_Ac3","ModeReglement_Ac4"]:
-        if c in df.columns:
-            df[c] = df[c].fillna("").astype(str)
-    if "Escrow" not in df.columns:
         df["Escrow"] = 0
     return df
 
-def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_clients(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     if df is None or df.empty:
-        return df
-    out = df.copy()
-    acomptes = detect_acompte_columns(out)
-    if not acomptes:
-        for acc in ["Acompte 1", "Acompte 2", "Acompte 3", "Acompte 4"]:
-            if acc not in out.columns:
-                out[acc] = 0.0
-        acomptes = detect_acompte_columns(out)
-    for c in acomptes:
+        return pd.DataFrame(columns=COLS_CLIENTS)
+    df = df.copy()
+    ren = {
+        "Categorie": "Categories",
+        "Catégorie": "Categories",
+        "Sous-categorie": "Sous-categorie",
+        "Sous-catégorie": "Sous-categorie",
+        "Payee": "Payé",
+        "Payé (US $)": "Payé",
+        "Montant honoraires": "Montant honoraires (US $)",
+        "Autres frais": "Autres frais (US $)",
+        "Dossier envoye": "Dossiers envoyé",
+        "Dossier envoyé": "Dossiers envoyé",
+    }
+    df.rename(columns={k: v for k, v in ren.items() if k in df.columns}, inplace=True)
+    df = _ensure_columns(df, COLS_CLIENTS)
+    if "Date" in df.columns:
         try:
-            out[c] = out[c].apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
-        except Exception:
-            out[c] = out[c].apply(lambda x: 0.0)
-    montant_col = detect_montant_column(out) or "Montant honoraires (US $)"
-    autres_col = detect_autres_column(out) or "Autres frais (US $)"
-    for c in [montant_col, autres_col]:
-        if c not in out.columns:
-            out[c] = 0.0
-        else:
-            try:
-                out[c] = out[c].apply(lambda x: _to_num(x) if not isinstance(x,(int,float)) else float(x))
-            except Exception:
-                out[c] = out[c].apply(lambda x: 0.0)
-    try:
-        out["Payé"] = out[acomptes].sum(axis=1).astype(float) if acomptes else out.get("Payé",0).apply(lambda x: _to_num(x))
-    except Exception:
-        out["Payé"] = out.get("Payé",0).apply(lambda x: _to_num(x))
-    try:
-        out["Solde"] = out[montant_col] + out[autres_col] - out["Payé"]
-        out["Solde à percevoir (US $)"] = out["Solde"].copy()
-        out["Solde"] = out["Solde"].astype(float)
-    except Exception:
-        out["Solde"] = out.get("Solde",0).apply(lambda x: _to_num(x))
-    if "Escrow" in out.columns:
-        try:
-            out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else (1 if _to_num(x) == 1 else 0))
-        except Exception:
-            out["Escrow"] = out["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ("1","true","t","yes","oui","y","x") else 0)
-    return out
-
-# -------------------------
-# I/O helpers (Excel/CSV)
-# -------------------------
-def try_read_excel_from_bytes(b: bytes, sheet_name: Optional[str] = None) -> Optional[pd.DataFrame]:
-    bio = BytesIO(b)
-    try:
-        xls = pd.ExcelFile(bio, engine="openpyxl")
-        sheets = xls.sheet_names
-        if sheet_name and sheet_name in sheets:
-            return pd.read_excel(BytesIO(b), sheet_name=sheet_name, engine="openpyxl")
-        for cand in [SHEET_CLIENTS, SHEET_VISA, SHEET_COMPTACLI, "Sheet1"]:
-            if cand in sheets:
-                try:
-                    return pd.read_excel(BytesIO(b), sheet_name=cand, engine="openpyxl")
-                except Exception:
-                    continue
-        return pd.read_excel(BytesIO(b), sheet_name=0, engine="openpyxl")
-    except Exception:
-        return None
-
-def _normalize_incoming_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    new_cols = []
-    for c in df.columns:
-        s = str(c)
-        s = re.sub(r"_\s+", "_", s)
-        s = re.sub(r"\s+_", "_", s)
-        s = re.sub(r"\s+", " ", s).strip()
-        s = s.replace("\u00A0", " ").strip()
-        new_cols.append(s)
-    try:
-        df = df.rename(columns=dict(zip(df.columns, new_cols)))
-    except Exception:
-        pass
-    return df
-
-def read_any_table(src: Any, sheet: Optional[str] = None, debug_prefix: str = "") -> Optional[pd.DataFrame]:
-    def _log(msg: str):
-        try:
-            st.sidebar.info(f"{debug_prefix}{msg}")
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         except Exception:
             pass
-    if src is None:
-        _log("read_any_table: src is None")
-        return None
+    df = _normalize_clients_numeric(df)
+    df = _normalize_status(df)
+    df["Nom"] = df["Nom"].astype(str)
+    df["Categories"] = df["Categories"].astype(str)
+    df["Sous-categorie"] = df["Sous-categorie"].astype(str)
+    df["Visa"] = df["Visa"].astype(str)
+    df["Commentaires"] = df["Commentaires"].astype(str)
     try:
-        if isinstance(src, (bytes, bytearray)):
-            df = try_read_excel_from_bytes(bytes(src), sheet)
-            if df is not None:
-                df = _normalize_incoming_columns(df)
-                return df
-            for sep in [";", ","]:
-                for enc in ["utf-8", "latin-1", "cp1252"]:
-                    try:
-                        df = pd.read_csv(BytesIO(src), sep=sep, encoding=enc, on_bad_lines="skip")
-                        df = _normalize_incoming_columns(df)
-                        return df
-                    except Exception:
-                        continue
-            return None
-        if isinstance(src, BytesIO):
-            b = src.getvalue()
-            df = try_read_excel_from_bytes(b, sheet)
-            if df is not None:
-                df = _normalize_incoming_columns(df)
-                return df
-            for sep in [";", ","]:
-                for enc in ["utf-8", "latin-1", "cp1252"]:
-                    try:
-                        df = pd.read_csv(BytesIO(b), sep=sep, encoding=enc, on_bad_lines="skip")
-                        df = _normalize_incoming_columns(df)
-                        return df
-                    except Exception:
-                        continue
-            return None
-        if hasattr(src, "read") and hasattr(src, "name"):
-            try:
-                data = src.getvalue()
-            except Exception:
-                try:
-                    src.seek(0); data = src.read()
-                except Exception:
-                    data = None
-            if data:
-                df = try_read_excel_from_bytes(data, sheet)
-                if df is not None:
-                    df = _normalize_incoming_columns(df)
-                    return df
-                for sep in [";", ","]:
-                    for enc in ["utf-8", "latin-1", "cp1252"]:
-                        try:
-                            df = pd.read_csv(BytesIO(data), sep=sep, encoding=enc, on_bad_lines="skip")
-                            df = _normalize_incoming_columns(df)
-                            return df
-                        except Exception:
-                            continue
-            return None
-        if isinstance(src, (str, os.PathLike)):
-            p = str(src)
-            if not os.path.exists(p):
-                _log(f"path does not exist: {p}")
-                return None
-            if p.lower().endswith(".csv"):
-                for sep in [";", ","]:
-                    for enc in ["utf-8", "latin-1", "cp1252"]:
-                        try:
-                            df = pd.read_csv(p, sep=sep, encoding=enc, on_bad_lines="skip")
-                            df = _normalize_incoming_columns(df)
-                            return df
-                        except Exception:
-                            continue
-                return None
-            else:
-                try:
-                    df = pd.read_excel(p, sheet_name=sheet or 0, engine="openpyxl")
-                    df = _normalize_incoming_columns(df)
-                    return df
-                except Exception:
-                    return None
-    except Exception as e:
-        _log(f"read_any_table exception: {e}")
+        dser = pd.to_datetime(df["Date"], errors="coerce")
+        df["_Annee_"] = dser.dt.year.fillna(0).astype(int)
+        df["_MoisNum_"] = dser.dt.month.fillna(0).astype(int)
+        df["Mois"] = df["_MoisNum_"].apply(lambda m: f"{int(m):02d}" if m and m == m else "")
+    except Exception:
+        df["_Annee_"] = 0
+        df["_MoisNum_"] = 0
+        df["Mois"] = ""
+    return df
+
+def read_any_table(src: Any, sheet: Optional[str] = None) -> Optional[pd.DataFrame]:
+    if src is None:
         return None
-    _log("read_any_table: unsupported src type")
+    if hasattr(src, "read") and hasattr(src, "name"):
+        name = src.name.lower()
+        data = src.read()
+        bio = BytesIO(data)
+        if name.endswith(".csv"):
+            return pd.read_csv(bio)
+        return pd.read_excel(bio, sheet_name=(sheet if sheet else 0))
+    if isinstance(src, (str, os.PathLike)):
+        p = str(src)
+        if not os.path.exists(p):
+            return None
+        if p.lower().endswith(".csv"):
+            return pd.read_csv(p)
+        return pd.read_excel(p, sheet_name=(sheet if sheet else 0))
+    if isinstance(src, (io.BytesIO, BytesIO)):
+        try:
+            bio2 = BytesIO(src.getvalue())
+            return pd.read_excel(bio2, sheet_name=(sheet if sheet else 0))
+        except Exception:
+            src.seek(0)
+            return pd.read_csv(src)
     return None
 
-# -------------------------
-# Parse ComptaCli sheet (single fiche)
-# -------------------------
-def parse_fiche_from_sheet(df_sheet: pd.DataFrame) -> Optional[pd.DataFrame]:
+def read_sheet_from_path(path: str, sheet_name: str) -> Optional[pd.DataFrame]:
     try:
-        if df_sheet is None or df_sheet.empty:
-            return None
-        df_sheet = _normalize_incoming_columns(df_sheet)
-        df2 = df_sheet.fillna("").astype(str)
-        lines = []
-        for _, row in df2.iterrows():
-            lines.append("; ".join([str(c).strip() for c in row.tolist() if str(c).strip() != ""]))
-        out = {c: "" for c in COLS_CLIENTS}
-        for n in ["Montant honoraires (US $)","Autres frais (US $)","Acompte 1","Acompte 2","Acompte 3","Acompte 4"]:
-            out[n] = 0.0
-        out["Escrow"] = 0
-        for line in lines:
-            l = line.lower()
-            if "id_client" in l or "id client" in l or "iid_client" in l:
-                m = re.search(r"([A-Za-z0-9\-\_]+)", line)
-                if m:
-                    out["ID_Client"] = m.group(1)
-            if "dossier n" in l or "dossier" in l:
-                parts = [p.strip() for p in re.split(r"[;:]", line) if p.strip()]
-                for p in parts:
-                    if re.search(r"\d", p):
-                        out["Dossier N"] = p
-                        break
-            if "nom" in l and out.get("Nom","") == "":
-                parts = [p.strip() for p in re.split(r"[;:]", line) if p.strip()]
-                for p in parts:
-                    if p.lower() not in ("nom","name"):
-                        out["Nom"] = p
-                        break
-            if "categorie" in l or "sous" in l or "visa" in l:
-                parts = [p.strip() for p in re.split(r"[;:]", line) if p.strip()]
-                for p in parts:
-                    pl = p.lower()
-                    if any(k in pl for k in ("categorie","sous","visa")):
-                        continue
-                    if out["Categories"] == "":
-                        out["Categories"] = p
-                    elif out["Sous-categorie"] == "":
-                        out["Sous-categorie"] = p
-                    elif out["Visa"] == "":
-                        out["Visa"] = p
-            if "montant honoraires" in l or "montant total" in l:
-                for token in re.split(r"[;:]", line):
-                    v = money_to_float(token)
-                    if v:
-                        out["Montant honoraires (US $)"] = v
-                        break
-            if "autre" in l and "frais" in l:
-                for token in re.split(r"[;:]", line):
-                    v = money_to_float(token)
-                    if v:
-                        out["Autres frais (US $)"] = v
-                        break
-            if "date acompte 1" in l or "acompte 1" in l:
-                for token in re.split(r"[;:]", line):
-                    d = _date_or_none_safe(token)
-                    if d:
-                        out["Date Acompte 1"] = pd.to_datetime(d)
-                    v = money_to_float(token)
-                    if v and v != 0:
-                        out["Acompte 1"] = v
-            if "date acompte 2" in l or "acompte 2" in l:
-                for token in re.split(r"[;:]", line):
-                    d = _date_or_none_safe(token)
-                    if d:
-                        out["Date Acompte 2"] = pd.to_datetime(d)
-                    v = money_to_float(token)
-                    if v and v != 0:
-                        out["Acompte 2"] = v
-            if "date acompte 3" in l or "acompte 3" in l:
-                for token in re.split(r"[;:]", line):
-                    d = _date_or_none_safe(token)
-                    if d:
-                        out["Date Acompte 3"] = pd.to_datetime(d)
-                    v = money_to_float(token)
-                    if v and v != 0:
-                        out["Acompte 3"] = v
-            if "date acompte 4" in l or "acompte 4" in l:
-                for token in re.split(r"[;:]", line):
-                    d = _date_or_none_safe(token)
-                    if d:
-                        out["Date Acompte 4"] = pd.to_datetime(d)
-                    v = money_to_float(token)
-                    if v and v != 0:
-                        out["Acompte 4"] = v
-            if "escrow" in l:
-                out["Escrow"] = 1 if ("1" in l or "oui" in l or "yes" in l or "true" in l) else 0
-            if "comment" in l and out.get("Commentaires","") == "":
-                m = re.split(r"commentaires?:", line, flags=re.I)
-                if len(m) > 1:
-                    out["Commentaires"] = m[1].strip()
-        payé = sum([out.get("Acompte 1",0.0), out.get("Acompte 2",0.0), out.get("Acompte 3",0.0), out.get("Acompte 4",0.0)])
-        out["Payé"] = payé
-        out["Solde"] = out.get("Montant honoraires (US $)",0.0) + out.get("Autres frais (US $)",0.0) - payé
-        out["Solde à percevoir (US $)"] = out["Solde"]
-        df_out = pd.DataFrame([out])
-        for c in df_out.columns:
-            if "Date" in c:
-                try:
-                    df_out[c] = pd.to_datetime(df_out[c], errors="coerce")
-                except Exception:
-                    pass
-        return df_out
+        return pd.read_excel(path, sheet_name=sheet_name)
     except Exception:
         return None
 
-# -------------------------
-# Session-safe DataFrame
-# -------------------------
-DF_LIVE_KEY = skey("df_live")
-if DF_LIVE_KEY not in st.session_state:
-    st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
-
-def _get_df_live() -> pd.DataFrame:
-    df = st.session_state.get(DF_LIVE_KEY)
-    if df is None or not isinstance(df, pd.DataFrame):
-        df = pd.DataFrame(columns=COLS_CLIENTS)
-        st.session_state[DF_LIVE_KEY] = df
-    return df.copy()
-
-def _get_df_live_safe() -> pd.DataFrame:
+def load_last_paths() -> Tuple[str, str, str]:
+    if not os.path.exists(MEMO_FILE):
+        return "", "", ""
     try:
-        return _get_df_live()
-    except Exception:
-        df = pd.DataFrame(columns=COLS_CLIENTS)
-        st.session_state[DF_LIVE_KEY] = df
-        return df.copy()
-
-def _set_df_live(df: pd.DataFrame) -> None:
-    st.session_state[DF_LIVE_KEY] = df.copy()
-
-def _persist_clients_cache(df: pd.DataFrame) -> None:
-    try:
-        buf = BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Clients")
-        with open(CACHE_CLIENTS, "wb") as f:
-            f.write(buf.getvalue())
-    except Exception:
-        pass
-
-# -------------------------
-# UI bootstrap (sidebar)
-# -------------------------
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.title(APP_TITLE)
-
-st.sidebar.header("📂 Fichiers")
-last_clients_path = ""
-last_visa_path = ""
-try:
-    if os.path.exists(MEMO_FILE):
         with open(MEMO_FILE, "r", encoding="utf-8") as f:
-            d = json.load(f)
-            last_clients_path = d.get("clients", "")
-            last_visa_path = d.get("visa", "")
-except Exception:
-    pass
+            data = json.load(f)
+        return data.get("clients", ""), data.get("visa", ""), data.get("save_dir", "")
+    except Exception:
+        return "", "", ""
 
-up_clients = st.sidebar.file_uploader("Clients (xlsx/xls/xlsm/csv) — inclure feuille ComptaCli pour fiche", type=["xlsx","xls","xlsm","csv"], key=skey("up_clients"))
-up_visa = st.sidebar.file_uploader("Visa (xlsx/xls/xlsm/csv)", type=["xlsx","xls","xlsm","csv"], key=skey("up_visa"))
-clients_path_in = st.sidebar.text_input("ou chemin local Clients (optionnel)", value=last_clients_path or "", key=skey("cli_path"))
-visa_path_in = st.sidebar.text_input("ou chemin local Visa (optionnel)", value=last_visa_path or "", key=skey("vis_path"))
-
-if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
+def save_last_paths(clients_path: str, visa_path: str, save_dir: str) -> None:
+    data = {"clients": clients_path or "", "visa": visa_path or "", "save_dir": save_dir or ""}
     try:
         with open(MEMO_FILE, "w", encoding="utf-8") as f:
-            json.dump({"clients": clients_path_in or "", "visa": visa_path_in or ""}, f, ensure_ascii=False, indent=2)
-        st.sidebar.success("Chemins sauvegardés.")
-    except Exception:
-        st.sidebar.error("Impossible de sauvegarder les chemins.")
-
-# Save uploaded bytes and try to detect ComptaCli sheet
-clients_src_for_read = None
-visa_src_for_read = None
-uploaded_comptacli_df = None
-
-# If cached clients exist, use it by default (persisted from previous imports/edits)
-if os.path.exists(CACHE_CLIENTS) and up_clients is None and not clients_path_in:
-    clients_src_for_read = CACHE_CLIENTS
-
-if up_clients is not None:
-    try:
-        clients_bytes = up_clients.getvalue()
-        try:
-            xls_all = pd.read_excel(BytesIO(clients_bytes), sheet_name=None, engine="openpyxl")
-        except Exception:
-            xls_all = None
-        if isinstance(xls_all, dict):
-            for name, df_sheet in xls_all.items():
-                df_sheet = _normalize_incoming_columns(df_sheet)
-                if "comptacli" in canonical_key(name):
-                    parsed = parse_fiche_from_sheet(df_sheet)
-                    if parsed is not None:
-                        uploaded_comptacli_df = parsed
-            # persist clients/visa sheets to cache files
-            for name, df_sheet in xls_all.items():
-                df_sheet = _normalize_incoming_columns(df_sheet)
-                if canonical_key(name) in (canonical_key(SHEET_CLIENTS), canonical_key("clients")) and isinstance(df_sheet, pd.DataFrame):
-                    buf = BytesIO()
-                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                        df_sheet.to_excel(writer, index=False, sheet_name="Clients")
-                    with open(CACHE_CLIENTS, "wb") as f:
-                        f.write(buf.getvalue())
-                    clients_src_for_read = CACHE_CLIENTS
-                elif canonical_key(name) in (canonical_key(SHEET_VISA), canonical_key("visa")) and isinstance(df_sheet, pd.DataFrame):
-                    buf = BytesIO()
-                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                        df_sheet.to_excel(writer, index=False, sheet_name="Visa")
-                    with open(CACHE_VISA, "wb") as f:
-                        f.write(buf.getvalue())
-                    visa_src_for_read = CACHE_VISA
-            if clients_src_for_read is None:
-                with open(CACHE_CLIENTS, "wb") as f:
-                    f.write(clients_bytes)
-                clients_src_for_read = CACHE_CLIENTS
-        else:
-            with open(CACHE_CLIENTS, "wb") as f:
-                f.write(clients_bytes)
-            clients_src_for_read = CACHE_CLIENTS
-    except Exception:
-        clients_src_for_read = None
-elif clients_path_in:
-    clients_src_for_read = clients_path_in
-elif os.path.exists(CACHE_CLIENTS) and clients_src_for_read is None:
-    clients_src_for_read = CACHE_CLIENTS
-
-if up_visa is not None:
-    try:
-        visa_bytes = up_visa.getvalue()
-        with open(CACHE_VISA, "wb") as f:
-            f.write(visa_bytes)
-        visa_src_for_read = CACHE_VISA
-    except Exception:
-        visa_src_for_read = None
-elif visa_path_in:
-    visa_src_for_read = visa_path_in
-elif os.path.exists(CACHE_VISA):
-    visa_src_for_read = CACHE_VISA
-
-# -------------------------
-# Read raw Clients and Visa tables (if provided)
-# -------------------------
-df_clients_raw: Optional[pd.DataFrame] = None
-df_visa_raw: Optional[pd.DataFrame] = None
-
-try:
-    if clients_src_for_read is not None:
-        maybe = read_any_table(clients_src_for_read, sheet=SHEET_CLIENTS, debug_prefix="[Clients] ")
-        if maybe is None:
-            maybe = read_any_table(clients_src_for_read, sheet=None, debug_prefix="[Clients fallback] ")
-        if isinstance(maybe, pd.DataFrame):
-            df_clients_raw = _normalize_incoming_columns(maybe)
-except Exception:
-    df_clients_raw = None
-
-try:
-    if visa_src_for_read is not None:
-        maybe = read_any_table(visa_src_for_read, sheet=SHEET_VISA, debug_prefix="[Visa] ")
-        if maybe is None:
-            maybe = read_any_table(visa_src_for_read, sheet=None, debug_prefix="[Visa fallback] ")
-        if isinstance(maybe, pd.DataFrame):
-            df_visa_raw = _normalize_incoming_columns(maybe)
-except Exception:
-    df_visa_raw = None
-
-# Build visa maps if visa sheet present
-if isinstance(df_visa_raw, pd.DataFrame) and not df_visa_raw.empty:
-    try:
-        df_visa_raw = df_visa_raw.fillna("")
-        for c in df_visa_raw.columns:
-            try:
-                df_visa_raw[c] = df_visa_raw[c].astype(str).str.strip()
-            except Exception:
-                pass
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
-    df_visa_mapped, _ = map_columns_heuristic(df_visa_raw)
-    try:
-        df_visa_mapped = coerce_category_columns(df_visa_mapped)
-    except Exception:
-        pass
-    raw_vm = {}
-    try:
-        for _, r in df_visa_mapped.iterrows():
-            cat = str(r.get("Categories","")).strip()
-            sub = str(r.get("Sous-categorie","")).strip()
-            if not cat:
-                continue
-            raw_vm.setdefault(cat, [])
-            if sub and sub not in raw_vm[cat]:
-                raw_vm[cat].append(sub)
-    except Exception:
-        raw_vm = {}
-    raw_vm = {k: [s for s in v if s and str(s).strip().lower() != "nan"] for k, v in raw_vm.items()}
-    visa_map = {k.strip(): [s.strip() for s in v] for k, v in raw_vm.items()}
-    visa_map_norm = {canonical_key(k): v for k, v in visa_map.items()}
-    visa_categories = sorted(list(visa_map.keys()))
-    visa_sub_options_map = {}
-    try:
-        cols_to_skip = set(["Categories","Categorie","Sous-categorie"])
-        cols_to_check = [c for c in df_visa_mapped.columns if c not in cols_to_skip]
-        for _, r in df_visa_mapped.iterrows():
-            sub = str(r.get("Sous-categorie","")).strip()
-            if not sub:
-                continue
-            key = canonical_key(sub)
-            for col in cols_to_check:
-                val = r.get(col,"")
-                truthy = False
-                if pd.isna(val):
-                    truthy = False
-                else:
-                    sval = str(val).strip().lower()
-                    if sval in ("1","x","t","true","oui","yes","y"):
-                        truthy = True
-                    else:
-                        try:
-                            if float(sval) == 1.0:
-                                truthy = True
-                        except Exception:
-                            truthy = False
-                if truthy:
-                    visa_sub_options_map.setdefault(key, [])
-                    if col not in visa_sub_options_map[key]:
-                        visa_sub_options_map[key].append(col)
-    except Exception:
-        visa_sub_options_map = {}
 
-globals().update({
-    "visa_map": visa_map if 'visa_map' in locals() else {},
-    "visa_map_norm": visa_map_norm if 'visa_map_norm' in locals() else {},
-    "visa_categories": visa_categories if 'visa_categories' in locals() else [],
-    "visa_sub_options_map": visa_sub_options_map if 'visa_sub_options_map' in locals() else {}
-})
+def skey(*parts: str) -> str:
+    return f"{SID}_" + "_".join([p for p in parts if p])
 
-# -------------------------
-# Initialize live df in session state
-# -------------------------
-df_all = normalize_clients_for_live(df_clients_raw if df_clients_raw is not None else None)
-df_all = recalc_payments_and_solde(df_all)
-if isinstance(df_all, pd.DataFrame) and not df_all.empty:
-    st.session_state[DF_LIVE_KEY] = df_all.copy()
-else:
-    if DF_LIVE_KEY not in st.session_state or st.session_state[DF_LIVE_KEY] is None:
-        st.session_state[DF_LIVE_KEY] = pd.DataFrame(columns=COLS_CLIENTS)
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "_", s.strip().lower())
 
-# -------------------------
-# UI helpers
-# -------------------------
-def unique_nonempty(series):
-    try:
-        vals = series.dropna().astype(str).tolist()
-    except Exception:
-        vals = []
-    out = []
-    for v in vals:
-        s = str(v).strip()
-        if s == "" or s.lower() == "nan":
+def make_client_id(nom: str, dval: date) -> str:
+    return f"{_norm(nom)}_{int(datetime.now().timestamp())}"
+
+def next_dossier(df: pd.DataFrame) -> int:
+    max_dossier = df.get("Dossier N", pd.Series([13056])).astype(str).str.extract(r"(\d+)").fillna(13056).astype(int).max()
+    return max_dossier + 1
+
+def _to_float(x: Any) -> float:
+    return _to_num(x)
+
+def _ensure_dir(pdir: Path) -> None:
+    pdir.mkdir(parents=True, exist_ok=True)
+
+def build_visa_map(dfv: pd.DataFrame) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    vm: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if dfv is None or dfv.empty:
+        return vm
+    cols = [c for c in dfv.columns if _safe_str(c)]
+    if "Categories" not in cols and "Catégorie" in cols:
+        dfv = dfv.rename(columns={"Catégorie": "Categories"})
+    if "Sous-categorie" not in cols and "Sous-catégorie" in cols:
+        dfv = dfv.rename(columns={"Sous-catégorie": "Sous-categorie"})
+    if "Categories" not in dfv.columns or "Sous-categorie" not in dfv.columns:
+        return vm
+    fixed = ["Categories", "Sous-categorie"]
+    option_cols = [c for c in dfv.columns if c not in fixed]
+    for _, row in dfv.iterrows():
+        cat = _safe_str(row.get("Categories", "")).strip()
+        sub = _safe_str(row.get("Sous-categorie", "")).strip()
+        if not cat or not sub:
             continue
-        out.append(s)
-    return sorted(list(dict.fromkeys(out)))
+        vm.setdefault(cat, {})
+        vm[cat].setdefault(sub, {"exclusive": None, "options": []})
+        opts = []
+        for oc in option_cols:
+            val = _safe_str(row.get(oc, "")).strip()
+            if val in ["1", "x", "X", "oui", "Oui", "OUI", "True", "true"]:
+                opts.append(oc)
+        exclusive = None
+        if set([o.upper() for o in opts]) == set(["COS", "EOS"]):
+            exclusive = "radio_group"
+        vm[cat][sub] = {"exclusive": exclusive, "options": opts}
+    return vm
 
-def kpi_html(label: str, value: str, sub: str = "") -> str:
-    html = f"""
-    <div style="border:1px solid rgba(255,255,255,0.04); border-radius:6px; padding:8px 10px; margin:6px 4px;">
-      <div style="font-size:12px; color:#666;">{label}</div>
-      <div style="font-size:18px; font-weight:700; margin-top:4px;">{value}</div>
-      <div style="font-size:11px; color:#888; margin-top:4px;">{sub}</div>
-    </div>
-    """
-    return html
+def visa_option_selector(vm: Dict[str, Any], cat: str, sub: str, keybase: str) -> str:
+    if cat not in vm or sub not in vm[cat]:
+        return sub
+    meta = vm[cat][sub]
+    opts = meta.get("options", [])
+    if not opts:
+        return sub
+    if meta.get("exclusive") == "radio_group" and set([o.upper() for o in opts]) == set(["COS", "EOS"]):
+        pick = st.radio("Options", ["COS", "EOS"], horizontal=True, key=skey(keybase, "opt"))
+        return f"{sub} {pick}"
+    else:
+        picks = st.multiselect("Options", opts, default=[], key=skey(keybase, "opts"))
+        if not picks:
+            return sub
+        return f"{sub} {picks[0]}"
 
-# -------------------------
-# Tabs UI
-# -------------------------
-tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export"])
+def _ensure_time_features(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    if "Date" in df.columns:
+        try:
+            dd = pd.to_datetime(df["Date"], errors="coerce")
+        except Exception:
+            dd = pd.to_datetime(pd.Series([], dtype="datetime64[ns]"))
+        df["_Année_"] = dd.dt.year
+        df["_MoisNum_"] = dd.dt.month
+        df["Mois"] = dd.dt.month.apply(lambda m: f"{int(m):02d}" if pd.notna(m) else "")
+    else:
+        if "_Année_" not in df.columns:
+            df["_Année_"] = pd.NA
+        if "_MoisNum_" not in df.columns:
+            df["_MoisNum_"] = pd.NA
+        if "Mois" not in df.columns:
+            df["Mois"] = ""
+    return df
 
-# ---- Files tab ----
-with tabs[0]:
-    st.header("📂 Fichiers")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Clients")
-        if up_clients is not None:
-            st.text(f"Upload: {getattr(up_clients,'name','')}")
-        elif isinstance(clients_src_for_read, str) and clients_src_for_read:
-            st.text(f"Chargé depuis: {clients_src_for_read}")
-        elif os.path.exists(CACHE_CLIENTS):
-            st.text("Chargé depuis le cache local")
-        if df_clients_raw is None or (isinstance(df_clients_raw, pd.DataFrame) and df_clients_raw.empty):
-            st.warning("Aucun fichier Clients detecté.")
-        else:
-            st.success(f"Clients lus: {df_clients_raw.shape[0]} lignes")
-            try:
-                st.dataframe(df_clients_raw.head(100).reset_index(drop=True), use_container_width=True, height=360)
-            except Exception:
-                st.write(df_clients_raw.head(8))
-    with c2:
-        st.subheader("Visa")
-        if up_visa is not None:
-            st.text(f"Upload: {getattr(up_visa,'name','')}")
-        elif isinstance(visa_src_for_read, str) and visa_src_for_read:
-            st.text(f"Chargé depuis: {visa_src_for_read}")
-        elif os.path.exists(CACHE_VISA):
-            st.text("Chargé depuis le cache local")
-        if df_visa_raw is None or (isinstance(df_visa_raw, pd.DataFrame) and df_visa_raw.empty):
-            st.warning("Aucun fichier Visa detecté.")
-        else:
-            st.success(f"Visa lu: {df_visa_raw.shape[0]} lignes")
-            try:
-                st.dataframe(df_visa_raw.head(100).reset_index(drop=True), use_container_width=True, height=360)
-            except Exception:
-                st.write(df_visa_raw.head(8))
-    st.markdown("---")
-    col_a, col_b = st.columns([1,1])
-    with col_a:
-        if st.button("Réinitialiser mémoire (recharger)"):
-            df_all2 = normalize_clients_for_live(df_clients_raw)
-            df_all2 = recalc_payments_and_solde(df_all2)
-            _set_df_live(df_all2)
-            try:
-                _persist_clients_cache(df_all2)
-            except Exception:
-                pass
-            st.success("Mémoire réinitialisée.")
-            try:
-                st.experimental_rerun()
-            except Exception:
-                pass
-    with col_b:
-        if st.button("Actualiser la lecture"):
-            try:
-                st.experimental_rerun()
-            except Exception:
-                pass
-    # If a ComptaCli was parsed on upload, offer import (and persist)
-    if uploaded_comptacli_df is not None:
-        st.markdown("---")
-        st.info("Fiche ComptaCli détectée dans l'xlsx uploadé.")
-        if st.button("Importer la fiche ComptaCli détectée"):
-            try:
-                df_live = _get_df_live_safe()
-                df_new = normalize_clients_for_live(uploaded_comptacli_df)
-                df_new = recalc_payments_and_solde(df_new)
-                df_live = pd.concat([df_live, df_new], ignore_index=True)
-                df_live = recalc_payments_and_solde(df_live)
-                _set_df_live(df_live)
-                _persist_clients_cache(df_live)
-                st.success("Fiche ComptaCli importée en mémoire et persistée.")
-                st.experimental_rerun()
-            except Exception as e:
-                st.error(f"Erreur import fiche: {e}")
+# =========================
+# Interface Streamlit
+# =========================
 
-# ---- Dashboard tab ----
+st.set_page_config(page_title="Visa Manager", layout="wide")
+st.title(APP_TITLE)
+
+# Barre latérale
+st.sidebar.header("📂 Fichiers")
+last_clients, last_visa, last_save_dir = load_last_paths()
+
+mode = st.sidebar.radio(
+    "Mode de chargement",
+    ["Un fichier (Clients)", "Deux fichiers (Clients & Visa)"],
+    index=0,
+    key=skey("mode")
+)
+
+up_clients = st.sidebar.file_uploader(
+    "Clients (xlsx/csv)", type=["xlsx", "xls", "csv"], key=skey("up_clients")
+)
+up_visa = None
+if mode == "Deux fichiers (Clients & Visa)":
+    up_visa = st.sidebar.file_uploader(
+        "Visa (xlsx/csv)", type=["xlsx", "xls", "csv"], key=skey("up_visa")
+    )
+
+clients_path_in = st.sidebar.text_input("ou chemin local Clients", value=last_clients, key=skey("cli_path"))
+visa_path_in = st.sidebar.text_input("ou chemin local Visa", value=(last_visa if mode != "Un fichier (Clients)" else ""), key=skey("vis_path"))
+save_dir_in = st.sidebar.text_input("Dossier de sauvegarde", value=last_save_dir, key=skey("save_dir"))
+
+if st.sidebar.button("📥 Charger", key=skey("btn_load")):
+    save_last_paths(clients_path_in, visa_path_in, save_dir_in)
+    st.success("Chemins mémorisés. Re-lancement pour prise en compte.")
+    st.rerun()
+
+# Lecture des fichiers
+clients_src = up_clients if up_clients is not None else (clients_path_in if clients_path_in else last_clients)
+df_clients_raw = normalize_clients(read_any_table(clients_src))
+
+if mode == "Deux fichiers (Clients & Visa)":
+    visa_src = up_visa if up_visa is not None else (visa_path_in if visa_path_in else last_visa)
+else:
+    visa_src = up_clients if up_clients is not None else (clients_path_in if clients_path_in else last_clients)
+
+df_visa_raw = read_any_table(visa_src, sheet=SHEET_VISA)
+if df_visa_raw is None:
+    df_visa_raw = read_any_table(visa_src)
+if df_visa_raw is None:
+    df_visa_raw = pd.DataFrame()
+
+# Affichage des fichiers chargés
+with st.expander("📄 Fichiers chargés", expanded=True):
+    st.write("**Clients** :", ("(aucun)" if (df_clients_raw is None or df_clients_raw.empty) else (getattr(clients_src, 'name', str(clients_src)))))
+    st.write("**Visa** :", ("(aucun)" if (df_visa_raw is None or df_visa_raw.empty) else (getattr(visa_src, 'name', str(visa_src)))))
+
+# Construction de la carte Visa
+visa_map = build_visa_map(df_visa_raw)
+
+df_all = _ensure_time_features(df_clients_raw)
+
+# Création des onglets
+tabs = st.tabs([
+    "📄 Fichiers",
+    "📊 Dashboard",
+    "📈 Analyses",
+    "🏦 Escrow",
+    "👤 Compte client",
+    "🧾 Gestion",
+    "📄 Visa (aperçu)",
+    "💾 Export",
+])
+
+# Onglet Dashboard
 with tabs[1]:
     st.subheader("📊 Dashboard")
-    df_live_view = recalc_payments_and_solde(_get_df_live_safe())
-    if df_live_view is None or df_live_view.empty:
-        st.info("Aucune donnée en mémoire.")
+    if df_all is None or df_all.empty:
+        st.info("Aucun client chargé. Chargez les fichiers dans la barre latérale.")
     else:
-        # derive years and months from Date column
-        date_col_candidates = [c for c in df_live_view.columns if "date" in canonical_key(c)]
-        date_col = "Date" if "Date" in df_live_view.columns else (date_col_candidates[0] if date_col_candidates else None)
-        if date_col is None:
-            st.warning("Aucune colonne Date détectée — les filtres par année/mois et graphiques temporels sont désactivés.")
-            years = []
-        else:
-            df_live_view[date_col] = pd.to_datetime(df_live_view[date_col], errors="coerce")
-            df_live_view["_year_"] = df_live_view[date_col].dt.year
-            df_live_view["_month_"] = df_live_view[date_col].dt.month
-            years = sorted([int(y) for y in df_live_view["_year_"].dropna().unique().tolist()])
+        cats = sorted(df_all["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all.columns else []
+        subs = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all.columns else []
+        visas = sorted(df_all["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all.columns else []
+        years = sorted(pd.to_numeric(df_all["_Année_"], errors="coerce").dropna().astype(int).unique().tolist())
 
-        # Filters: Category, Subcategory, Year, Month or custom range
-        fcol1, fcol2, fcol3 = st.columns([1.2,1.2,1.6])
-        with fcol1:
-            cats = [""] + (unique_nonempty(df_live_view["Categories"]) if "Categories" in df_live_view.columns else [])
-            sel_cat = st.selectbox("Catégorie", options=cats, index=0, key=skey("dash","cat"))
-        with fcol2:
-            subs = [""] + (unique_nonempty(df_live_view["Sous-categorie"]) if "Sous-categorie" in df_live_view.columns else [])
-            sel_sub = st.selectbox("Sous-catégorie", options=subs, index=0, key=skey("dash","sub"))
-        with fcol3:
-            st.markdown("Filtrage temporel")
-            timeframe_mode = st.selectbox("Mode temporel", options=["Année+Mois (rapide)","Plage libre (from/to)","Comparer deux périodes"], index=0, key=skey("dash","tmode"))
+        a1, a2, a3, a4 = st.columns([1, 1, 1, 1])
+        fc = a1.multiselect("Catégories", cats, default=[], key=skey("dash", "cats"))
+        fs = a2.multiselect("Sous-catégories", subs, default=[], key=skey("dash", "subs"))
+        fv = a3.multiselect("Visa", visas, default=[], key=skey("dash", "visas"))
+        fy = a4.multiselect("Année", years, default=[], key=skey("dash", "years"))
 
-        # helper to filter by year+month or range
-        def apply_time_filter(df, mode="Année+Mois (rapide)", year=None, month=None, start=None, end=None):
-            out = df.copy()
-            if mode == "Année+Mois (rapide)":
-                if year:
-                    out = out[out["_year_"] == int(year)]
-                    if month and month != "Tous":
-                        out = out[out["_month_"] == int(month)]
-            elif mode == "Plage libre (from/to)":
-                if start:
-                    out = out[out[date_col] >= pd.to_datetime(start)]
-                if end:
-                    out = out[out[date_col] <= pd.to_datetime(end)]
-            return out
+        view = df_all.copy()
+        if fc:
+            view = view[view["Categories"].astype(str).isin(fc)]
+        if fs:
+            view = view[view["Sous-categorie"].astype(str).isin(fs)]
+        if fv:
+            view = view[view["Visa"].astype(str).isin(fv)]
+        if fy:
+            view = view[view["_Année_"].isin(fy)]
 
-        # UI for each mode
-        if timeframe_mode == "Année+Mois (rapide)":
-            c1, c2 = st.columns([1,1])
-            with c1:
-                yrs = [""] + [str(y) for y in years]
-                sel_year = st.selectbox("Année", options=yrs, index=0, key=skey("dash","year"))
-            with c2:
-                months = ["Tous"] + [str(i) for i in range(1,13)]
-                sel_month = st.selectbox("Mois", options=months, index=0, key=skey("dash","month"))
-            # filter view
-            view = df_live_view.copy()
-            if sel_cat:
-                view = view[view["Categories"].astype(str) == sel_cat]
-            if sel_sub:
-                view = view[view["Sous-categorie"].astype(str) == sel_sub]
-            if sel_year:
-                view = apply_time_filter(view, mode="Année+Mois (rapide)", year=int(sel_year), month=(None if sel_month=="Tous" else int(sel_month)))
-        elif timeframe_mode == "Plage libre (from/to)":
-            c1, c2 = st.columns([1,1])
-            with c1:
-                start_date = st.date_input("Date début", value=None, key=skey("dash","start"))
-            with c2:
-                end_date = st.date_input("Date fin", value=None, key=skey("dash","end"))
-            view = df_live_view.copy()
-            if sel_cat:
-                view = view[view["Categories"].astype(str) == sel_cat]
-            if sel_sub:
-                view = view[view["Sous-categorie"].astype(str) == sel_sub]
-            view = apply_time_filter(view, mode="Plage libre (from/to)", start=start_date, end=end_date)
-        else:  # Compare two periods
-            st.markdown("Période A")
-            a_col1, a_col2 = st.columns([1,1])
-            with a_col1:
-                yrs = [""] + [str(y) for y in years]
-                a_year = st.selectbox("Année A", options=yrs, index=0, key=skey("dash","ayear"))
-            with a_col2:
-                a_months = ["Tous"] + [str(i) for i in range(1,13)]
-                a_month = st.selectbox("Mois A", options=a_months, index=0, key=skey("dash","amonth"))
-            st.markdown("Période B")
-            b_col1, b_col2 = st.columns([1,1])
-            with b_col1:
-                b_year = st.selectbox("Année B", options=yrs, index=0, key=skey("dash","byear"))
-            with b_col2:
-                b_month = st.selectbox("Mois B", options=a_months, index=0, key=skey("dash","bmonth"))
-            # build views for A and B
-            base = df_live_view.copy()
-            if sel_cat:
-                base = base[base["Categories"].astype(str) == sel_cat]
-            if sel_sub:
-                base = base[base["Sous-categorie"].astype(str) == sel_sub]
-            viewA = base.copy()
-            viewB = base.copy()
-            if a_year:
-                viewA = apply_time_filter(viewA, mode="Année+Mois (rapide)", year=int(a_year), month=(None if a_month=="Tous" else int(a_month)))
-            if b_year:
-                viewB = apply_time_filter(viewB, mode="Année+Mois (rapide)", year=int(b_year), month=(None if b_month=="Tous" else int(b_month)))
-            # compute KPIs side-by-side
-            def compute_kpis(df):
-                montant_col = detect_montant_column(df) or "Montant honoraires (US $)"
-                autres_col = detect_autres_column(df) or "Autres frais (US $)"
-                total_honoraires = float(df.get(montant_col,0).apply(lambda x: _to_num(x)).sum())
-                total_autres = float(df.get(autres_col,0).apply(lambda x: _to_num(x)).sum())
-                acomptes_sum = 0.0
-                for ac in detect_acompte_columns(df):
-                    acomptes_sum += float(df.get(ac,0).apply(lambda x: _to_num(x)).sum())
-                count = len(df)
-                solde = total_honoraires + total_autres - acomptes_sum
-                return {"count":count,"hon":total_honoraires,"autres":total_autres,"acomptes":acomptes_sum,"solde":solde}
-            kpiA = compute_kpis(viewA)
-            kpiB = compute_kpis(viewB)
-            st.markdown("### Comparaison Période A vs B")
-            cA, cB = st.columns(2)
-            with cA:
-                st.markdown(f"**Période A** — {a_year or '—'} / {a_month or 'Tous'}")
-                st.markdown(f"- Dossiers: {kpiA['count']}")
-                st.markdown(f"- Honoraires: {_fmt_money(kpiA['hon'])}")
-                st.markdown(f"- Acomptes: {_fmt_money(kpiA['acomptes'])}")
-                st.markdown(f"- Solde: {_fmt_money(kpiA['solde'])}")
-            with cB:
-                st.markdown(f"**Période B** — {b_year or '—'} / {b_month or 'Tous'}")
-                st.markdown(f"- Dossiers: {kpiB['count']}")
-                st.markdown(f"- Honoraires: {_fmt_money(kpiB['hon'])}")
-                st.markdown(f"- Acomptes: {_fmt_money(kpiB['acomptes'])}")
-                st.markdown(f"- Solde: {_fmt_money(kpiB['solde'])}")
-            # small bar chart comparison
-            comp_df = pd.DataFrame([
-                {"metric":"Dossiers","A":kpiA["count"],"B":kpiB["count"]},
-                {"metric":"Honoraires","A":kpiA["hon"],"B":kpiB["hon"]},
-                {"metric":"Acomptes","A":kpiA["acomptes"],"B":kpiB["acomptes"]},
-                {"metric":"Solde","A":kpiA["solde"],"B":kpiB["solde"]}
-            ])
-            if PLOTLY_AVAILABLE:
-                fig = go.Figure(data=[
-                    go.Bar(name='Période A', x=comp_df['metric'], y=comp_df['A']),
-                    go.Bar(name='Période B', x=comp_df['metric'], y=comp_df['B'])
-                ])
-                fig.update_layout(barmode='group', height=360, title="Comparaison métriques")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.write(comp_df)
-            # show small tables of raw viewA/viewB if requested
-            if st.checkbox("Voir listes Période A / B", value=False):
-                st.markdown("Période A (extrait)")
-                st.dataframe(viewA.reset_index(drop=True), use_container_width=True, height=200)
-                st.markdown("Période B (extrait)")
-                st.dataframe(viewB.reset_index(drop=True), use_container_width=True, height=200)
-            # skip default charts for compare mode
-          
+        k1, k2, k3, k4, k5 = st.columns([1, 1, 1, 1, 1])
+        k1.metric("Dossiers", f"{len(view)}")
+        total = (view["Montant honoraires (US $)"].apply(_to_num) + view["Autres frais (US $)"].apply(_to_num)).sum()
+        paye = view["Payé"].apply(_to_num).sum()
+        solde = view["Solde"].apply(_to_num).sum()
+        env_pct = 0
+        if "Dossiers envoyé" in view.columns and len(view) > 0:
+            env_pct = int(100 * (view["Dossiers envoyé"].apply(_to_num).clip(lower=0, upper=1).sum() / len(view)))
+        k2.metric("Honoraires+Frais", _fmt_money(total))
+        k3.metric("Payé", _fmt_money(paye))
+        k4.metric("Solde", _fmt_money(solde))
+        k5.metric("Envoyés (%)", f"{env_pct}%")
 
-        # Default (non-compare) display of KPIs and small charts
-        view = recalc_payments_and_solde(view)
-        montant_col = detect_montant_column(view) or "Montant honoraires (US $)"
-        autres_col = detect_autres_column(view) or "Autres frais (US $)"
-        acomptes_cols = detect_acompte_columns(view)
-        total_honoraires = float(view.get(montant_col,0).apply(lambda x: _to_num(x)).sum())
-        total_autres = float(view.get(autres_col,0).apply(lambda x: _to_num(x)).sum())
-        total_acomptes = 0.0
-        for ac in acomptes_cols:
-            total_acomptes += float(view.get(ac,0).apply(lambda x: _to_num(x)).sum())
-        cols_k = st.columns(3)
-        cols_k[0].markdown(kpi_html("Dossiers", f"{len(view):,}"), unsafe_allow_html=True)
-        cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
-        cols_k[2].markdown(kpi_html("Solde total", _fmt_money(total_honoraires + total_autres - total_acomptes)), unsafe_allow_html=True)
+        if not view.empty and "Categories" in view.columns:
+            vc = view["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nombre")
+            st.bar_chart(vc.set_index("Categorie"))
 
-        st.markdown("### Aperçu clients (filtré)")
-        try:
-            display_df = view.copy()
-            for mc in [montant_col, autres_col, "Payé", "Solde"]:
-                if mc in display_df.columns:
-                    display_df[mc] = display_df[mc].apply(lambda x: _fmt_money(_to_num(x)))
-            st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=360)
-        except Exception:
-            st.write("Impossible d'afficher le tableau.")
+        if not view.empty and "Mois" in view.columns:
+            tmp = view.copy()
+            tmp["Mois"] = tmp["Mois"].astype(str)
+            g = tmp.groupby("Mois", as_index=False).agg({
+                "Montant honoraires (US $)": "sum",
+                "Autres frais (US $)": "sum",
+                "Payé": "sum",
+                "Solde": "sum",
+            }).sort_values("Mois")
+            g = g.fillna(0)
+            g = g.set_index("Mois")
+            st.bar_chart(g)
 
-# ---- Analyses tab ----
+        show_cols = [c for c in [
+            "Dossier N", "ID_Client", "Nom", "Date", "Mois", "Categories", "Sous-categorie", "Visa",
+            "Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde", "Commentaires",
+            "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé", "RFE"
+        ] if c in view.columns]
+
+        detail = view.copy()
+        for c in ["Montant honoraires (US $)", "Autres frais (US $)", "Payé", "Solde"]:
+            if c in detail.columns:
+                detail[c] = detail[c].apply(_to_num).map(_fmt_money)
+        if "Date" in detail.columns:
+            try:
+                detail["Date"] = pd.to_datetime(detail["Date"], errors="coerce").dt.date.astype(str)
+            except Exception:
+                detail["Date"] = detail["Date"].astype(str)
+
+        sort_keys = [c for c in ["_Année_", "_MoisNum_", "Categories", "Nom"] if c in detail.columns]
+        detail_sorted = detail.sort_values(by=sort_keys) if sort_keys else detail
+        st.dataframe(detail_sorted[show_cols].reset_index(drop=True), use_container_width=True, key=skey("dash", "table"))
+
+# Onglet Analyses
 with tabs[2]:
     st.subheader("📈 Analyses")
-    df_ = recalc_payments_and_solde(_get_df_live_safe())
-    if df_ is None or df_.empty:
-        st.info("Aucune donnée pour analyser.")
+    if df_all is None or df_all.empty:
+        st.info("Aucune donnée client.")
     else:
-        # ensure date
-        date_col_candidates = [c for c in df_.columns if "date" in canonical_key(c)]
-        date_col = "Date" if "Date" in df_.columns else (date_col_candidates[0] if date_col_candidates else None)
-        if date_col is None:
-            st.warning("Aucune colonne 'Date' détectée - analyses temporelles désactivées.")
-        else:
-            df_[date_col] = pd.to_datetime(df_[date_col], errors="coerce")
-            df_["_year_"] = df_[date_col].dt.year
-            df_["_month_"] = df_[date_col].dt.month
-            # Time series: honoraires per month
-            monto = detect_montant_column(df_) or "Montant honoraires (US $)"
-            ts = df_.groupby([df_[date_col].dt.to_period("M")])[monto].sum().reset_index()
-            ts[date_col] = ts[date_col].dt.to_timestamp()
-            st.markdown("#### Série temporelle mensuelle - Montant honoraires")
-            if PLOTLY_AVAILABLE:
-                fig = px.line(ts, x=date_col, y=monto, markers=True, title="Montant honoraires par mois")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.line_chart(ts.set_index(date_col)[monto])
-            # Heatmap year x month
-            st.markdown("#### Heatmap Année x Mois (Montant honoraires)")
-            pivot = df_.groupby([df_["_year_"], df_["_month_"]])[monto].sum().unstack(fill_value=0)
-            if PLOTLY_AVAILABLE:
-                fig = go.Figure(data=go.Heatmap(
-                    z=pivot.values,
-                    x=[f"{m:02d}" for m in pivot.columns],
-                    y=[str(y) for y in pivot.index],
-                    colorscale="Viridis"
-                ))
-                fig.update_layout(title="Heatmap Montants par Mois/Année", xaxis_title="Mois", yaxis_title="Année", height=420)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.dataframe(pivot)
-            # Category treemap
-            st.markdown("#### Répartition par Catégorie")
-            cat_col = "Categories" if "Categories" in df_.columns else None
-            if cat_col:
-                cat_agg = df_.groupby(cat_col)[monto].sum().reset_index().sort_values(monto, ascending=False)
-                if PLOTLY_AVAILABLE:
-                    fig = px.treemap(cat_agg, path=[cat_col], values=monto, title="Montant par Catégorie")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.bar_chart(cat_agg.set_index(cat_col)[monto])
-            # Top N clients
-            st.markdown("#### Top N clients par Montant honoraires")
-            try:
-                topn = int(st.slider("Top N", 5, 50, 10, key=skey("anal","topn")))
-            except Exception:
-                topn = 10
-            top_clients = df_.groupby("Nom")[monto].sum().reset_index().sort_values(monto, ascending=False).head(topn)
-            if PLOTLY_AVAILABLE:
-                fig = px.bar(top_clients, x="Nom", y=monto, title=f"Top {topn} clients", labels={monto:"Montant"})
-                fig.update_layout(xaxis_tickangle=-45, height=420)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.dataframe(top_clients)
-            # Comparison A vs B quick UI (reuse dashboard choices)
-            st.markdown("#### Comparaison rapide de deux périodes (Année+Mois)")
-            colA1, colA2, colB1, colB2 = st.columns([1,1,1,1])
-            with colA1:
-                years = sorted(df_["_year_"].dropna().unique().astype(int).tolist())
-                a_year = st.selectbox("Année A", options=[""]+ [str(y) for y in years], index=0, key=skey("anal","ayear"))
-            with colA2:
-                a_month = st.selectbox("Mois A", options=["Tous"] + [str(i) for i in range(1,13)], index=0, key=skey("anal","amonth"))
-            with colB1:
-                b_year = st.selectbox("Année B", options=[""]+ [str(y) for y in years], index=0, key=skey("anal","byear"))
-            with colB2:
-                b_month = st.selectbox("Mois B", options=["Tous"] + [str(i) for i in range(1,13)], index=0, key=skey("anal","bmonth"))
-            if st.button("Comparer maintenant", key=skey("anal","compare_btn")):
-                base = df_.copy()
-                def subset(df, y, m):
-                    out = df.copy()
-                    if y:
-                        out = out[out["_year_"] == int(y)]
-                    if m and m != "Tous":
-                        out = out[out["_month_"] == int(m)]
-                    return out
-                A = subset(base, a_year, a_month)
-                B = subset(base, b_year, b_month)
-                def kpis(d):
-                    hon = float(d.get(monto,0).apply(lambda x: _to_num(x)).sum())
-                    acom = 0.0
-                    for ac in detect_acompte_columns(d):
-                        acom += float(d.get(ac,0).apply(lambda x: _to_num(x)).sum())
-                    return {"count":len(d),"hon":hon,"acom":acom,"solde":hon - acom}
-                ka = kpis(A); kb = kpis(B)
-                st.markdown(f"Période A: {a_year or '—'} / {a_month or 'Tous'} — Période B: {b_year or '—'} / {b_month or 'Tous'}")
-                c1,c2 = st.columns(2)
-                with c1:
-                    st.write(ka)
-                with c2:
-                    st.write(kb)
-                comp_df = pd.DataFrame([
-                    {"metric":"Dossiers","A":ka["count"],"B":kb["count"]},
-                    {"metric":"Honoraires","A":ka["hon"],"B":kb["hon"]},
-                    {"metric":"Acomptes","A":ka["acom"],"B":kb["acom"]},
-                    {"metric":"Solde","A":ka["solde"],"B":kb["solde"]}
-                ])
-                if PLOTLY_AVAILABLE:
-                    fig = go.Figure(data=[go.Bar(name='A', x=comp_df['metric'], y=comp_df['A']), go.Bar(name='B', x=comp_df['metric'], y=comp_df['B'])])
-                    fig.update_layout(barmode='group', height=420)
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.dataframe(comp_df)
+        yearsA = sorted(pd.to_numeric(df_all["_Annee_"], errors="coerce").dropna().astype(int).unique().tolist())
+        monthsA = [f"{m:02d}" for m in range(1, 13)]
+        catsA = sorted(df_all["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all.columns else []
+        subsA = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all.columns else []
+        visasA = sorted(df_all["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all.columns else []
 
-# ---- Add tab ----
+        b1, b2, b3, b4, b5 = st.columns(5)
+        fy = b1.multiselect("Année", yearsA, default=[], key=skey("an", "years"))
+        fm = b2.multiselect("Mois (MM)", monthsA, default=[], key=skey("an", "months"))
+        fc = b3.multiselect("Catégories", catsA, default=[], key=skey("an", "cats"))
+        fs = b4.multiselect("Sous-catégories", subsA, default=[], key=skey("an", "subs"))
+        fv = b5.multiselect("Visa", visasA, default=[], key=skey("an", "visas"))
+
+        dfA = df_all.copy()
+        if fy:
+            dfA = dfA[dfA["_Annee_"].isin(fy)]
+        if fm:
+            dfA = dfA[dfA["Mois"].astype(str).isin(fm)]
+        if fc:
+            dfA = dfA[dfA["Categories"].astype(str).isin(fc)]
+        if fs:
+            dfA = dfA[dfA["Sous-categorie"].astype(str).isin(fs)]
+        if fv:
+            dfA = dfA[dfA["Visa"].astype(str).isin(fv)]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Dossiers", f"{len(dfA)}")
+        c2.metric("Honoraires", _fmt_money(dfA["Montant honoraires (US $)"].apply(_to_num).sum()))
+        c3.metric("Payé", _fmt_money(dfA["Payé"].apply(_to_num).sum()))
+        c4.metric("Solde", _fmt_money(dfA["Solde"].apply(_to_num).sum()))
+
+        if not dfA.empty and "Categories" in dfA.columns:
+            total_cnt = max(1, len(dfA))
+            rep = dfA["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nbr")
+            rep["%"] = (rep["Nbr"] / total_cnt * 100).round(1)
+            st.dataframe(rep, use_container_width=True, hide_index=True, key=skey("an", "rep_cat"))
+
+        if not dfA.empty and "Sous-categorie" in dfA.columns:
+            total_cnt = max(1, len(dfA))
+            rep2 = dfA["Sous-categorie"].value_counts().rename_axis("Sous-categorie").reset_index(name="Nbr")
+            rep2["%"] = (rep2["Nbr"] / total_cnt * 100).round(1)
+            st.dataframe(rep2, use_container_width=True, hide_index=True, key=skey("an", "rep_sub"))
+
+        ca1, ca2, ca3 = st.columns(3)
+        pa_years = ca1.multiselect("Années (A)", yearsA, default=[], key=skey("cmp", "ya"))
+        pa_month = ca2.multiselect("Mois (A)", monthsA, default=[], key=skey("cmp", "ma"))
+        pa_cat = ca3.multiselect("Catégories (A)", catsA, default=[], key=skey("cmp", "ca"))
+
+        cb1, cb2, cb3 = st.columns(3)
+        pb_years = cb1.multiselect("Années (B)", yearsA, default=[], key=skey("cmp", "yb"))
+        pb_month = cb2.multiselect("Mois (B)", monthsA, default=[], key=skey("cmp", "mb"))
+        pb_cat = cb3.multiselect("Catégories (B)", catsA, default=[], key=skey("cmp", "cb"))
+
+        def _slice(df, ys, ms, cs):
+            s = df.copy()
+            if ys:
+                s = s[s["_Annee_"].isin(ys)]
+            if ms:
+                s = s[s["Mois"].astype(str).isin(ms)]
+            if cs:
+                s = s[s["Categories"].astype(str).isin(cs)]
+            return s
+
+        A = _slice(df_all, pa_years, pa_month, pa_cat)
+        B = _slice(df_all, pb_years, pb_month, pb_cat)
+
+        def _kpis(df):
+            return {
+                "Dossiers": len(df),
+                "Honoraires": df["Montant honoraires (US $)"].apply(_to_num).sum(),
+                "Payé": df["Payé"].apply(_to_num).sum(),
+                "Solde": df["Solde"].apply(_to_num).sum(),
+            }
+
+        kA, kB = _kpis(A), _kpis(B)
+        dcmp = pd.DataFrame({
+            "KPI": ["Dossiers", "Honoraires", "Payé", "Solde"],
+            "A": [kA["Dossiers"], kA["Honoraires"], kA["Payé"], kA["Solde"]],
+            "B": [kB["Dossiers"], kB["Honoraires"], kB["Payé"], kB["Solde"]],
+            "Δ (B - A)": [kB["Dossiers"] - kA["Dossiers"], kB["Honoraires"] - kA["Honoraires"], kB["Payé"] - kA["Payé"], kB["Solde"] - kA["Solde"]],
+        })
+        for c in ["A", "B", "Δ (B - A)"]:
+            dcmp.loc[1:3, c] = dcmp.loc[1:3, c].astype(float).map(_fmt_money)
+        st.dataframe(dcmp, use_container_width=True, hide_index=True, key=skey("an", "cmp_table"))
+
+# Onglet Escrow
 with tabs[3]:
-    st.subheader("➕ Ajouter un nouveau client")
-    df_live = _get_df_live_safe()
-    next_dossier_num = get_next_dossier_numeric(df_live)
-    next_dossier = str(next_dossier_num)
-    next_id_client = make_id_client_datebased(df_live)
-    st.markdown(f"**ID_Client (auto)**: {next_id_client}")
-    st.markdown(f"**Dossier N (auto)**: {next_dossier}")
-
-    add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
-    add_nom = st.text_input("Nom du client", value="", placeholder="Nom complet du client", key=skey("addtab","nom"))
-
-    categories_options = visa_categories if visa_categories else (unique_nonempty(df_live["Categories"]) if "Categories" in df_live.columns else [])
-    r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
-    with r3c1:
-        add_cat = st.selectbox("Catégorie", options=[""] + categories_options, index=0, key=skey("addtab","cat"))
-    with r3c2:
-        add_sub_options = []
-        if isinstance(add_cat, str) and add_cat.strip():
-            cat_key = canonical_key(add_cat)
-            if cat_key in visa_map_norm:
-                add_sub_options = visa_map_norm.get(cat_key, [])[:]
-            else:
-                if add_cat in visa_map:
-                    add_sub_options = visa_map.get(add_cat, [])[:]
-        if not add_sub_options:
-            try:
-                add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
-            except Exception:
-                add_sub_options = []
-        add_sub = st.selectbox("Sous-catégorie", options=[""] + add_sub_options, index=0, key=skey("addtab","sub"))
-    with r3c3:
-        specific_options = get_visa_options(add_cat, add_sub)
-        if specific_options:
-            add_visa = st.selectbox("Visa (options)", options=[""] + specific_options, index=0, key=skey("addtab","visa"))
-        else:
-            add_visa = st.text_input("Visa", value="", key=skey("addtab","visa"))
-
-    r4c1, r4c2 = st.columns([1.4, 1.0])
-    with r4c1:
-        add_montant = st.text_input("Montant honoraires (US $)", value="0", key=skey("addtab","montant"))
-    with r4c2:
-        a1 = st.text_input("Acompte 1", value="0", key=skey("addtab","ac1"))
-    r5c1, r5c2 = st.columns([1.6,1.0])
-    with r5c1:
-        a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
-    with r5c2:
-        st.caption("Mode de règlement")
-        pay_cb = st.checkbox("CB", value=False, key=skey("addtab","pay_cb"))
-        pay_cheque = st.checkbox("Cheque", value=False, key=skey("addtab","pay_cheque"))
-        pay_virement = st.checkbox("Virement", value=False, key=skey("addtab","pay_virement"))
-        pay_venmo = st.checkbox("Venmo", value=False, key=skey("addtab","pay_venmo"))
-
-    add_escrow = st.checkbox("Escrow", value=False, key=skey("addtab","escrow"))
-    add_comments = st.text_area("Commentaires", value="", key=skey("addtab","comments"))
-
-    if st.button("Ajouter", key=skey("addtab","btn_add")):
-        try:
-            new_row = {c: "" for c in COLS_CLIENTS}
-            new_row["ID_Client"] = next_id_client
-            new_row["Dossier N"] = next_dossier
-            new_row["Nom"] = add_nom
-            new_row["Date"] = pd.to_datetime(add_date)
-            new_row["Categories"] = add_cat
-            new_row["Sous-categorie"] = add_sub
-            new_row["Visa"] = add_visa
-            new_row["Montant honoraires (US $)"] = money_to_float(add_montant)
-            new_row["Autres frais (US $)"] = 0.0
-            new_row["Acompte 1"] = money_to_float(a1)
-            new_row["Date Acompte 1"] = pd.to_datetime(a1_date) if a1_date else pd.NaT
-            new_row["Acompte 2"] = 0.0
-            new_row["Acompte 3"] = 0.0
-            new_row["Acompte 4"] = 0.0
-            modes = []
-            if st.session_state.get(skey("addtab","pay_cb"), False): modes.append("CB")
-            if st.session_state.get(skey("addtab","pay_cheque"), False): modes.append("Cheque")
-            if st.session_state.get(skey("addtab","pay_virement"), False): modes.append("Virement")
-            if st.session_state.get(skey("addtab","pay_venmo"), False): modes.append("Venmo")
-            new_row["ModeReglement"] = ",".join(modes)
-            new_row["ModeReglement_Ac1"] = ",".join(modes) if modes else ""
-            new_row["ModeReglement_Ac2"] = ""
-            new_row["ModeReglement_Ac3"] = ""
-            new_row["ModeReglement_Ac4"] = ""
-            new_row["Payé"] = new_row["Acompte 1"]
-            new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - new_row["Payé"]
-            new_row["Solde à percevoir (US $)"] = new_row["Solde"]
-            new_row["Escrow"] = 1 if st.session_state.get(skey("addtab","escrow"), False) else 0
-            new_row["Commentaires"] = add_comments
-            ensure_flag_columns(new_row, DEFAULT_FLAGS)
-            for f in DEFAULT_FLAGS:
-                new_row[f] = 0
-            df_live = _get_df_live_safe()
-            df_live = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
-            df_live = recalc_payments_and_solde(df_live)
-            _set_df_live(df_live)
-            _persist_clients_cache(df_live)
-            st.success(f"Dossier ajouté : ID_Client {next_id_client} — Dossier N {next_dossier}")
-        except Exception as e:
-            st.error(f"Erreur ajout: {e}")
-
-# ---- Gestion tab ----
-with tabs[4]:
-    st.subheader("✏️ / 🗑️ Gestion — Modifier / Supprimer")
-    df_live = _get_df_live_safe()
-    # defensive ensure columns exist
-    for c in COLS_CLIENTS:
-        if c not in df_live.columns:
-            if "Date" in c:
-                df_live[c] = pd.NaT
-            elif c in NUMERIC_TARGETS:
-                df_live[c] = 0.0
-            elif c == "Escrow":
-                df_live[c] = 0
-            elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
-                df_live[c] = 0
-            else:
-                df_live[c] = ""
-    if df_live is None or df_live.empty:
-        st.info("Aucun dossier à modifier ou supprimer.")
+    st.subheader("🏦 Escrow — synthèse")
+    if df_all is None or df_all.empty:
+        st.info("Aucun client.")
     else:
-        choices = [f"{i} | {df_live.at[i,'Dossier N']} | {df_live.at[i,'Nom']}" for i in range(len(df_live))]
-        sel = st.selectbox("Sélectionner ligne à modifier", options=[""] + choices, key=skey("edit","select"))
-        if sel:
-            idx = int(sel.split("|")[0].strip())
-            df_live = recalc_payments_and_solde(df_live)
+        dfE = df_all.copy()
+        if "Escrow" not in dfE.columns:
+            dfE["Escrow"] = 0
+        dfE["Escrow"] = dfE["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ["1", "true", "t", "yes", "oui", "y", "x"] else 0)
+        escrow_view = dfE[dfE["Escrow"] == 1].copy()
+
+        if escrow_view.empty:
+            st.info("Aucun dossier en Escrow.")
+        else:
+            escrow_view["Montant Escrow"] = escrow_view["Acompte 1"].apply(_to_num)
+            escrow_view["Etat"] = escrow_view.apply(lambda r: "Réclamé" if (pd.notna(r.get("Date denvoi")) and r.get("Date denvoi")) else "À réclamer", axis=1)
+            total_escrow = float(escrow_view["Montant Escrow"].sum())
+
+            st.markdown(f"**Nombre dossiers Escrow : {len(escrow_view)}**")
+            st.markdown(f"**Total montants Escrow : {_fmt_money(total_escrow)}**")
+            st.dataframe(escrow_view[["Nom","Dossier N","Date","Date denvoi","Montant Escrow","Etat"]].reset_index(drop=True), use_container_width=True, height=320)
+            st.markdown("#### Historique Escrow")
+            st.dataframe(escrow_view[["Nom","Dossier N","Date","Montant Escrow","Date denvoi","Etat"]].sort_values("Date").reset_index(drop=True), use_container_width=True, height=220)
+            # Export XLSX
+            if st.button("Exporter les dossiers escrow en XLSX"):
+                buf = BytesIO()
+                export_df = escrow_view[["Nom","Dossier N","Date","Date denvoi","Montant Escrow","Etat"]]
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    export_df.to_excel(writer, index=False, sheet_name="Escrow")
+                buf.seek(0)
+                st.download_button("Télécharger XLSX", data=buf.getvalue(), file_name="escrow_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Onglet Compte client
+with tabs[4]:
+    st.subheader("👤 Compte client")
+    if df_all is None or df_all.empty:
+        st.info("Aucun client chargé.")
+    else:
+        left, right = st.columns(2)
+        ids = sorted(df_all["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_all.columns else []
+        noms = sorted(df_all["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_all.columns else []
+
+        sel_id = left.selectbox("ID_Client", [""] + ids, index=0, key=skey("acct", "id"))
+        sel_nom = right.selectbox("Nom", [""] + noms, index=0, key=skey("acct", "nm"))
+
+        subset = df_all.copy()
+        if sel_id:
+            subset = subset[subset["ID_Client"].astype(str) == sel_id]
+        elif sel_nom:
+            subset = subset[subset["Nom"].astype(str) == sel_nom]
+
+        if subset.empty:
+            st.warning("Sélectionnez un client pour afficher le compte.")
+        else:
+            row = subset.iloc[0].to_dict()
+
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Dossier N", _safe_str(row.get("Dossier N", "")))
+            total = float(_to_num(row.get("Montant honoraires (US $)", 0)) + _to_num(row.get("Autres frais (US $)", 0)))
+            r2.metric("Total", _fmt_money(total))
+            r3.metric("Payé", _fmt_money(float(_to_num(row.get("Payé", 0)))))
+            r4.metric("Solde", _fmt_money(float(_to_num(row.get("Solde", 0)))))
+
+            d1, d2, d3 = st.columns(3)
+            d1.write(f"**Catégorie :** {_safe_str(row.get('Categories', ''))}")
+            d1.write(f"**Sous-catégorie :** {_safe_str(row.get('Sous-categorie', ''))}")
+            d1.write(f"**Visa :** {_safe_str(row.get('Visa', ''))}")
+            d2.write(f"**Date :** {_safe_str(row.get('Date', ''))}")
+            d2.write(f"**Mois (MM) :** {_safe_str(row.get('Mois', ''))}")
+            d3.write(f"**Commentaires :** {_safe_str(row.get('Commentaires', ''))}")
+
+            s1, s2 = st.columns(2)
+
+            def sdate(label):
+                val = row.get(label, "")
+                if isinstance(val, (date, datetime)):
+                    return val.strftime("%Y-%m-%d")
+                try:
+                    d = pd.to_datetime(val, errors="coerce")
+                    return d.date().strftime("%Y-%m-%d") if pd.notna(d) else ""
+                except Exception:
+                    return _safe_str(val)
+
+            s1.write(f"- **Dossier envoyé** : {'Oui' if sdate('Date denvoi') else 'Non'} | Date : {sdate('Date denvoi')}")
+            s1.write(f"- **Dossier approuvé** : {'Oui' if sdate('Date dacceptation') else 'Non'} | Date : {sdate('Date dacceptation')}")
+            s2.write(f"- **Dossier refusé** : {'Oui' if sdate('Date de refus') else 'Non'} | Date : {sdate('Date de refus')}")
+            s2.write(f"- **Dossier annulé** : {'Oui' if sdate('Date dannulation') else 'Non'} | Date : {sdate('Date dannulation')}")
+            rfeflag = int(_to_num(row.get("RFE", 0)) or 0)
+            st.write(f"- **RFE** : {'Oui' if rfeflag else 'Non'}")
+
+            mvts = []
+            if "Acompte 1" in row and _to_num(row["Acompte 1"]) > 0:
+                mvts.append({"Libellé": "Acompte 1", "Montant": float(_to_num(row["Acompte 1"]))})
+            if "Acompte 2" in row and _to_num(row["Acompte 2"]) > 0:
+                mvts.append({"Libellé": "Acompte 2", "Montant": float(_to_num(row["Acompte 2"]))})
+            if mvts:
+                dfm = pd.DataFrame(mvts)
+                dfm["Montant"] = dfm["Montant"].map(_fmt_money)
+                st.dataframe(dfm, use_container_width=True, hide_index=True, key=skey("acct", "mvts"))
+            else:
+                st.caption("Aucun acompte enregistré dans le fichier (colonnes « Acompte 1 » / « Acompte 2 »).")
+
+# Onglet Gestion (ajouter/modifier : alerte escrow lors de saisie/modification)
+with tabs[5]:
+    st.subheader("🧾 Gestion (Ajouter / Modifier / Supprimer)")
+    df_live = df_all.copy() if df_all is not None else pd.DataFrame()
+
+    if df_live.empty:
+        st.info("Aucun client à gérer (chargez un fichier Clients).")
+    else:
+        op = st.radio("Action", ["Ajouter", "Modifier", "Supprimer"], horizontal=True, key=skey("crud", "op"))
+
+        cats = sorted(df_visa_raw["Categories"].dropna().astype(str).unique().tolist()) if ("Categories" in df_visa_raw.columns and not df_visa_raw.empty) else sorted(df_live["Categories"].dropna().astype(str).unique().tolist())
+
+        def subs_for(cat):
+            if "Categories" in df_visa_raw.columns and "Sous-categorie" in df_visa_raw.columns:
+                return sorted(df_visa_raw[df_visa_raw["Categories"].astype(str) == cat]["Sous-categorie"].dropna().astype(str).unique().tolist())
+            return sorted(df_live[df_live["Categories"].astype(str) == cat]["Sous-categorie"].dropna().astype(str).unique().tolist())
+
+        if op == "Ajouter":
+            st.markdown("### ➕ Ajouter")
+            c1, c2, c3 = st.columns(3)
+            nom = c1.text_input("Nom", "", key=skey("add", "nom"))
+            dval = _date_for_widget(date.today())
+            dt = c2.date_input("Date de création", value=dval, key=skey("add", "date"))
+            mois = c3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1, 13)], index=int(dval.month) - 1, key=skey("add", "mois"))
+
+            v1, v2, v3 = st.columns(3)
+            cat = v1.selectbox("Catégorie", [""] + cats, index=0, key=skey("add", "cat"))
+            sub = ""
+            if cat:
+                subs = subs_for(cat)
+                sub = v2.selectbox("Sous-catégorie", [""] + subs, index=0, key=skey("add", "sub"))
+            visa_val = v3.text_input("Visa (libre ou dérivé)", sub if sub else "", key=skey("add", "visa"))
+
+            f1, f2 = st.columns(2)
+            honor = f1.number_input("Montant honoraires (US $)", min_value=0.0, value=0.0, step=50.0, format="%.2f", key=skey("add", "h"))
+            other = f2.number_input("Autres frais (US $)", min_value=0.0, value=0.0, step=20.0, format="%.2f", key=skey("add", "o"))
+            acomp1 = st.number_input("Acompte 1", min_value=0.0, value=0.0, step=10.0, format="%.2f", key=skey("add", "a1"))
+            acomp2 = st.number_input("Acompte 2", min_value=0.0, value=0.0, step=10.0, format="%.2f", key=skey("add", "a2"))
+            comm = st.text_area("Commentaires", "", key=skey("add", "com"))
+
+            s1, s2 = st.columns(2)
+            sent_d = s1.date_input("Date denvoi", value=None, key=skey("add", "sentd"))
+            acc_d = s1.date_input("Date dacceptation", value=None, key=skey("add", "accd"))
+            ref_d = s2.date_input("Date de refus", value=None, key=skey("add", "refd"))
+            ann_d = s2.date_input("Date dannulation", value=None, key=skey("add", "annd"))
+            rfe = st.checkbox("RFE", value=False, key=skey("add", "rfe"))
+            escrow_val = st.checkbox("Escrow", value=False, key=skey("add", "escrow"))
+
+            if st.button("💾 Enregistrer", key=skey("add", "save")):
+                if not nom or not cat or not sub:
+                    st.warning("Nom, Catégorie et Sous-catégorie sont requis.")
+                    st.stop()
+                total = float(honor) + float(other)
+                paye = float(acomp1) + float(acomp2)
+                solde = max(0.0, total - paye)
+                new_id = f"{_norm(nom)}-{int(datetime.now().timestamp())}"
+                new_dossier = next_dossier(df_live)
+
+                new_row = {
+                    "ID_Client": new_id,
+                    "Dossier N": new_dossier,
+                    "Nom": nom,
+                    "Date": dt,
+                    "Mois": f"{int(mois):02d}",
+                    "Categories": cat,
+                    "Sous-categorie": sub,
+                    "Visa": visa_val,
+                    "Montant honoraires (US $)": float(honor),
+                    "Autres frais (US $)": float(other),
+                    "Payé": paye,
+                    "Solde": solde,
+                    "Acompte 1": float(acomp1),
+                    "Acompte 2": float(acomp2),
+                    "Commentaires": comm,
+                    "Date denvoi": sent_d,
+                    "Date dacceptation": acc_d,
+                    "Date de refus": ref_d,
+                    "Date dannulation": ann_d,
+                    "RFE": 1 if rfe else 0,
+                    "Escrow": 1 if escrow_val else 0
+                }
+                # --- Alerte escrow lors de saisie ---
+                if new_row.get("Escrow",0) == 1 and pd.notna(new_row.get("Date denvoi")) and new_row.get("Date denvoi"):
+                    montant_escrow = _to_num(new_row.get("Acompte 1",0))
+                    st.info(f"⚠️ Escrow activé : Dossier {new_row.get('Dossier N','')} / Client {new_row.get('Nom','')} — Montant à réclamer : {_fmt_money(montant_escrow)}")
+                df_new = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
+                st.success("Client ajouté (en mémoire). Utilisez l’onglet Export pour sauvegarder.")
+                st.cache_data.clear()
+                st.rerun()
+
+        elif op == "Modifier":
+            st.markdown("### ✏️ Modifier")
+            names = sorted(df_live["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_live.columns else []
+            ids = sorted(df_live["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_live.columns else []
+            m1, m2 = st.columns(2)
+            target_name = m1.selectbox("Nom", [""] + names, index=0, key=skey("mod", "nom"))
+            target_id = m2.selectbox("ID_Client", [""] + ids, index=0, key=skey("mod", "id"))
+
+            mask = None
+            if target_id:
+                mask = (df_live["ID_Client"].astype(str) == target_id)
+            elif target_name:
+                mask = (df_live["Nom"].astype(str) == target_name)
+
+            if not (mask is not None and mask.any()):
+                st.stop()
+
+            idx = df_live[mask].index[0]
             row = df_live.loc[idx].copy()
 
-            def txt(v):
-                if pd.isna(v):
-                    return ""
-                s = str(v)
-                if s.strip().lower() in ("nan","none","na","n/a"):
-                    return ""
-                return s
+            d1, d2, d3 = st.columns(3)
+            nom = d1.text_input("Nom", _safe_str(row.get("Nom", "")), key=skey("mod", "nomv"))
+            dval = _date_for_widget(row.get("Date"))
+            dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
+            mois = d3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1, 13)], index=max(0, int(_safe_str(row.get("Mois", "01"))) - 1), key=skey("mod", "mois"))
 
-            def _safe_row_date_local(colname: str):
-                try:
-                    raw = row.get(colname)
-                except Exception:
-                    raw = None
-                return _date_or_none_safe(raw)
+            v1, v2, v3 = st.columns(3)
+            preset_cat = _safe_str(row.get("Categories", ""))
+            cat = v1.selectbox("Catégorie", [""] + cats, index=(cats.index(preset_cat) + 1 if preset_cat in cats else 0), key=skey("mod", "cat"))
+            sub = _safe_str(row.get("Sous-categorie", ""))
+            if cat:
+                subs = subs_for(cat)
+                sub = v2.selectbox("Sous-catégorie", [""] + subs, index=(subs.index(sub) + 1 if sub in subs else 0), key=skey("mod", "sub"))
+            visa_val = v3.text_input("Visa (libre ou dérivé)", _safe_str(row.get("Visa", "")), key=skey("mod", "visa"))
 
-            def _parse_modes(raw):
-                try:
-                    if pd.isna(raw) or raw is None:
-                        return []
-                    s = str(raw).strip()
-                    if not s:
-                        return []
-                    return [p.strip() for p in s.split(",") if p.strip()]
-                except Exception:
-                    return []
+            f1, f2 = st.columns(2)
+            honor = f1.number_input("Montant honoraires (US $)", min_value=0.0, value=float(_to_num(row.get("Montant honoraires (US $)", 0))), step=50.0, format="%.2f", key=skey("mod", "h"))
+            other = f2.number_input("Autres frais (US $)", min_value=0.0, value=float(_to_num(row.get("Autres frais (US $)", 0))), step=20.0, format="%.2f", key=skey("mod", "o"))
+            acomp1 = st.number_input("Acompte 1", min_value=0.0, value=float(_to_num(row.get("Acompte 1", 0))), step=10.0, format="%.2f", key=skey("mod", "a1"))
+            acomp2 = st.number_input("Acompte 2", min_value=0.0, value=float(_to_num(row.get("Acompte 2", 0))), step=10.0, format="%.2f", key=skey("mod", "a2"))
+            comm = st.text_area("Commentaires", _safe_str(row.get("Commentaires", "")), key=skey("mod", "com"))
 
-            row_modes_general = _parse_modes(row.get("ModeReglement",""))
-            row_mode_ac1 = _parse_modes(row.get("ModeReglement_Ac1","")) or row_modes_general
-            row_mode_ac2 = _parse_modes(row.get("ModeReglement_Ac2",""))
-            row_mode_ac3 = _parse_modes(row.get("ModeReglement_Ac3",""))
-            row_mode_ac4 = _parse_modes(row.get("ModeReglement_Ac4",""))
+            s1, s2 = st.columns(2)
+            sent_d = s1.date_input("Date denvoi", value=_date_for_widget(row.get("Date denvoi")), key=skey("mod", "sentd"))
+            acc_d = s1.date_input("Date dacceptation", value=_date_for_widget(row.get("Date dacceptation")), key=skey("mod", "accd"))
+            ref_d = s2.date_input("Date de refus", value=_date_for_widget(row.get("Date de refus")), key=skey("mod", "refd"))
+            ann_d = s2.date_input("Date dannulation", value=_date_for_widget(row.get("Date dannulation")), key=skey("mod", "annd"))
+            rfe = st.checkbox("RFE", value=bool(int(_to_num(row.get("RFE", 0)) or 0)), key=skey("mod", "rfe"))
+            escrow_val = st.checkbox("Escrow", value=bool(row.get("Escrow",0)), key=skey("mod", "escrow"))
 
-            with st.form(key=skey("form_edit", str(idx))):
-                c_name, c_solde = st.columns([2.5,1])
-                with c_name:
-                    st.markdown(f"### {txt(row.get('Nom',''))}")
-                with c_solde:
-                    try:
-                        sol_due_num = _to_num(row.get("Solde à percevoir (US $)", row.get("Solde",0)))
-                        st.markdown(f"**Solde dû**: {_fmt_money(sol_due_num)}")
-                    except Exception:
-                        st.markdown("**Solde dû**: $0.00")
+            if st.button("💾 Enregistrer les modifications", key=skey("mod", "save")):
+                if not nom or not cat or not sub:
+                    st.warning("Nom, Catégorie et Sous-catégorie sont requis.")
+                    st.stop()
+                total = float(honor) + float(other)
+                paye = float(acomp1) + float(acomp2)
+                solde = max(0.0, total - paye)
 
-                r1c1, r1c2, r1c3 = st.columns([1.4,1.0,1.2])
-                with r1c1:
-                    st.markdown(f"**ID_Client :** {txt(row.get('ID_Client',''))}")
-                with r1c2:
-                    e_dossier = st.text_input("Dossier N", value=txt(row.get("Dossier N","")), key=skey("edit","dossier", str(idx)))
-                with r1c3:
-                    e_date = st.date_input("Date (événement)", value=_safe_row_date_local("Date"), key=skey("edit","date", str(idx)))
+                df_live.at[idx, "Nom"] = nom
+                df_live.at[idx, "Date"] = dt
+                df_live.at[idx, "Mois"] = f"{int(mois):02d}"
+                df_live.at[idx, "Categories"] = cat
+                df_live.at[idx, "Sous-categorie"] = sub
+                df_live.at[idx, "Visa"] = visa_val
+                df_live.at[idx, "Montant honoraires (US $)"] = float(honor)
+                df_live.at[idx, "Autres frais (US $)"] = float(other)
+                df_live.at[idx, "Acompte 1"] = float(acomp1)
+                df_live.at[idx, "Acompte 2"] = float(acomp2)
+                df_live.at[idx, "Payé"] = float(paye)
+                df_live.at[idx, "Solde"] = float(solde)
+                df_live.at[idx, "Commentaires"] = comm
+                df_live.at[idx, "Date denvoi"] = sent_d
+                df_live.at[idx, "Date dacceptation"] = acc_d
+                df_live.at[idx, "Date de refus"] = ref_d
+                df_live.at[idx, "Date dannulation"] = ann_d
+                df_live.at[idx, "RFE"] = 1 if rfe else 0
+                df_live.at[idx, "Escrow"] = 1 if escrow_val else 0
+                # --- Alerte escrow lors de modification ---
+                if df_live.at[idx, "Escrow"] == 1 and pd.notna(df_live.at[idx, "Date denvoi"]) and df_live.at[idx, "Date denvoi"]:
+                    montant_escrow = _to_num(df_live.at[idx, "Acompte 1"])
+                    st.info(f"⚠️ Escrow activé : Dossier {df_live.at[idx,'Dossier N']} / Client {df_live.at[idx,'Nom']} — Montant à réclamer : {_fmt_money(montant_escrow)}")
 
-                # Category / Sous-categorie / Visa
-                c_cat, c_sub, c_visa = st.columns([1.4,1.6,1.6])
-                with c_cat:
-                    cur_cat = txt(row.get("Categories",""))
-                    edit_cat = st.text_input("Catégorie", value=cur_cat, key=skey("edit","cat", str(idx)))
-                with c_sub:
-                    cur_sub = txt(row.get("Sous-categorie",""))
-                    edit_sub = st.text_input("Sous-catégorie", value=cur_sub, key=skey("edit","sub", str(idx)))
-                with c_visa:
-                    cur_visa = txt(row.get("Visa",""))
-                    visa_opts = get_visa_options(edit_cat if 'edit_cat' in locals() else cur_cat, edit_sub if 'edit_sub' in locals() else cur_sub)
-                    if visa_opts:
-                        default_index = 0
-                        if cur_visa in visa_opts:
-                            default_index = visa_opts.index(cur_visa) + 1
-                        edit_visa = st.selectbox("Visa", options=[""]+visa_opts, index=default_index, key=skey("edit","visa", str(idx)))
-                    else:
-                        edit_visa = st.text_input("Visa", value=cur_visa, key=skey("edit","visa", str(idx)))
+                st.success("Modifié (en mémoire). Utilisez Export pour sauvegarder.")
+                st.cache_data.clear()
+                st.rerun()
 
-                # Montants
-                m1, m2, m3 = st.columns([1.2,1.0,1.0])
-                with m1:
-                    e_montant = st.text_input("Montant honoraires (US $)", value=txt(row.get("Montant honoraires (US $)","")), key=skey("edit","montant", str(idx)))
-                with m2:
-                    e_autres = st.text_input("Autres frais (US $)", value=txt(row.get("Autres frais (US $)","")), key=skey("edit","autres", str(idx)))
-                with m3:
-                    try:
-                        total_montant_val = _to_num(e_montant) + _to_num(e_autres)
-                    except Exception:
-                        total_montant_val = _to_num(row.get("Montant honoraires (US $)",0)) + _to_num(row.get("Autres frais (US $)",0))
-                    st.text_input("Montant Total", value=str(total_montant_val), key=skey("edit","montant_total", str(idx)), disabled=True)
+        elif op == "Supprimer":
+            st.markdown("### 🗑️ Supprimer")
+            names = sorted(df_live["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_live.columns else []
+            ids = sorted(df_live["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_live.columns else []
+            d1, d2 = st.columns(2)
+            target_name = d1.selectbox("Nom", [""] + names, index=0, key=skey("del", "nom"))
+            target_id = d2.selectbox("ID_Client", [""] + ids, index=0, key=skey("del", "id"))
 
-                # Acomptes
-                r_ac_1, r_ac_2, r_ac_3, r_ac_4 = st.columns([1.0,1.0,1.0,1.0])
-                with r_ac_1:
-                    e_ac1 = st.text_input("Acompte 1", value=txt(row.get("Acompte 1","")), key=skey("edit","ac1", str(idx)))
-                with r_ac_2:
-                    e_ac2 = st.text_input("Acompte 2", value=txt(row.get("Acompte 2","")), key=skey("edit","ac2", str(idx)))
-                with r_ac_3:
-                    e_ac3 = st.text_input("Acompte 3", value=txt(row.get("Acompte 3","")), key=skey("edit","ac3", str(idx)))
-                with r_ac_4:
-                    e_ac4 = st.text_input("Acompte 4", value=txt(row.get("Acompte 4","")), key=skey("edit","ac4", str(idx)))
+            mask = None
+            if target_id:
+                mask = (df_live["ID_Client"].astype(str) == target_id)
+            elif target_name:
+                mask = (df_live["Nom"].astype(str) == target_name)
 
-                # Dates + modes
-                r_d1, r_d2, r_d3, r_d4 = st.columns([1.0,1.0,1.0,1.0])
-                with r_d1:
-                    e_mode_ac1 = st.multiselect("Mode A1", options=["CB","Cheque","Virement","Venmo"], default=row_mode_ac1, key=skey("edit","mode_ac1", str(idx)))
-                    e_ac1_date = st.date_input("Date Acompte 1", value=_safe_row_date_local("Date Acompte 1"), key=skey("edit","ac1_date", str(idx)))
-                with r_d2:
-                    e_mode_ac2 = st.multiselect("Mode A2", options=["CB","Cheque","Virement","Venmo"], default=row_mode_ac2, key=skey("edit","mode_ac2", str(idx)))
-                    e_ac2_date = st.date_input("Date Acompte 2", value=_safe_row_date_local("Date Acompte 2"), key=skey("edit","ac2_date", str(idx)))
-                with r_d3:
-                    e_mode_ac3 = st.multiselect("Mode A3", options=["CB","Cheque","Virement","Venmo"], default=row_mode_ac3, key=skey("edit","mode_ac3", str(idx)))
-                    e_ac3_date = st.date_input("Date Acompte 3", value=_safe_row_date_local("Date Acompte 3"), key=skey("edit","ac3_date", str(idx)))
-                with r_d4:
-                    e_mode_ac4 = st.multiselect("Mode A4", options=["CB","Cheque","Virement","Venmo"], default=row_mode_ac4, key=skey("edit","mode_ac4", str(idx)))
-                    e_ac4_date = st.date_input("Date Acompte 4", value=_safe_row_date_local("Date Acompte 4"), key=skey("edit","ac4_date", str(idx)))
+            if mask is not None and mask.any():
+                row = df_live[mask].iloc[0]
+                st.write({"Dossier N": row.get("Dossier N", ""), "Nom": row.get("Nom", ""), "Visa": row.get("Visa", "")})
+                if st.button("❗ Confirmer la suppression", key=skey("del", "btn")):
+                    df_new = df_live[~mask].copy()
+                    st.success("Client supprimé (en mémoire). Utilisez Export pour sauvegarder.")
+                    st.cache_data.clear()
+                    st.rerun()
 
-                # Flags + RFE constraint
-                f1, f2, f3, f4 = st.columns([1.0,1.0,1.0,1.0])
-                with f1:
-                    e_flag_envoye = st.checkbox("Dossiers envoyé", value=bool(int(row.get("Dossiers envoyé", 0))) if not pd.isna(row.get("Dossiers envoyé", 0)) else False, key=skey("edit","flag_envoye", str(idx)))
-                with f2:
-                    e_flag_approuve = st.checkbox("Dossier approuvé", value=bool(int(row.get("Dossier approuvé", 0))) if not pd.isna(row.get("Dossier approuvé", 0)) else False, key=skey("edit","flag_approuve", str(idx)))
-                with f3:
-                    e_flag_refuse = st.checkbox("Dossier refusé", value=bool(int(row.get("Dossier refusé", 0))) if not pd.isna(row.get("Dossier refusé", 0)) else False, key=skey("edit","flag_refuse", str(idx)))
-                with f4:
-                    e_flag_annule = st.checkbox("Dossier Annulé", value=bool(int(row.get("Dossier Annulé", 0))) if not pd.isna(row.get("Dossier Annulé", 0)) else False, key=skey("edit","flag_annule", str(idx)))
-
-                e_escrow = st.checkbox("Escrow", value=bool(int(row.get("Escrow", 0))) if not pd.isna(row.get("Escrow", 0)) else False, key=skey("edit","escrow", str(idx)))
-
-                other_flag_set = any([e_flag_envoye, e_flag_approuve, e_flag_refuse, e_flag_annule])
-                if not other_flag_set:
-                    st.markdown("**RFE** (active uniquement si un des états est coché)")
-                    e_flag_rfe = st.checkbox("RFE", value=bool(int(row.get("RFE", 0))) if not pd.isna(row.get("RFE", 0)) else False, key=skey("edit","flag_rfe", str(idx)), disabled=True)
-                else:
-                    e_flag_rfe = st.checkbox("RFE", value=bool(int(row.get("RFE", 0))) if not pd.isna(row.get("RFE", 0)) else False, key=skey("edit","flag_rfe", str(idx)))
-
-                e_comments = st.text_area("Commentaires", value=txt(row.get("Commentaires","")), key=skey("edit","comments", str(idx)))
-
-                save = st.form_submit_button("Enregistrer modifications")
-                if save:
-                    try:
-                        df_live.at[idx, "Dossier N"] = e_dossier
-                        df_live.at[idx, "Nom"] = txt(row.get("Nom",""))
-                        df_live.at[idx, "Date"] = pd.to_datetime(e_date)
-                        df_live.at[idx, "Montant honoraires (US $)"] = money_to_float(e_montant)
-                        df_live.at[idx, "Autres frais (US $)"] = money_to_float(e_autres)
-                        df_live.at[idx, "Acompte 1"] = money_to_float(e_ac1)
-                        df_live.at[idx, "Acompte 2"] = money_to_float(e_ac2)
-                        df_live.at[idx, "Acompte 3"] = money_to_float(e_ac3)
-                        df_live.at[idx, "Acompte 4"] = money_to_float(e_ac4)
-                        df_live.at[idx, "Date Acompte 1"] = pd.to_datetime(e_ac1_date) if e_ac1_date else pd.NaT
-                        df_live.at[idx, "Date Acompte 2"] = pd.to_datetime(e_ac2_date) if e_ac2_date else pd.NaT
-                        df_live.at[idx, "Date Acompte 3"] = pd.to_datetime(e_ac3_date) if e_ac3_date else pd.NaT
-                        df_live.at[idx, "Date Acompte 4"] = pd.to_datetime(e_ac4_date) if e_ac4_date else pd.NaT
-                        df_live.at[idx, "ModeReglement_Ac1"] = ",".join(e_mode_ac1) if isinstance(e_mode_ac1, (list,tuple)) else str(e_mode_ac1)
-                        df_live.at[idx, "ModeReglement_Ac2"] = ",".join(e_mode_ac2) if isinstance(e_mode_ac2, (list,tuple)) else str(e_mode_ac2)
-                        df_live.at[idx, "ModeReglement_Ac3"] = ",".join(e_mode_ac3) if isinstance(e_mode_ac3, (list,tuple)) else str(e_mode_ac3)
-                        df_live.at[idx, "ModeReglement_Ac4"] = ",".join(e_mode_ac4) if isinstance(e_mode_ac4, (list,tuple)) else str(e_mode_ac4)
-                        old_general = parse_modes_global(row.get("ModeReglement",""))
-                        combined = set(old_general + list(e_mode_ac1))
-                        df_live.at[idx, "ModeReglement"] = ",".join(sorted(list(combined)))
-                        df_live.at[idx, "Dossiers envoyé"] = 1 if e_flag_envoye else 0
-                        df_live.at[idx, "Dossier approuvé"] = 1 if e_flag_approuve else 0
-                        df_live.at[idx, "Dossier refusé"] = 1 if e_flag_refuse else 0
-                        df_live.at[idx, "Dossier Annulé"] = 1 if e_flag_annule else 0
-                        if e_flag_rfe and not any([e_flag_envoye, e_flag_approuve, e_flag_refuse, e_flag_annule]):
-                            st.warning("RFE n'a pas été activé car aucun état (envoyé/approuvé/refusé/annulé) n'est coché.")
-                            df_live.at[idx, "RFE"] = 0
-                        else:
-                            df_live.at[idx, "RFE"] = 1 if e_flag_rfe else 0
-                        df_live.at[idx, "Escrow"] = 1 if e_escrow else 0
-                        df_live.at[idx, "Categories"] = edit_cat if 'edit_cat' in locals() else cur_cat
-                        df_live.at[idx, "Sous-categorie"] = edit_sub if 'edit_sub' in locals() else cur_sub
-                        df_live.at[idx, "Visa"] = edit_visa if 'edit_visa' in locals() else cur_visa
-                        df_live.at[idx, "Commentaires"] = e_comments
-                        df_live = recalc_payments_and_solde(df_live)
-                        df_live.at[idx, "Solde à percevoir (US $)"] = df_live.at[idx, "Solde"]
-                        _set_df_live(df_live)
-                        _persist_clients_cache(df_live)
-                        st.success("Modifications enregistrées.")
-                    except Exception as e:
-                        st.error(f"Erreur enregistrement: {e}")
-
-    st.markdown("---")
-    st.markdown("### Supprimer des dossiers")
-    if df_live is None or df_live.empty:
-        st.info("Aucun dossier à supprimer.")
-    else:
-        choices_del = [f"{i} | {df_live.at[i,'Dossier N']} | {df_live.at[i,'Nom']}" for i in range(len(df_live))]
-        selected_to_del = st.multiselect("Sélectionnez les lignes à supprimer", options=choices_del, key=skey("del","select"))
-        if st.button("Supprimer sélection"):
-            if selected_to_del:
-                idxs = [int(s.split("|")[0].strip()) for s in selected_to_del]
-                try:
-                    df_live = df_live.drop(index=idxs).reset_index(drop=True)
-                    df_live = recalc_payments_and_solde(df_live)
-                    _set_df_live(df_live)
-                    _persist_clients_cache(df_live)
-                    st.success(f"{len(idxs)} ligne(s) supprimée(s).")
-                except Exception as e:
-                    st.error(f"Erreur suppression: {e}")
-            else:
-                st.warning("Aucune sélection pour suppression.")
-
-# ---- Compta Client tab ----
-with tabs[5]:
-    st.subheader("💳 Compta Client")
-    df_live = recalc_payments_and_solde(_get_df_live_safe())
-    if df_live is None or df_live.empty:
-        st.info("Aucune donnée en mémoire.")
-    else:
-        # detect Nom and Dossier columns
-        col_nom = None
-        col_dossier = None
-        for c in df_live.columns:
-            if c.strip().lower() == "nom":
-                col_nom = c
-            if c.strip().lower() in ("dossier n", "dossier", "dossier numéro", "dossier no", "dossier n°"):
-                col_dossier = c
-        if col_nom is None:
-            for c in df_live.columns:
-                if "nom" in canonical_key(c) or "client" in canonical_key(c):
-                    col_nom = c; break
-        if col_dossier is None:
-            for c in df_live.columns:
-                if "dossier" in canonical_key(c) or "num" in canonical_key(c) or "numero" in canonical_key(c):
-                    col_dossier = c; break
-        if col_nom is None and col_dossier is None:
-            st.warning("Impossible de trouver les colonnes 'Nom' ou 'Dossier N'. Colonnes disponibles :")
-            st.write(list(df_live.columns))
-        else:
-            choices = []
-            for i in range(len(df_live)):
-                dn = str(df_live.at[i, col_dossier]) if col_dossier in df_live.columns else ""
-                nm = str(df_live.at[i, col_nom]) if col_nom in df_live.columns else ""
-                choices.append(f"{i} | {dn} | {nm}")
-            sel = st.selectbox("Sélectionner un client (par index | Dossier N | Nom)", options=[""] + choices, key=skey("compta","select"))
-            if not sel:
-                st.info("Sélectionne une ligne pour afficher le relevé.")
-            else:
-                idx = int(sel.split("|")[0].strip())
-                df_live = recalc_payments_and_solde(df_live)
-                if idx < 0 or idx >= len(df_live):
-                    st.error("Index sélectionné invalide.")
-                else:
-                    row = df_live.loc[idx]
-                    montant_col = detect_montant_column(df_live) or "Montant honoraires (US $)"
-                    autres_col = detect_autres_column(df_live) or "Autres frais (US $)"
-                    honoraires = _to_num(row.get(montant_col, 0))
-                    autres = _to_num(row.get(autres_col, 0))
-                    total_paye = _to_num(row.get("Payé", 0))
-                    solde = _to_num(row.get("Solde", honoraires + autres - total_paye))
-                    st.markdown(f"### Fiche: {row.get(col_nom,'')} — Dossier {row.get(col_dossier,'')}")
-                    st.markdown(f"- Montant honoraires : {_fmt_money(honoraires)}")
-                    st.markdown(f"- Autres frais : {_fmt_money(autres)}")
-                    st.markdown(f"- Total payé : {_fmt_money(total_paye)}")
-                    st.markdown(f"**Solde dû : {_fmt_money(solde)}**")
-                    st.markdown("---")
-                    acomptes_cols = detect_acompte_columns(df_live)
-                    data_ac = []
-                    for ac in acomptes_cols:
-                        val = _to_num(row.get(ac,0))
-                        date_col = f"Date {ac}" if f"Date {ac}" in df_live.columns else ("Date Acompte 1" if ac=="Acompte 1" else "")
-                        dval = row.get(date_col, "")
-                        mode_col = "ModeReglement_Ac1" if ac=="Acompte 1" else f"ModeReglement_{ac.replace(' ','')}"
-                        mode = row.get(mode_col, "")
-                        if val and val != 0:
-                            dd = ""
-                            if isinstance(dval, pd.Timestamp):
-                                dd = dval.date()
-                            elif isinstance(dval, str) and dval.strip():
-                                dd = dval
-                            data_ac.append({"Acompte": ac, "Montant": _fmt_money(val), "Date": dd, "Mode": mode})
-                    if data_ac:
-                        st.table(data_ac)
-                    else:
-                        st.write("Aucun acompte enregistré.")
-                    st.markdown("---")
-                    if st.button("Exporter relevé client (.xlsx)"):
-                        try:
-                            out_df = pd.DataFrame([{
-                                "ID_Client": row.get("ID_Client",""),
-                                "Dossier N": row.get(col_dossier,"") if col_dossier in row.index else "",
-                                "Nom": row.get(col_nom,""),
-                                "Montant honoraires": honoraires,
-                                "Autres frais": autres,
-                                "Total payé": total_paye,
-                                "Solde": solde
-                            }])
-                            buf = BytesIO()
-                            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                                out_df.to_excel(writer, index=False, sheet_name="Releve")
-                            buf.seek(0)
-                            st.download_button(
-                                "Télécharger XLSX",
-                                data=buf.getvalue(),
-                                file_name=f"releve_client_{str(row.get(col_dossier,'')).replace('/','-')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                        except Exception as e:
-                            st.error(f"Erreur export XLSX: {e}")
-
-
-# ---- Onglet ESCROW (à insérer après Compta Client) ----
-with st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💼 ESCROW","💾 Export"])[6]:
-    st.header("💼 ESCROW")
-    df_live = recalc_payments_and_solde(_get_df_live_safe())
-    escrow_rows = df_live[df_live["Escrow"]==1].copy()
-    escrow_rows["Etat"] = escrow_rows.apply(lambda r: "Réclamé" if pd.notna(r.get("Date Acompte 1")) and r.get("Date Acompte 1" ) else "À réclamer", axis=1)
-    escrow_rows["Montant escrow"] = escrow_rows["Acompte 1"].apply(_to_num)
-    total_escrow = escrow_rows["Montant escrow"].sum()
-    st.markdown(f"**Total dossiers en escrow : {len(escrow_rows)}**")
-    st.markdown(f"**Total montants escrow : {_fmt_money(total_escrow)}**")
-    st.dataframe(escrow_rows[["Nom","Dossier N","Date","Date Acompte 1","Montant escrow","Etat"]].reset_index(drop=True), use_container_width=True, height=380)
-    st.markdown("#### Historique escrow")
-    st.dataframe(escrow_rows[["Nom","Dossier N","Date","Montant escrow","Date Acompte 1","Etat"]].sort_values("Date").reset_index(drop=True), use_container_width=True, height=220)
-    # Export XLSX
-    if st.button("Exporter les dossiers escrow en XLSX"):
-        buf = BytesIO()
-        escrow_export = escrow_rows[["Nom","Dossier N","Date","Date Acompte 1","Montant escrow","Etat"]]
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            escrow_export.to_excel(writer, index=False, sheet_name="Escrow")
-        buf.seek(0)
-        st.download_button("Télécharger XLSX", data=buf.getvalue(), file_name="escrow_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-# ---- Export tab ----
+# Onglet Visa
 with tabs[6]:
-    st.header("💾 Export")
-    df_live = _get_df_live_safe()
-    if df_live is None or df_live.empty:
-        st.info("Aucune donnée à exporter.")
+    st.subheader("📄 Visa — aperçu")
+    if df_visa_raw is None or df_visa_raw.empty:
+        st.info("Aucun fichier Visa chargé.")
     else:
-        st.write(f"Vue en mémoire: {df_live.shape[0]} lignes, {df_live.shape[1]} colonnes")
-        col1, col2 = st.columns(2)
-        with col1:
-            csv_bytes = df_live.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
-        with col2:
-            df_for_export = df_live.copy()
-            try:
-                montant_col = detect_montant_column(df_for_export) or "Montant honoraires (US $)"
-                autres_col = detect_autres_column(df_for_export) or "Autres frais (US $)"
-                acomptes_cols = detect_acompte_columns(df_for_export)
-                df_for_export["_Montant_num_"] = df_for_export.get(montant_col,0).apply(lambda x: _to_num(x))
-                df_for_export["_Autres_num_"] = df_for_export.get(autres_col,0).apply(lambda x: _to_num(x))
-                for acc in acomptes_cols:
-                    df_for_export[f"_num_{acc}"] = df_for_export.get(acc,0).apply(lambda x: _to_num(x))
-                if acomptes_cols:
-                    df_for_export["_Acomptes_sum_"] = df_for_export[[f"_num_{acc}" for acc in acomptes_cols]].sum(axis=1)
-                else:
-                    df_for_export["_Acomptes_sum_"] = 0.0
-                df_for_export["Solde_formule"] = df_for_export["_Montant_num_"] + df_for_export["_Autres_num_"] - df_for_export["_Acomptes_sum_"]
-                df_for_export["Solde à percevoir (US $)"] = df_for_export["Solde_formule"]
-            except Exception:
-                df_for_export["Solde_formule"] = df_for_export.get("Solde",0).apply(lambda x: _to_num(x))
-                df_for_export["Solde à percevoir (US $)"] = df_for_export.get("Solde à percevoir (US $)",0).apply(lambda x: _to_num(x))
-            drop_cols = [c for c in df_for_export.columns if c.startswith("_num_") or c in ["_Montant_num_","_Autres_num_","_Acomptes_sum_"]]
-            try:
-                df_export_final = df_for_export.drop(columns=drop_cols)
-            except Exception:
-                df_export_final = df_for_export.copy()
+        st.dataframe(df_visa_raw, use_container_width=True, key=skey("visa", "view"))
+
+# Onglet Export
+with tabs[7]:
+    st.subheader("💾 Export")
+    colx, coly = st.columns(2)
+
+    with colx:
+        if df_all is None or df_all.empty:
+            st.info("Pas de Clients à exporter.")
+        else:
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                df_all.to_excel(w, index=False, sheet_name="Clients")
+            st.download_button(
+                "⬇️ Exporter Clients.xlsx",
+                data=buf.getvalue(),
+                file_name="Clients_export.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=skey("exp", "clients"),
+            )
+
+    with coly:
+        if df_visa_raw is None or df_visa_raw.empty:
+            st.info("Pas de Visa à exporter.")
+        else:
+            bufv = BytesIO()
+            with pd.ExcelWriter(bufv, engine="openpyxl") as w:
+                df_visa_raw.to_excel(w, index=False, sheet_name="Visa")
+            st.download_button(
+                "⬇️ Exporter Visa.xlsx",
+                data=bufv.getvalue(),
+                file_name="Visa_export.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=skey("exp", "visa"),
+            )
+
+# === Début Partie 5 ===
+
+# Fonctions supplémentaires pour validation, alertes et historique Escrow
+def get_escrow_alert(row):
+    """Retourne une alerte Escrow si dossier Escrow avec date d'envoi."""
+    if row.get("Escrow", 0) == 1 and pd.notna(row.get("Date denvoi")) and row.get("Date denvoi"):
+        montant_escrow = _to_num(row.get("Acompte 1", 0))
+        return f"⚠️ Escrow activé : Dossier {row.get('Dossier N', '')} / Client {row.get('Nom', '')} — Montant à réclamer : {_fmt_money(montant_escrow)}"
+    return None
+
+def escrow_history(df):
+    """Retourne le DataFrame historique des dossiers escrow."""
+    escrow_rows = df[df["Escrow"] == 1].copy()
+    escrow_rows["Montant Escrow"] = escrow_rows["Acompte 1"].apply(_to_num)
+    escrow_rows["Etat"] = escrow_rows.apply(lambda r: "Réclamé" if (pd.notna(r.get("Date denvoi")) and r.get("Date denvoi")) else "À réclamer", axis=1)
+    return escrow_rows[["Nom", "Dossier N", "Date", "Date denvoi", "Montant Escrow", "Etat"]].sort_values("Date")
+
+# Ajout d’une section pour visualiser l’historique complet Escrow (optionnel, onglet dédié)
+if "Escrow" in df_all.columns:
+    with st.expander("📜 Historique complet Escrow", expanded=False):
+        escrow_hist = escrow_history(df_all)
+        st.dataframe(escrow_hist, use_container_width=True)
+        if not escrow_hist.empty:
+            st.markdown(f"**Total dossiers Escrow : {len(escrow_hist)}**")
+            st.markdown(f"**Montant total Escrow : {_fmt_money(escrow_hist['Montant Escrow'].sum())}**")
+
+# Ajout d’une section pour validation automatique des dossiers Escrow lors des exports
+def export_escrow_xlsx(df, file_name="escrow_export.xlsx"):
+    buf = BytesIO()
+    export_df = df[df["Escrow"] == 1].copy()
+    export_df["Montant Escrow"] = export_df["Acompte 1"].apply(_to_num)
+    export_df["Etat"] = export_df.apply(lambda r: "Réclamé" if (pd.notna(r.get("Date denvoi")) and r.get("Date denvoi")) else "À réclamer", axis=1)
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        export_df[["Nom","Dossier N","Date","Date denvoi","Montant Escrow","Etat"]].to_excel(writer, index=False, sheet_name="Escrow")
+    buf.seek(0)
+    st.download_button("Télécharger export XLSX complet Escrow", data=buf.getvalue(), file_name=file_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Possibilité d’ajouter d’autres fonctions annexes ici (validation, reporting, etc.)
+
+# === Fin Partie 5 ===
+# === Début Partie 6 ===
+
+# Exemple de fonction pour filtrer les dossiers escrow à partir de df_live (utile en gestion)
+def filter_escrow(df):
+    """Filtre le DataFrame pour ne garder que les dossiers Escrow."""
+    if "Escrow" not in df.columns:
+        return pd.DataFrame()
+    return df[df["Escrow"] == 1].copy()
+
+# Option de visualisation rapide des dossiers escrow dans l’onglet Gestion
+with st.expander("🔍 Voir les dossiers Escrow (Gestion)", expanded=False):
+    escrow_gest = filter_escrow(df_live)
+    if escrow_gest.empty:
+        st.info("Aucun dossier Escrow dans la gestion en cours.")
+    else:
+        escrow_gest["Montant Escrow"] = escrow_gest["Acompte 1"].apply(_to_num)
+        escrow_gest["Etat"] = escrow_gest.apply(lambda r: "Réclamé" if (pd.notna(r.get("Date denvoi")) and r.get("Date denvoi")) else "À réclamer", axis=1)
+        st.dataframe(escrow_gest[["Nom", "Dossier N", "Date", "Date denvoi", "Montant Escrow", "Etat"]], use_container_width=True)
+        st.markdown(f"**Nombre dossiers Escrow : {len(escrow_gest)}**")
+        st.markdown(f"**Montant total Escrow : {_fmt_money(escrow_gest['Montant Escrow'].sum())}**")
+
+# Ajout d’une option pour exporter tous les dossiers Escrow depuis la gestion
+if st.button("Exporter tous les dossiers Escrow (Gestion)", key=skey("exp", "escrow_gest")):
+    buf = BytesIO()
+    export_df = escrow_gest[["Nom", "Dossier N", "Date", "Date denvoi", "Montant Escrow", "Etat"]]
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Escrow_Gestion")
+    buf.seek(0)
+    st.download_button("Télécharger XLSX (Escrow Gestion)", data=buf.getvalue(), file_name="escrow_gestion_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option d’affichage des alertes et validation Escrow pour chaque dossier dans la gestion
+with st.expander("⚠️ Alertes Escrow (Gestion)", expanded=False):
+    for idx, row in escrow_gest.iterrows():
+        alert = get_escrow_alert(row)
+        if alert:
+            st.warning(alert)
+
+# === Fin Partie 6 ===
+
+# === Début Partie 7 ===
+
+# Ajout d’une fonction d’audit Escrow pour voir les écarts (exemple audit)
+def escrow_audit(df):
+    """Audit des dossiers Escrow : signale les dossiers où le montant d'acompte est incohérent."""
+    audit_rows = []
+    for _, row in df[df["Escrow"] == 1].iterrows():
+        acompte = _to_num(row.get("Acompte 1", 0))
+        solde = _to_num(row.get("Solde", 0))
+        if acompte < 100 or solde < 0:
+            audit_rows.append({
+                "Nom": row.get("Nom", ""),
+                "Dossier N": row.get("Dossier N", ""),
+                "Acompte 1": acompte,
+                "Solde": solde,
+                "Alerte": "Montant acompte trop faible ou solde négatif"
+            })
+    return pd.DataFrame(audit_rows)
+
+# Affichage audit Escrow dans un onglet dédié ou dans Escrow
+with st.expander("🔎 Audit Escrow (contrôles)", expanded=False):
+    audit_df = escrow_audit(df_all)
+    if audit_df.empty:
+        st.success("Aucun écart détecté dans les dossiers Escrow.")
+    else:
+        st.warning("Des anomalies ont été détectées !")
+        st.dataframe(audit_df, use_container_width=True)
+        for _, row in audit_df.iterrows():
+            st.error(f"Dossier {row['Dossier N']} ({row['Nom']}) — {row['Alerte']}")
+
+# Ajout d’une option pour récapitulatif global Escrow (pour reporting)
+with st.expander("📊 Synthèse Escrow (reporting)", expanded=False):
+    escrow_rows = df_all[df_all["Escrow"] == 1].copy()
+    total_escrow = escrow_rows["Acompte 1"].apply(_to_num).sum()
+    nb_escrow = len(escrow_rows)
+    st.markdown(f"**Nombre total dossiers Escrow : {nb_escrow}**")
+    st.markdown(f"**Montant total Escrow : {_fmt_money(total_escrow)}**")
+    # Répartition par catégorie
+    if "Categories" in escrow_rows.columns:
+        rep_cat = escrow_rows["Categories"].value_counts().rename_axis("Catégorie").reset_index(name="Nombre")
+        st.dataframe(rep_cat, use_container_width=True)
+
+# === Fin Partie 7 ===
+
+# === Début Partie 8 ===
+
+# Ajout d’une fonction de synthèse graphique Escrow (exemple avec matplotlib si souhaité)
+import matplotlib.pyplot as plt
+
+def plot_escrow_by_month(df):
+    escrow_df = df[df["Escrow"] == 1].copy()
+    escrow_df["Date"] = pd.to_datetime(escrow_df["Date"], errors="coerce")
+    escrow_df["month"] = escrow_df["Date"].dt.to_period("M")
+    monthly = escrow_df.groupby("month")["Acompte 1"].apply(lambda x: x.apply(_to_num).sum()).reset_index()
+    fig, ax = plt.subplots()
+    ax.bar(monthly["month"].astype(str), monthly["Acompte 1"], color="#0071bd")
+    ax.set_xlabel("Mois")
+    ax.set_ylabel("Montant Escrow")
+    ax.set_title("Montant Escrow par mois")
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
+
+with st.expander("📉 Graphique Escrow par mois", expanded=False):
+    plot_escrow_by_month(df_all)
+
+# Option : ajout de synthèse Escrow par visa/catégorie
+with st.expander("📑 Répartition Escrow par type de Visa", expanded=False):
+    escrow = df_all[df_all["Escrow"] == 1].copy()
+    if not escrow.empty and "Visa" in escrow.columns:
+        rep_visa = escrow["Visa"].value_counts().rename_axis("Visa").reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(rep_visa, use_container_width=True)
+        st.bar_chart(rep_visa.set_index("Visa"))
+
+# Option : affichage de l’évolution du nombre de dossiers Escrow
+with st.expander("📈 Évolution du nombre de dossiers Escrow", expanded=False):
+    if not escrow.empty and "Date" in escrow.columns:
+        escrow["Date"] = pd.to_datetime(escrow["Date"], errors="coerce")
+        escrow["Année"] = escrow["Date"].dt.year
+        yearly_count = escrow.groupby("Année").size().reset_index(name="Nombre dossiers")
+        st.line_chart(yearly_count.set_index("Année"))
+
+# === Fin Partie 8 ===
+
+# === Début Partie 9 ===
+
+# Option avancée : synthèse/export Escrow par sous-catégorie ou autre critère
+with st.expander("📂 Export Escrow par sous-catégorie", expanded=False):
+    if "Sous-categorie" in df_all.columns and "Escrow" in df_all.columns:
+        escrow_subcat = df_all[df_all["Escrow"] == 1].copy()
+        rep_subcat = escrow_subcat["Sous-categorie"].value_counts().rename_axis("Sous-catégorie").reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(rep_subcat, use_container_width=True)
+        # Export XLSX
+        if st.button("Exporter Escrow par sous-catégorie", key=skey("exp", "escrow_subcat")):
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df_export_final.to_excel(writer, index=False, sheet_name="Clients")
-            out_bytes = buf.getvalue()
-            st.download_button("⬇️ Export XLSX (avec colonne Solde_formule)", data=out_bytes, file_name="Clients_export_with_Solde_formule.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                escrow_subcat.to_excel(writer, index=False, sheet_name="Escrow_SousCat")
+            buf.seek(0)
+            st.download_button("Télécharger XLSX (Escrow sous-catégorie)", data=buf.getvalue(), file_name="escrow_souscategorie_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# End of file
+# Option : export global de tous les tableaux Escrow en un seul fichier
+with st.expander("🗃️ Export global Escrow (multi-tableaux)", expanded=False):
+    if "Escrow" in df_all.columns:
+        escrow_all = df_all[df_all["Escrow"] == 1].copy()
+        escrow_all["Montant Escrow"] = escrow_all["Acompte 1"].apply(_to_num)
+        escrow_all["Etat"] = escrow_all.apply(lambda r: "Réclamé" if (pd.notna(r.get("Date denvoi")) and r.get("Date denvoi")) else "À réclamer", axis=1)
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            escrow_all.to_excel(writer, index=False, sheet_name="Escrow")
+            # Ajout synthèse par catégorie
+            if "Categories" in escrow_all.columns:
+                cat_tab = escrow_all["Categories"].value_counts().rename_axis("Catégorie").reset_index(name="Nombre")
+                cat_tab.to_excel(writer, index=False, sheet_name="Synthese_Categorie")
+            # Ajout synthèse par sous-catégorie
+            if "Sous-categorie" in escrow_all.columns:
+                subcat_tab = escrow_all["Sous-categorie"].value_counts().rename_axis("Sous-catégorie").reset_index(name="Nombre")
+                subcat_tab.to_excel(writer, index=False, sheet_name="Synthese_SousCat")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Escrow global)", data=buf.getvalue(), file_name="escrow_global_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 9 ===
+
+# === Début Partie 10 ===
+
+# Option : affichage et export des dossiers Escrow par année
+with st.expander("📅 Export Escrow par année", expanded=False):
+    if "Date" in df_all.columns and "Escrow" in df_all.columns:
+        escrow_year = df_all[df_all["Escrow"] == 1].copy()
+        escrow_year["Date"] = pd.to_datetime(escrow_year["Date"], errors="coerce")
+        escrow_year["Année"] = escrow_year["Date"].dt.year
+        rep_year = escrow_year.groupby("Année").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(rep_year, use_container_width=True)
+        # Export XLSX
+        if st.button("Exporter Escrow par année", key=skey("exp", "escrow_year")):
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                escrow_year.to_excel(writer, index=False, sheet_name="Escrow_Année")
+            buf.seek(0)
+            st.download_button("Télécharger XLSX (Escrow année)", data=buf.getvalue(), file_name="escrow_annee_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : synthèse finale et résumé Escrow
+with st.expander("🧾 Synthèse finale Escrow", expanded=False):
+    if "Escrow" in df_all.columns:
+        escrow_final = df_all[df_all["Escrow"] == 1].copy()
+        total_final = escrow_final["Acompte 1"].apply(_to_num).sum()
+        st.markdown(f"**Nombre total dossiers Escrow : {len(escrow_final)}**")
+        st.markdown(f"**Montant total Escrow : {_fmt_money(total_final)}**")
+        # Synthèse par état
+        escrow_final["Etat"] = escrow_final.apply(lambda r: "Réclamé" if (pd.notna(r.get("Date denvoi")) and r.get("Date denvoi")) else "À réclamer", axis=1)
+        rep_etat = escrow_final["Etat"].value_counts().rename_axis("Etat").reset_index(name="Nombre")
+        st.dataframe(rep_etat, use_container_width=True)
+
+# === Fin Partie 10 ===
+
+# Onglet Analyses
+with tabs[2]:
+    st.subheader("📈 Analyses")
+    if df_all is None or df_all.empty:
+        st.info("Aucune donnée client.")
+    else:
+        yearsA = sorted(pd.to_numeric(df_all["_Annee_"], errors="coerce").dropna().astype(int).unique().tolist())
+        monthsA = [f"{m:02d}" for m in range(1, 13)]
+        catsA = sorted(df_all["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_all.columns else []
+        subsA = sorted(df_all["Sous-categorie"].dropna().astype(str).unique().tolist()) if "Sous-categorie" in df_all.columns else []
+        visasA = sorted(df_all["Visa"].dropna().astype(str).unique().tolist()) if "Visa" in df_all.columns else []
+
+        b1, b2, b3, b4, b5 = st.columns(5)
+        fy = b1.multiselect("Année", yearsA, default=[], key=skey("an", "years"))
+        fm = b2.multiselect("Mois (MM)", monthsA, default=[], key=skey("an", "months"))
+        fc = b3.multiselect("Catégories", catsA, default=[], key=skey("an", "cats"))
+        fs = b4.multiselect("Sous-catégories", subsA, default=[], key=skey("an", "subs"))
+        fv = b5.multiselect("Visa", visasA, default=[], key=skey("an", "visas"))
+
+        dfA = df_all.copy()
+        if fy:
+            dfA = dfA[dfA["_Annee_"].isin(fy)]
+        if fm:
+            dfA = dfA[dfA["Mois"].astype(str).isin(fm)]
+        if fc:
+            dfA = dfA[dfA["Categories"].astype(str).isin(fc)]
+        if fs:
+            dfA = dfA[dfA["Sous-categorie"].astype(str).isin(fs)]
+        if fv:
+            dfA = dfA[dfA["Visa"].astype(str).isin(fv)]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Dossiers", f"{len(dfA)}")
+        c2.metric("Honoraires", _fmt_money(dfA["Montant honoraires (US $)"].apply(_to_num).sum()))
+        c3.metric("Payé", _fmt_money(dfA["Payé"].apply(_to_num).sum()))
+        c4.metric("Solde", _fmt_money(dfA["Solde"].apply(_to_num).sum()))
+
+        if not dfA.empty and "Categories" in dfA.columns:
+            total_cnt = max(1, len(dfA))
+            rep = dfA["Categories"].value_counts().rename_axis("Categorie").reset_index(name="Nbr")
+            rep["%"] = (rep["Nbr"] / total_cnt * 100).round(1)
+            st.dataframe(rep, use_container_width=True, hide_index=True, key=skey("an", "rep_cat"))
+
+        if not dfA.empty and "Sous-categorie" in dfA.columns:
+            total_cnt = max(1, len(dfA))
+            rep2 = dfA["Sous-categorie"].value_counts().rename_axis("Sous-categorie").reset_index(name="Nbr")
+            rep2["%"] = (rep2["Nbr"] / total_cnt * 100).round(1)
+            st.dataframe(rep2, use_container_width=True, hide_index=True, key=skey("an", "rep_sub"))
+
+        ca1, ca2, ca3 = st.columns(3)
+        pa_years = ca1.multiselect("Années (A)", yearsA, default=[], key=skey("cmp", "ya"))
+        pa_month = ca2.multiselect("Mois (A)", monthsA, default=[], key=skey("cmp", "ma"))
+        pa_cat = ca3.multiselect("Catégories (A)", catsA, default=[], key=skey("cmp", "ca"))
+
+        cb1, cb2, cb3 = st.columns(3)
+        pb_years = cb1.multiselect("Années (B)", yearsA, default=[], key=skey("cmp", "yb"))
+        pb_month = cb2.multiselect("Mois (B)", monthsA, default=[], key=skey("cmp", "mb"))
+        pb_cat = cb3.multiselect("Catégories (B)", catsA, default=[], key=skey("cmp", "cb"))
+
+        def _slice(df, ys, ms, cs):
+            s = df.copy()
+            if ys:
+                s = s[s["_Annee_"].isin(ys)]
+            if ms:
+                s = s[s["Mois"].astype(str).isin(ms)]
+            if cs:
+                s = s[s["Categories"].astype(str).isin(cs)]
+            return s
+
+        A = _slice(df_all, pa_years, pa_month, pa_cat)
+        B = _slice(df_all, pb_years, pb_month, pb_cat)
+
+        def _kpis(df):
+            return {
+                "Dossiers": len(df),
+                "Honoraires": df["Montant honoraires (US $)"].apply(_to_num).sum(),
+                "Payé": df["Payé"].apply(_to_num).sum(),
+                "Solde": df["Solde"].apply(_to_num).sum(),
+            }
+
+        kA, kB = _kpis(A), _kpis(B)
+        dcmp = pd.DataFrame({
+            "KPI": ["Dossiers", "Honoraires", "Payé", "Solde"],
+            "A": [kA["Dossiers"], kA["Honoraires"], kA["Payé"], kA["Solde"]],
+            "B": [kB["Dossiers"], kB["Honoraires"], kB["Payé"], kB["Solde"]],
+            "Δ (B - A)": [kB["Dossiers"] - kA["Dossiers"], kB["Honoraires"] - kA["Honoraires"], kB["Payé"] - kA["Payé"], kB["Solde"] - kA["Solde"]],
+        })
+        for c in ["A", "B", "Δ (B - A)"]:
+            dcmp.loc[1:3, c] = dcmp.loc[1:3, c].astype(float).map(_fmt_money)
+        st.dataframe(dcmp, use_container_width=True, hide_index=True, key=skey("an", "cmp_table"))
+
+# Onglet Escrow
+with tabs[3]:
+    st.subheader("🏦 Escrow — synthèse")
+    if df_all is None or df_all.empty:
+        st.info("Aucun client.")
+    else:
+        dfE = df_all.copy()
+        if "Escrow" not in dfE.columns:
+            dfE["Escrow"] = 0
+        dfE["Escrow"] = dfE["Escrow"].apply(lambda x: 1 if str(x).strip().lower() in ["1", "true", "t", "yes", "oui", "y", "x"] else 0)
+        escrow_view = dfE[dfE["Escrow"] == 1].copy()
+
+        if escrow_view.empty:
+            st.info("Aucun dossier en Escrow.")
+        else:
+            escrow_view["Montant Escrow"] = escrow_view["Acompte 1"].apply(_to_num)
+            escrow_view["Etat"] = escrow_view.apply(lambda r: "Réclamé" if (pd.notna(r.get("Date denvoi")) and r.get("Date denvoi")) else "À réclamer", axis=1)
+            total_escrow = float(escrow_view["Montant Escrow"].sum())
+
+            st.markdown(f"**Nombre dossiers Escrow : {len(escrow_view)}**")
+            st.markdown(f"**Total montants Escrow : {_fmt_money(total_escrow)}**")
+            st.dataframe(escrow_view[["Nom","Dossier N","Date","Date denvoi","Montant Escrow","Etat"]].reset_index(drop=True), use_container_width=True, height=320)
+            st.markdown("#### Historique Escrow")
+            st.dataframe(escrow_view[["Nom","Dossier N","Date","Montant Escrow","Date denvoi","Etat"]].sort_values("Date").reset_index(drop=True), use_container_width=True, height=220)
+            # Export XLSX
+            if st.button("Exporter les dossiers escrow en XLSX"):
+                buf = BytesIO()
+                export_df = escrow_view[["Nom","Dossier N","Date","Date denvoi","Montant Escrow","Etat"]]
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    export_df.to_excel(writer, index=False, sheet_name="Escrow")
+                buf.seek(0)
+                st.download_button("Télécharger XLSX", data=buf.getvalue(), file_name="escrow_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Début Partie 12 ===
+
+# Option : affichage synthèse Escrow par type de visa et export associé
+with st.expander("📒 Synthèse Escrow par type de Visa", expanded=False):
+    if "Escrow" in df_all.columns and "Visa" in df_all.columns:
+        escrow_visa = df_all[df_all["Escrow"] == 1].copy()
+        synth_visa = escrow_visa.groupby("Visa").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_visa, use_container_width=True)
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_visa.to_excel(writer, index=False, sheet_name="Synthese_Escrow_Visa")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow Visa)", data=buf.getvalue(), file_name="escrow_synthese_visa.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : affichage synthèse Escrow par mois et export associé
+with st.expander("📆 Synthèse Escrow par mois", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns:
+        escrow_month = df_all[df_all["Escrow"] == 1].copy()
+        escrow_month["Date"] = pd.to_datetime(escrow_month["Date"], errors="coerce")
+        escrow_month["Mois"] = escrow_month["Date"].dt.month
+        synth_month = escrow_month.groupby("Mois").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_month, use_container_width=True)
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_month.to_excel(writer, index=False, sheet_name="Synthese_Escrow_Mois")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow Mois)", data=buf.getvalue(), file_name="escrow_synthese_mois.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : export complet Escrow (archive finale)
+with st.expander("🗄️ Export complet Escrow (archive finale)", expanded=False):
+    if "Escrow" in df_all.columns:
+        escrow_complete = df_all[df_all["Escrow"] == 1].copy()
+        escrow_complete["Montant Escrow"] = escrow_complete["Acompte 1"].apply(_to_num)
+        escrow_complete["Etat"] = escrow_complete.apply(lambda r: "Réclamé" if (pd.notna(r.get("Date denvoi")) and r.get("Date denvoi")) else "À réclamer", axis=1)
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            escrow_complete.to_excel(writer, index=False, sheet_name="Escrow_Complet")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Escrow complet)", data=buf.getvalue(), file_name="escrow_complet_final.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 12 ===
+
+# === Début Partie 13 ===
+
+# Option : affichage synthèse Escrow par trimestre et export associé
+with st.expander("🗓️ Synthèse Escrow par trimestre", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns:
+        escrow_trim = df_all[df_all["Escrow"] == 1].copy()
+        escrow_trim["Date"] = pd.to_datetime(escrow_trim["Date"], errors="coerce")
+        escrow_trim["Trimestre"] = escrow_trim["Date"].dt.quarter
+        synth_trim = escrow_trim.groupby("Trimestre").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_trim, use_container_width=True)
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_trim.to_excel(writer, index=False, sheet_name="Synthese_Escrow_Trimestre")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow Trimestre)", data=buf.getvalue(), file_name="escrow_synthese_trimestre.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : affichage synthèse Escrow par jour et export associé
+with st.expander("📅 Synthèse Escrow par jour", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns:
+        escrow_day = df_all[df_all["Escrow"] == 1].copy()
+        escrow_day["Date"] = pd.to_datetime(escrow_day["Date"], errors="coerce")
+        escrow_day["Jour"] = escrow_day["Date"].dt.day
+        synth_day = escrow_day.groupby("Jour").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_day, use_container_width=True)
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_day.to_excel(writer, index=False, sheet_name="Synthese_Escrow_Jour")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow Jour)", data=buf.getvalue(), file_name="escrow_synthese_jour.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : synthèse multi-axes Escrow (année, mois, catégorie)
+with st.expander("🔀 Synthèse Escrow année/mois/catégorie", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Categories" in df_all.columns:
+        escrow_multi = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi["Date"] = pd.to_datetime(escrow_multi["Date"], errors="coerce")
+        escrow_multi["Année"] = escrow_multi["Date"].dt.year
+        escrow_multi["Mois"] = escrow_multi["Date"].dt.month
+        synth_multi = escrow_multi.groupby(["Année", "Mois", "Categories"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi, use_container_width=True)
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_multi.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisCat")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow An/Mois/Catégorie)", data=buf.getvalue(), file_name="escrow_synthese_anneemoiscategorie.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 13 ===
+
+# === Début Partie 14 ===
+
+# Option : synthèse Escrow par montant (tranches) et export associé
+with st.expander("💰 Synthèse Escrow par tranche de montant", expanded=False):
+    if "Escrow" in df_all.columns and "Acompte 1" in df_all.columns:
+        escrow_tranche = df_all[df_all["Escrow"] == 1].copy()
+        escrow_tranche["Montant Escrow"] = escrow_tranche["Acompte 1"].apply(_to_num)
+        bins = [0, 500, 1000, 2000, 5000, 10000, float('inf')]
+        labels = ["0-500", "501-1000", "1001-2000", "2001-5000", "5001-10000", "10001+"]
+        escrow_tranche["Tranche"] = pd.cut(escrow_tranche["Montant Escrow"], bins=bins, labels=labels, right=False)
+        synth_tranche = escrow_tranche.groupby("Tranche").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_tranche, use_container_width=True)
+        st.bar_chart(synth_tranche.set_index("Tranche"))
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_tranche.to_excel(writer, index=False, sheet_name="Synthese_Escrow_Tranche")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow Tranche)", data=buf.getvalue(), file_name="escrow_synthese_tranche.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : synthèse Escrow par paiement (payé/non payé) et export associé
+with st.expander("💸 Synthèse Escrow par statut paiement", expanded=False):
+    if "Escrow" in df_all.columns and "Payé" in df_all.columns:
+        escrow_pay = df_all[df_all["Escrow"] == 1].copy()
+        escrow_pay["PayéStatut"] = escrow_pay["Payé"].apply(lambda x: "Payé" if _to_num(x) > 0 else "Non payé")
+        synth_pay = escrow_pay.groupby("PayéStatut").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_pay, use_container_width=True)
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_pay.to_excel(writer, index=False, sheet_name="Synthese_Escrow_Paiement")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow Paiement)", data=buf.getvalue(), file_name="escrow_synthese_paiement.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : synthèse Escrow par année et tranche de montant
+with st.expander("📆💰 Synthèse Escrow par année & tranche", expanded=False):
+    if "Escrow" in df_all.columns and "Acompte 1" in df_all.columns and "Date" in df_all.columns:
+        escrow_year_tranche = df_all[df_all["Escrow"] == 1].copy()
+        escrow_year_tranche["Montant Escrow"] = escrow_year_tranche["Acompte 1"].apply(_to_num)
+        escrow_year_tranche["Date"] = pd.to_datetime(escrow_year_tranche["Date"], errors="coerce")
+        escrow_year_tranche["Année"] = escrow_year_tranche["Date"].dt.year
+        bins = [0, 500, 1000, 2000, 5000, 10000, float('inf')]
+        labels = ["0-500", "501-1000", "1001-2000", "2001-5000", "5001-10000", "10001+"]
+        escrow_year_tranche["Tranche"] = pd.cut(escrow_year_tranche["Montant Escrow"], bins=bins, labels=labels, right=False)
+        synth_year_tranche = escrow_year_tranche.groupby(["Année", "Tranche"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_year_tranche, use_container_width=True)
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_year_tranche.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeTranche")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow Année&Tranche)", data=buf.getvalue(), file_name="escrow_synthese_annee_tranche.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 14 ===
+
+# === Début Partie 15 ===
+
+# Option : synthèse Escrow par statut dossier (envoyé, approuvé, refusé, annulé) et export associé
+with st.expander("📋 Synthèse Escrow par statut dossier", expanded=False):
+    if "Escrow" in df_all.columns:
+        escrow_statut = df_all[df_all["Escrow"] == 1].copy()
+        # Création du statut
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                return "Envoyé"
+            elif row.get("Dossier approuvé", 0) == 1:
+                return "Approuvé"
+            elif row.get("Dossier refusé", 0) == 1:
+                return "Refusé"
+            elif row.get("Dossier Annulé", 0) == 1:
+                return "Annulé"
+            else:
+                return "En attente"
+        escrow_statut["Statut dossier"] = escrow_statut.apply(statut_dossier, axis=1)
+        synth_statut = escrow_statut.groupby("Statut dossier").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_statut, use_container_width=True)
+        st.bar_chart(synth_statut.set_index("Statut dossier"))
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            synth_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_Statut")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow Statut dossier)", data=buf.getvalue(), file_name="escrow_synthese_statut.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : synthèse Escrow dossiers avec RFE
+with st.expander("📝 Synthèse Escrow dossiers avec RFE", expanded=False):
+    if "Escrow" in df_all.columns and "RFE" in df_all.columns:
+        escrow_rfe = df_all[(df_all["Escrow"] == 1) & (df_all["RFE"] == 1)].copy()
+        st.markdown(f"**Nombre dossiers Escrow avec RFE : {len(escrow_rfe)}**")
+        st.dataframe(escrow_rfe, use_container_width=True)
+        # Export XLSX
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            escrow_rfe.to_excel(writer, index=False, sheet_name="Escrow_RFE")
+        buf.seek(0)
+        st.download_button("Télécharger XLSX (Escrow RFE)", data=buf.getvalue(), file_name="escrow_rfe_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 15 ===
+
+# === Début Partie 16 ===
+
+# Option : synthèse Escrow dossiers annulés/refusés et export associé
+with st.expander("🚫 Synthèse Escrow dossiers annulés/refusés", expanded=False):
+    if "Escrow" in df_all.columns and "Dossier Annulé" in df_all.columns and "Dossier refusé" in df_all.columns:
+        escrow_annule = df_all[(df_all["Escrow"] == 1) & (df_all["Dossier Annulé"] == 1)].copy()
+        escrow_refuse = df_all[(df_all["Escrow"] == 1) & (df_all["Dossier refusé"] == 1)].copy()
+        st.markdown(f"**Nombre dossiers Escrow annulés : {len(escrow_annule)}**")
+        st.dataframe(escrow_annule, use_container_width=True)
+        st.markdown(f"**Nombre dossiers Escrow refusés : {len(escrow_refuse)}**")
+        st.dataframe(escrow_refuse, use_container_width=True)
+        # Export XLSX annulés
+        buf_annule = BytesIO()
+        with pd.ExcelWriter(buf_annule, engine="openpyxl") as writer:
+            escrow_annule.to_excel(writer, index=False, sheet_name="Escrow_Annule")
+        buf_annule.seek(0)
+        st.download_button("Télécharger XLSX (Escrow annulés)", data=buf_annule.getvalue(), file_name="escrow_annules_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        # Export XLSX refusés
+        buf_refuse = BytesIO()
+        with pd.ExcelWriter(buf_refuse, engine="openpyxl") as writer:
+            escrow_refuse.to_excel(writer, index=False, sheet_name="Escrow_Refuse")
+        buf_refuse.seek(0)
+        st.download_button("Télécharger XLSX (Escrow refusés)", data=buf_refuse.getvalue(), file_name="escrow_refuses_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : synthèse Escrow dossiers envoyés non encore approuvés/refusés/annulés
+with st.expander("🔔 Synthèse Escrow envoyés en attente", expanded=False):
+    if "Escrow" in df_all.columns and "Dossiers envoyé" in df_all.columns:
+        escrow_envoye = df_all[
+            (df_all["Escrow"] == 1) &
+            (df_all["Dossiers envoyé"] == 1) &
+            (df_all.get("Dossier approuvé", 0) == 0) &
+            (df_all.get("Dossier refusé", 0) == 0) &
+            (df_all.get("Dossier Annulé", 0) == 0)
+        ].copy()
+        st.markdown(f"**Nombre dossiers Escrow envoyés en attente de décision : {len(escrow_envoye)}**")
+        st.dataframe(escrow_envoye, use_container_width=True)
+        # Export XLSX
+        buf_envoye = BytesIO()
+        with pd.ExcelWriter(buf_envoye, engine="openpyxl") as writer:
+            escrow_envoye.to_excel(writer, index=False, sheet_name="Escrow_Envoye_Attente")
+        buf_envoye.seek(0)
+        st.download_button("Télécharger XLSX (Escrow envoyés en attente)", data=buf_envoye.getvalue(), file_name="escrow_envoyes_attente_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 16 ===
+
+# === Début Partie 17 ===
+
+# Option : synthèse Escrow dossiers approuvés et export associé
+with st.expander("✅ Synthèse Escrow dossiers approuvés", expanded=False):
+    if "Escrow" in df_all.columns and "Dossier approuvé" in df_all.columns:
+        escrow_approved = df_all[(df_all["Escrow"] == 1) & (df_all["Dossier approuvé"] == 1)].copy()
+        st.markdown(f"**Nombre dossiers Escrow approuvés : {len(escrow_approved)}**")
+        st.dataframe(escrow_approved, use_container_width=True)
+        # Export XLSX
+        buf_approved = BytesIO()
+        with pd.ExcelWriter(buf_approved, engine="openpyxl") as writer:
+            escrow_approved.to_excel(writer, index=False, sheet_name="Escrow_Approuve")
+        buf_approved.seek(0)
+        st.download_button("Télécharger XLSX (Escrow approuvés)", data=buf_approved.getvalue(), file_name="escrow_approuves_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : synthèse Escrow dossiers en attente d’envoi
+with st.expander("🕒 Synthèse Escrow en attente d’envoi", expanded=False):
+    if "Escrow" in df_all.columns and "Dossiers envoyé" in df_all.columns:
+        escrow_waiting = df_all[(df_all["Escrow"] == 1) & (df_all["Dossiers envoyé"] != 1)].copy()
+        st.markdown(f"**Nombre dossiers Escrow en attente d’envoi : {len(escrow_waiting)}**")
+        st.dataframe(escrow_waiting, use_container_width=True)
+        # Export XLSX
+        buf_waiting = BytesIO()
+        with pd.ExcelWriter(buf_waiting, engine="openpyxl") as writer:
+            escrow_waiting.to_excel(writer, index=False, sheet_name="Escrow_Attente_Envoi")
+        buf_waiting.seek(0)
+        st.download_button("Télécharger XLSX (Escrow attente envoi)", data=buf_waiting.getvalue(), file_name="escrow_attente_envoi_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : synthèse finale Escrow tous statuts et export
+with st.expander("📊 Synthèse finale Escrow tous statuts", expanded=False):
+    if "Escrow" in df_all.columns:
+        escrow_final_all = df_all[df_all["Escrow"] == 1].copy()
+        # Statut dossier
+        def statut_final(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_final_all["Statut final"] = escrow_final_all.apply(statut_final, axis=1)
+        synth_final = escrow_final_all.groupby("Statut final").size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_final, use_container_width=True)
+        st.bar_chart(synth_final.set_index("Statut final"))
+        # Export XLSX
+        buf_final = BytesIO()
+        with pd.ExcelWriter(buf_final, engine="openpyxl") as writer:
+            synth_final.to_excel(writer, index=False, sheet_name="Synthese_Escrow_Final")
+        buf_final.seek(0)
+        st.download_button("Télécharger XLSX (Synthèse Escrow tous statuts)", data=buf_final.getvalue(), file_name="escrow_synthese_final_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 17 ===
+
+# === Début Partie 18 ===
+
+# Option : synthèse Escrow avec alertes sur montants et dates incohérents
+with st.expander("⚠️ Alertes Escrow montants et dates incohérents", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Acompte 1" in df_all.columns:
+        escrow_alerts = []
+        for _, row in df_all[df_all["Escrow"] == 1].iterrows():
+            montant = _to_num(row.get("Acompte 1", 0))
+            date_envoi = row.get("Date denvoi", "")
+            date_creation = row.get("Date", "")
+            if montant <= 0:
+                escrow_alerts.append({
+                    "Nom": row.get("Nom", ""),
+                    "Dossier N": row.get("Dossier N", ""),
+                    "Alerte": "Montant Escrow nul ou négatif"
+                })
+            if pd.notna(date_envoi) and pd.notna(date_creation):
+                try:
+                    d_envoi = pd.to_datetime(date_envoi, errors="coerce")
+                    d_creation = pd.to_datetime(date_creation, errors="coerce")
+                    if d_envoi < d_creation:
+                        escrow_alerts.append({
+                            "Nom": row.get("Nom", ""),
+                            "Dossier N": row.get("Dossier N", ""),
+                            "Alerte": "Date d'envoi antérieure à la date de création"
+                        })
+                except Exception:
+                    pass
+        if escrow_alerts:
+            alert_df = pd.DataFrame(escrow_alerts)
+            st.warning("Des alertes ont été détectées dans les dossiers Escrow !")
+            st.dataframe(alert_df, use_container_width=True)
+            # Export XLSX
+            buf_alert = BytesIO()
+            with pd.ExcelWriter(buf_alert, engine="openpyxl") as writer:
+                alert_df.to_excel(writer, index=False, sheet_name="Escrow_Alertes")
+            buf_alert.seek(0)
+            st.download_button("Télécharger XLSX (Alertes Escrow)", data=buf_alert.getvalue(), file_name="escrow_alertes_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            st.success("Aucune alerte détectée dans les dossiers Escrow.")
+
+# Option : synthèse Escrow avec commentaires spécifiques
+with st.expander("💬 Synthèse Escrow avec commentaires", expanded=False):
+    if "Escrow" in df_all.columns and "Commentaires" in df_all.columns:
+        escrow_comments = df_all[(df_all["Escrow"] == 1) & (df_all["Commentaires"].astype(str).str.strip() != "")].copy()
+        st.markdown(f"**Nombre dossiers Escrow avec commentaires : {len(escrow_comments)}**")
+        st.dataframe(escrow_comments[["Nom", "Dossier N", "Commentaires"]], use_container_width=True)
+        # Export XLSX
+        buf_comments = BytesIO()
+        with pd.ExcelWriter(buf_comments, engine="openpyxl") as writer:
+            escrow_comments.to_excel(writer, index=False, sheet_name="Escrow_Commentaires")
+        buf_comments.seek(0)
+        st.download_button("Télécharger XLSX (Escrow commentaires)", data=buf_comments.getvalue(), file_name="escrow_commentaires_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 18 ===
+
+# === Début Partie 19 ===
+
+# Option : Synthèse Escrow dossiers dont le solde n’est pas à zéro (alerte sur paiement partiel)
+with st.expander("⚠️ Escrow dossiers solde non nul (paiement partiel)", expanded=False):
+    if "Escrow" in df_all.columns and "Solde" in df_all.columns:
+        escrow_solde = df_all[(df_all["Escrow"] == 1) & (_to_num(df_all["Solde"]) > 0)].copy()
+        st.markdown(f"**Nombre dossiers Escrow solde non nul : {len(escrow_solde)}**")
+        st.dataframe(escrow_solde, use_container_width=True)
+        # Export XLSX
+        buf_solde = BytesIO()
+        with pd.ExcelWriter(buf_solde, engine="openpyxl") as writer:
+            escrow_solde.to_excel(writer, index=False, sheet_name="Escrow_Solde_Non_Nul")
+        buf_solde.seek(0)
+        st.download_button("Télécharger XLSX (Escrow solde non nul)", data=buf_solde.getvalue(), file_name="escrow_solde_non_nul_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow dossiers dont le solde est négatif (erreur ou anomalie)
+with st.expander("🚨 Escrow dossiers solde négatif (anomalie)", expanded=False):
+    if "Escrow" in df_all.columns and "Solde" in df_all.columns:
+        escrow_neg = df_all[(df_all["Escrow"] == 1) & (_to_num(df_all["Solde"]) < 0)].copy()
+        st.markdown(f"**Nombre dossiers Escrow solde négatif : {len(escrow_neg)}**")
+        st.dataframe(escrow_neg, use_container_width=True)
+        # Export XLSX
+        buf_neg = BytesIO()
+        with pd.ExcelWriter(buf_neg, engine="openpyxl") as writer:
+            escrow_neg.to_excel(writer, index=False, sheet_name="Escrow_Solde_Negatif")
+        buf_neg.seek(0)
+        st.download_button("Télécharger XLSX (Escrow solde négatif)", data=buf_neg.getvalue(), file_name="escrow_solde_negatif_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow dossiers avec acompte 2 (multi-acompte)
+with st.expander("💵 Escrow dossiers avec acompte 2", expanded=False):
+    if "Escrow" in df_all.columns and "Acompte 2" in df_all.columns:
+        escrow_acomp2 = df_all[(df_all["Escrow"] == 1) & (_to_num(df_all["Acompte 2"]) > 0)].copy()
+        st.markdown(f"**Nombre dossiers Escrow avec acompte 2 : {len(escrow_acomp2)}**")
+        st.dataframe(escrow_acomp2, use_container_width=True)
+        # Export XLSX
+        buf_acomp2 = BytesIO()
+        with pd.ExcelWriter(buf_acomp2, engine="openpyxl") as writer:
+            escrow_acomp2.to_excel(writer, index=False, sheet_name="Escrow_Acompte_2")
+        buf_acomp2.seek(0)
+        st.download_button("Télécharger XLSX (Escrow acompte 2)", data=buf_acomp2.getvalue(), file_name="escrow_acompte2_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 19 ===
+
+# === Début Partie 20 ===
+
+# Option : Synthèse Escrow par catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par catégorie & statut dossier", expanded=False):
+    if "Escrow" in df_all.columns and "Categories" in df_all.columns:
+        escrow_multi_statut = df_all[df_all["Escrow"] == 1].copy()
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_statut["Statut dossier"] = escrow_multi_statut.apply(statut_dossier, axis=1)
+        synth_multi_statut = escrow_multi_statut.groupby(["Categories", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_statut, engine="openpyxl") as writer:
+            synth_multi_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_CategorieStatut")
+        buf_multi_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Catégorie & Statut)", data=buf_multi_statut.getvalue(), file_name="escrow_categorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow par type de visa et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par visa & statut dossier", expanded=False):
+    if "Escrow" in df_all.columns and "Visa" in df_all.columns:
+        escrow_multi_visa_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_visa_statut["Statut dossier"] = escrow_multi_visa_statut.apply(statut_dossier, axis=1)
+        synth_multi_visa_statut = escrow_multi_visa_statut.groupby(["Visa", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_visa_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_visa_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_visa_statut, engine="openpyxl") as writer:
+            synth_multi_visa_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_VisaStatut")
+        buf_multi_visa_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Visa & Statut)", data=buf_multi_visa_statut.getvalue(), file_name="escrow_visa_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 20 ===
+
+# === Début Partie 21 ===
+
+# Option : Synthèse Escrow par sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par sous-catégorie & statut dossier", expanded=False):
+    if "Escrow" in df_all.columns and "Sous-categorie" in df_all.columns:
+        escrow_multi_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_subcat_statut["Statut dossier"] = escrow_multi_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_subcat_statut = escrow_multi_subcat_statut.groupby(["Sous-categorie", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_SousCatStatut")
+        buf_multi_subcat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Sous-catégorie & Statut)", data=buf_multi_subcat_statut.getvalue(), file_name="escrow_souscategorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow par année, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Sous-categorie" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_annee_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_subcat_statut["Année"] = escrow_multi_annee_subcat_statut["Date"].dt.year
+        escrow_multi_annee_subcat_statut["Statut dossier"] = escrow_multi_annee_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_subcat_statut = escrow_multi_annee_subcat_statut.groupby(["Année", "Sous-categorie", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeSousCatStatut")
+        buf_multi_annee_subcat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Année/Sous-catégorie/Statut)", data=buf_multi_annee_subcat_statut.getvalue(), file_name="escrow_annee_souscategorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 21 ===
+
+# === Début Partie 22 ===
+
+# Option : Synthèse Escrow par mois, catégorie, et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par mois/catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Categories" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_month_cat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_month_cat_statut["Date"] = pd.to_datetime(escrow_multi_month_cat_statut["Date"], errors="coerce")
+        escrow_multi_month_cat_statut["Mois"] = escrow_multi_month_cat_statut["Date"].dt.month
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_month_cat_statut["Statut dossier"] = escrow_multi_month_cat_statut.apply(statut_dossier, axis=1)
+        synth_multi_month_cat_statut = escrow_multi_month_cat_statut.groupby(["Mois", "Categories", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_month_cat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_month_cat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_month_cat_statut, engine="openpyxl") as writer:
+            synth_multi_month_cat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_MoisCatStatut")
+        buf_multi_month_cat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Mois/Catégorie/Statut)", data=buf_multi_month_cat_statut.getvalue(), file_name="escrow_mois_categorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow par mois, sous-catégorie, et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par mois/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Sous-categorie" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_month_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_month_subcat_statut["Date"] = pd.to_datetime(escrow_multi_month_subcat_statut["Date"], errors="coerce")
+        escrow_multi_month_subcat_statut["Mois"] = escrow_multi_month_subcat_statut["Date"].dt.month
+        escrow_multi_month_subcat_statut["Statut dossier"] = escrow_multi_month_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_month_subcat_statut = escrow_multi_month_subcat_statut.groupby(["Mois", "Sous-categorie", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_month_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_month_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_month_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_month_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_MoisSousCatStatut")
+        buf_multi_month_subcat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Mois/Sous-catégorie/Statut)", data=buf_multi_month_subcat_statut.getvalue(), file_name="escrow_mois_souscategorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 22 ===
+
+# === Début Partie 23 ===
+
+# Option : Synthèse Escrow par trimestre, catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par trimestre/catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Categories" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_trim_cat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_trim_cat_statut["Date"] = pd.to_datetime(escrow_multi_trim_cat_statut["Date"], errors="coerce")
+        escrow_multi_trim_cat_statut["Trimestre"] = escrow_multi_trim_cat_statut["Date"].dt.quarter
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_trim_cat_statut["Statut dossier"] = escrow_multi_trim_cat_statut.apply(statut_dossier, axis=1)
+        synth_multi_trim_cat_statut = escrow_multi_trim_cat_statut.groupby(["Trimestre", "Categories", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_trim_cat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_trim_cat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_trim_cat_statut, engine="openpyxl") as writer:
+            synth_multi_trim_cat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_TrimCatStatut")
+        buf_multi_trim_cat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Trimestre/Catégorie/Statut)", data=buf_multi_trim_cat_statut.getvalue(), file_name="escrow_trimestre_categorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow par trimestre, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par trimestre/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Sous-categorie" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_trim_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_trim_subcat_statut["Date"] = pd.to_datetime(escrow_multi_trim_subcat_statut["Date"], errors="coerce")
+        escrow_multi_trim_subcat_statut["Trimestre"] = escrow_multi_trim_subcat_statut["Date"].dt.quarter
+        escrow_multi_trim_subcat_statut["Statut dossier"] = escrow_multi_trim_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_trim_subcat_statut = escrow_multi_trim_subcat_statut.groupby(["Trimestre", "Sous-categorie", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_trim_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_trim_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_trim_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_trim_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_TrimSousCatStatut")
+        buf_multi_trim_subcat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Trimestre/Sous-catégorie/Statut)", data=buf_multi_trim_subcat_statut.getvalue(), file_name="escrow_trimestre_souscategorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 23 ===
+
+# === Début Partie 24 ===
+
+# Option : Synthèse Escrow par année, catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Categories" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_annee_cat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_cat_statut["Date"] = pd.to_datetime(escrow_multi_annee_cat_statut["Date"], errors="coerce")
+        escrow_multi_annee_cat_statut["Année"] = escrow_multi_annee_cat_statut["Date"].dt.year
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_cat_statut["Statut dossier"] = escrow_multi_annee_cat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_cat_statut = escrow_multi_annee_cat_statut.groupby(["Année", "Categories", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_cat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_cat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_cat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_cat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeCatStatut")
+        buf_multi_annee_cat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Année/Catégorie/Statut)", data=buf_multi_annee_cat_statut.getvalue(), file_name="escrow_annee_categorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow par année, visa et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/visa/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Visa" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_annee_visa_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_visa_statut["Date"] = pd.to_datetime(escrow_multi_annee_visa_statut["Date"], errors="coerce")
+        escrow_multi_annee_visa_statut["Année"] = escrow_multi_annee_visa_statut["Date"].dt.year
+        escrow_multi_annee_visa_statut["Statut dossier"] = escrow_multi_annee_visa_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_visa_statut = escrow_multi_annee_visa_statut.groupby(["Année", "Visa", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_visa_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_visa_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_visa_statut, engine="openpyxl") as writer:
+            synth_multi_annee_visa_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeVisaStatut")
+        buf_multi_annee_visa_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Année/Visa/Statut)", data=buf_multi_annee_visa_statut.getvalue(), file_name="escrow_annee_visa_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 24 ===
+
+# === Début Partie 25 ===
+
+# Option : Synthèse Escrow par année, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Sous-categorie" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_annee_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_subcat_statut["Année"] = escrow_multi_annee_subcat_statut["Date"].dt.year
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_subcat_statut["Statut dossier"] = escrow_multi_annee_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_subcat_statut = escrow_multi_annee_subcat_statut.groupby(["Année", "Sous-categorie", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeSousCatStatut")
+        buf_multi_annee_subcat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Année/Sous-catégorie/Statut)", data=buf_multi_annee_subcat_statut.getvalue(), file_name="escrow_annee_souscategorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow par année, type de visa et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/visa/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Visa" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_annee_visa_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_visa_statut["Date"] = pd.to_datetime(escrow_multi_annee_visa_statut["Date"], errors="coerce")
+        escrow_multi_annee_visa_statut["Année"] = escrow_multi_annee_visa_statut["Date"].dt.year
+        escrow_multi_annee_visa_statut["Statut dossier"] = escrow_multi_annee_visa_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_visa_statut = escrow_multi_annee_visa_statut.groupby(["Année", "Visa", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_visa_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_visa_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_visa_statut, engine="openpyxl") as writer:
+            synth_multi_annee_visa_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeVisaStatut")
+        buf_multi_annee_visa_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Année/Visa/Statut)", data=buf_multi_annee_visa_statut.getvalue(), file_name="escrow_annee_visa_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 25 ===
+
+# === Début Partie 26 ===
+
+# Option : Synthèse Escrow par année, trimestre et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/trimestre/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns:
+        escrow_multi_annee_trim_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_trim_statut["Date"] = pd.to_datetime(escrow_multi_annee_trim_statut["Date"], errors="coerce")
+        escrow_multi_annee_trim_statut["Année"] = escrow_multi_annee_trim_statut["Date"].dt.year
+        escrow_multi_annee_trim_statut["Trimestre"] = escrow_multi_annee_trim_statut["Date"].dt.quarter
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_trim_statut["Statut dossier"] = escrow_multi_annee_trim_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_trim_statut = escrow_multi_annee_trim_statut.groupby(["Année", "Trimestre", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_trim_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_trim_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_trim_statut, engine="openpyxl") as writer:
+            synth_multi_annee_trim_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeTrimStatut")
+        buf_multi_annee_trim_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Année/Trimestre/Statut)", data=buf_multi_annee_trim_statut.getvalue(), file_name="escrow_annee_trimestre_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Option : Synthèse Escrow par année, trimestre, catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/trimestre/catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Categories" in df_all.columns:
+        escrow_multi_annee_trim_cat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_trim_cat_statut["Date"] = pd.to_datetime(escrow_multi_annee_trim_cat_statut["Date"], errors="coerce")
+        escrow_multi_annee_trim_cat_statut["Année"] = escrow_multi_annee_trim_cat_statut["Date"].dt.year
+        escrow_multi_annee_trim_cat_statut["Trimestre"] = escrow_multi_annee_trim_cat_statut["Date"].dt.quarter
+        escrow_multi_annee_trim_cat_statut["Statut dossier"] = escrow_multi_annee_trim_cat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_trim_cat_statut = escrow_multi_annee_trim_cat_statut.groupby(["Année", "Trimestre", "Categories", "Statut dossier"]).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_trim_cat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_trim_cat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_trim_cat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_trim_cat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeTrimCatStatut")
+        buf_multi_annee_trim_cat_statut.seek(0)
+        st.download_button("Télécharger XLSX (Escrow Année/Trimestre/Catégorie/Statut)", data=buf_multi_annee_trim_cat_statut.getvalue(), file_name="escrow_annee_trimestre_categorie_statut_export.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# === Fin Partie 26 ===
+
+# === Début Partie 27 ===
+
+# Option : Synthèse Escrow par année, trimestre, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/trimestre/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Sous-categorie" in df_all.columns:
+        escrow_multi_annee_trim_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_trim_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_trim_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_trim_subcat_statut["Année"] = escrow_multi_annee_trim_subcat_statut["Date"].dt.year
+        escrow_multi_annee_trim_subcat_statut["Trimestre"] = escrow_multi_annee_trim_subcat_statut["Date"].dt.quarter
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_trim_subcat_statut["Statut dossier"] = escrow_multi_annee_trim_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_trim_subcat_statut = escrow_multi_annee_trim_subcat_statut.groupby(
+            ["Année", "Trimestre", "Sous-categorie", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_trim_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_trim_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_trim_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_trim_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeTrimSousCatStatut")
+        buf_multi_annee_trim_subcat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Trimestre/Sous-catégorie/Statut)",
+            data=buf_multi_annee_trim_subcat_statut.getvalue(),
+            file_name="escrow_annee_trimestre_souscategorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# Option : Synthèse Escrow par année, trimestre, type de visa et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/trimestre/visa/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Visa" in df_all.columns:
+        escrow_multi_annee_trim_visa_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_trim_visa_statut["Date"] = pd.to_datetime(escrow_multi_annee_trim_visa_statut["Date"], errors="coerce")
+        escrow_multi_annee_trim_visa_statut["Année"] = escrow_multi_annee_trim_visa_statut["Date"].dt.year
+        escrow_multi_annee_trim_visa_statut["Trimestre"] = escrow_multi_annee_trim_visa_statut["Date"].dt.quarter
+        escrow_multi_annee_trim_visa_statut["Statut dossier"] = escrow_multi_annee_trim_visa_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_trim_visa_statut = escrow_multi_annee_trim_visa_statut.groupby(
+            ["Année", "Trimestre", "Visa", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_trim_visa_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_trim_visa_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_trim_visa_statut, engine="openpyxl") as writer:
+            synth_multi_annee_trim_visa_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeTrimVisaStatut")
+        buf_multi_annee_trim_visa_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Trimestre/Visa/Statut)",
+            data=buf_multi_annee_trim_visa_statut.getvalue(),
+            file_name="escrow_annee_trimestre_visa_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# === Fin Partie 27 ===
+
+# === Début Partie 28 ===
+
+# Option : Synthèse Escrow par année, trimestre, type de visa et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/trimestre/visa/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Visa" in df_all.columns:
+        escrow_multi_annee_trim_visa_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_trim_visa_statut["Date"] = pd.to_datetime(escrow_multi_annee_trim_visa_statut["Date"], errors="coerce")
+        escrow_multi_annee_trim_visa_statut["Année"] = escrow_multi_annee_trim_visa_statut["Date"].dt.year
+        escrow_multi_annee_trim_visa_statut["Trimestre"] = escrow_multi_annee_trim_visa_statut["Date"].dt.quarter
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_trim_visa_statut["Statut dossier"] = escrow_multi_annee_trim_visa_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_trim_visa_statut = escrow_multi_annee_trim_visa_statut.groupby(
+            ["Année", "Trimestre", "Visa", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_trim_visa_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_trim_visa_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_trim_visa_statut, engine="openpyxl") as writer:
+            synth_multi_annee_trim_visa_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeTrimVisaStatut")
+        buf_multi_annee_trim_visa_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Trimestre/Visa/Statut)",
+            data=buf_multi_annee_trim_visa_statut.getvalue(),
+            file_name="escrow_annee_trimestre_visa_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# Option : Synthèse Escrow par année, trimestre, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/trimestre/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Sous-categorie" in df_all.columns:
+        escrow_multi_annee_trim_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_trim_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_trim_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_trim_subcat_statut["Année"] = escrow_multi_annee_trim_subcat_statut["Date"].dt.year
+        escrow_multi_annee_trim_subcat_statut["Trimestre"] = escrow_multi_annee_trim_subcat_statut["Date"].dt.quarter
+        escrow_multi_annee_trim_subcat_statut["Statut dossier"] = escrow_multi_annee_trim_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_trim_subcat_statut = escrow_multi_annee_trim_subcat_statut.groupby(
+            ["Année", "Trimestre", "Sous-categorie", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_trim_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_trim_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_trim_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_trim_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeTrimSousCatStatut")
+        buf_multi_annee_trim_subcat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Trimestre/Sous-catégorie/Statut)",
+            data=buf_multi_annee_trim_subcat_statut.getvalue(),
+            file_name="escrow_annee_trimestre_souscategorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# === Fin Partie 28 ===
+
+# === Début Partie 29 ===
+
+# Option : Synthèse Escrow par année, mois, catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Categories" in df_all.columns:
+        escrow_multi_annee_mois_cat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_cat_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_cat_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_cat_statut["Année"] = escrow_multi_annee_mois_cat_statut["Date"].dt.year
+        escrow_multi_annee_mois_cat_statut["Mois"] = escrow_multi_annee_mois_cat_statut["Date"].dt.month
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_mois_cat_statut["Statut dossier"] = escrow_multi_annee_mois_cat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_cat_statut = escrow_multi_annee_mois_cat_statut.groupby(
+            ["Année", "Mois", "Categories", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_cat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_cat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_cat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_cat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisCatStatut")
+        buf_multi_annee_mois_cat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Catégorie/Statut)",
+            data=buf_multi_annee_mois_cat_statut.getvalue(),
+            file_name="escrow_annee_mois_categorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# Option : Synthèse Escrow par année, mois, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Sous-categorie" in df_all.columns:
+        escrow_multi_annee_mois_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_subcat_statut["Année"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.year
+        escrow_multi_annee_mois_subcat_statut["Mois"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.month
+        escrow_multi_annee_mois_subcat_statut["Statut dossier"] = escrow_multi_annee_mois_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_subcat_statut = escrow_multi_annee_mois_subcat_statut.groupby(
+            ["Année", "Mois", "Sous-categorie", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisSousCatStatut")
+        buf_multi_annee_mois_subcat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Sous-catégorie/Statut)",
+            data=buf_multi_annee_mois_subcat_statut.getvalue(),
+            file_name="escrow_annee_mois_souscategorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# === Fin Partie 29 ===
+
+# === Début Partie 30 ===
+
+# Option : Synthèse Escrow par année, mois, type de visa et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/visa/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Visa" in df_all.columns:
+        escrow_multi_annee_mois_visa_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_visa_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_visa_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_visa_statut["Année"] = escrow_multi_annee_mois_visa_statut["Date"].dt.year
+        escrow_multi_annee_mois_visa_statut["Mois"] = escrow_multi_annee_mois_visa_statut["Date"].dt.month
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_mois_visa_statut["Statut dossier"] = escrow_multi_annee_mois_visa_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_visa_statut = escrow_multi_annee_mois_visa_statut.groupby(
+            ["Année", "Mois", "Visa", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_visa_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_visa_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_visa_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_visa_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisVisaStatut")
+        buf_multi_annee_mois_visa_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Visa/Statut)",
+            data=buf_multi_annee_mois_visa_statut.getvalue(),
+            file_name="escrow_annee_mois_visa_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# Option : Synthèse Escrow par année, mois, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Sous-categorie" in df_all.columns:
+        escrow_multi_annee_mois_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_subcat_statut["Année"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.year
+        escrow_multi_annee_mois_subcat_statut["Mois"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.month
+        escrow_multi_annee_mois_subcat_statut["Statut dossier"] = escrow_multi_annee_mois_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_subcat_statut = escrow_multi_annee_mois_subcat_statut.groupby(
+            ["Année", "Mois", "Sous-categorie", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisSousCatStatut")
+        buf_multi_annee_mois_subcat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Sous-catégorie/Statut)",
+            data=buf_multi_annee_mois_subcat_statut.getvalue(),
+            file_name="escrow_annee_mois_souscategorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# === Fin Partie 30 ===
+
+# === Début Partie 31 ===
+
+# Option : Synthèse Escrow par année, mois, visa et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/visa/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Visa" in df_all.columns:
+        escrow_multi_annee_mois_visa_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_visa_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_visa_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_visa_statut["Année"] = escrow_multi_annee_mois_visa_statut["Date"].dt.year
+        escrow_multi_annee_mois_visa_statut["Mois"] = escrow_multi_annee_mois_visa_statut["Date"].dt.month
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_mois_visa_statut["Statut dossier"] = escrow_multi_annee_mois_visa_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_visa_statut = escrow_multi_annee_mois_visa_statut.groupby(
+            ["Année", "Mois", "Visa", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_visa_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_visa_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_visa_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_visa_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisVisaStatut")
+        buf_multi_annee_mois_visa_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Visa/Statut)",
+            data=buf_multi_annee_mois_visa_statut.getvalue(),
+            file_name="escrow_annee_mois_visa_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# Option : Synthèse Escrow par année, mois, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Sous-categorie" in df_all.columns:
+        escrow_multi_annee_mois_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_subcat_statut["Année"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.year
+        escrow_multi_annee_mois_subcat_statut["Mois"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.month
+        escrow_multi_annee_mois_subcat_statut["Statut dossier"] = escrow_multi_annee_mois_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_subcat_statut = escrow_multi_annee_mois_subcat_statut.groupby(
+            ["Année", "Mois", "Sous-categorie", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisSousCatStatut")
+        buf_multi_annee_mois_subcat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Sous-catégorie/Statut)",
+            data=buf_multi_annee_mois_subcat_statut.getvalue(),
+            file_name="escrow_annee_mois_souscategorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# === Fin Partie 31 ===
+
+# === Début Partie 32 ===
+
+# Option : Synthèse Escrow par année, mois, catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Categories" in df_all.columns:
+        escrow_multi_annee_mois_cat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_cat_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_cat_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_cat_statut["Année"] = escrow_multi_annee_mois_cat_statut["Date"].dt.year
+        escrow_multi_annee_mois_cat_statut["Mois"] = escrow_multi_annee_mois_cat_statut["Date"].dt.month
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_mois_cat_statut["Statut dossier"] = escrow_multi_annee_mois_cat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_cat_statut = escrow_multi_annee_mois_cat_statut.groupby(
+            ["Année", "Mois", "Categories", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_cat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_cat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_cat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_cat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisCatStatut")
+        buf_multi_annee_mois_cat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Catégorie/Statut)",
+            data=buf_multi_annee_mois_cat_statut.getvalue(),
+            file_name="escrow_annee_mois_categorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# Option : Synthèse Escrow par année, mois, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Sous-categorie" in df_all.columns:
+        escrow_multi_annee_mois_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_subcat_statut["Année"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.year
+        escrow_multi_annee_mois_subcat_statut["Mois"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.month
+        escrow_multi_annee_mois_subcat_statut["Statut dossier"] = escrow_multi_annee_mois_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_subcat_statut = escrow_multi_annee_mois_subcat_statut.groupby(
+            ["Année", "Mois", "Sous-categorie", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisSousCatStatut")
+        buf_multi_annee_mois_subcat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Sous-catégorie/Statut)",
+            data=buf_multi_annee_mois_subcat_statut.getvalue(),
+            file_name="escrow_annee_mois_souscategorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# === Fin Partie 32 ===
+
+# === Début Partie 33 ===
+
+# Option : Synthèse Escrow par année, mois, type de visa et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/visa/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Visa" in df_all.columns:
+        escrow_multi_annee_mois_visa_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_visa_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_visa_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_visa_statut["Année"] = escrow_multi_annee_mois_visa_statut["Date"].dt.year
+        escrow_multi_annee_mois_visa_statut["Mois"] = escrow_multi_annee_mois_visa_statut["Date"].dt.month
+        def statut_dossier(row):
+            if row.get("Dossiers envoyé", 0) == 1:
+                if row.get("Dossier approuvé", 0) == 1:
+                    return "Approuvé"
+                elif row.get("Dossier refusé", 0) == 1:
+                    return "Refusé"
+                elif row.get("Dossier Annulé", 0) == 1:
+                    return "Annulé"
+                else:
+                    return "Envoyé en attente"
+            else:
+                return "Non envoyé"
+        escrow_multi_annee_mois_visa_statut["Statut dossier"] = escrow_multi_annee_mois_visa_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_visa_statut = escrow_multi_annee_mois_visa_statut.groupby(
+            ["Année", "Mois", "Visa", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_visa_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_visa_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_visa_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_visa_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisVisaStatut")
+        buf_multi_annee_mois_visa_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Visa/Statut)",
+            data=buf_multi_annee_mois_visa_statut.getvalue(),
+            file_name="escrow_annee_mois_visa_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# Option : Synthèse Escrow par année, mois, sous-catégorie et statut dossier (multi-axes) et export associé
+with st.expander("🔢 Synthèse Escrow par année/mois/sous-catégorie/statut", expanded=False):
+    if "Escrow" in df_all.columns and "Date" in df_all.columns and "Sous-categorie" in df_all.columns:
+        escrow_multi_annee_mois_subcat_statut = df_all[df_all["Escrow"] == 1].copy()
+        escrow_multi_annee_mois_subcat_statut["Date"] = pd.to_datetime(escrow_multi_annee_mois_subcat_statut["Date"], errors="coerce")
+        escrow_multi_annee_mois_subcat_statut["Année"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.year
+        escrow_multi_annee_mois_subcat_statut["Mois"] = escrow_multi_annee_mois_subcat_statut["Date"].dt.month
+        escrow_multi_annee_mois_subcat_statut["Statut dossier"] = escrow_multi_annee_mois_subcat_statut.apply(statut_dossier, axis=1)
+        synth_multi_annee_mois_subcat_statut = escrow_multi_annee_mois_subcat_statut.groupby(
+            ["Année", "Mois", "Sous-categorie", "Statut dossier"]
+        ).size().reset_index(name="Nombre dossiers Escrow")
+        st.dataframe(synth_multi_annee_mois_subcat_statut, use_container_width=True)
+        # Export XLSX
+        buf_multi_annee_mois_subcat_statut = BytesIO()
+        with pd.ExcelWriter(buf_multi_annee_mois_subcat_statut, engine="openpyxl") as writer:
+            synth_multi_annee_mois_subcat_statut.to_excel(writer, index=False, sheet_name="Synthese_Escrow_AnneeMoisSousCatStatut")
+        buf_multi_annee_mois_subcat_statut.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow Année/Mois/Sous-catégorie/Statut)",
+            data=buf_multi_annee_mois_subcat_statut.getvalue(),
+            file_name="escrow_annee_mois_souscategorie_statut_export.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# === Fin du script Escrow ===
