@@ -756,6 +756,7 @@ with tabs[5]:
                     st.cache_data.clear()
                     st.rerun()
 
+
 # --- ONGLET 6 : Gestion CRUD
 with tabs[5]:
     st.subheader("🧾 Gestion (Ajouter / Modifier / Supprimer)")
