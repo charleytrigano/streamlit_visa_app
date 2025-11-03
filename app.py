@@ -428,6 +428,73 @@ with tabs[3]:
                 st.download_button("Télécharger XLSX", data=buf.getvalue(), file_name="escrow_export.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+with tabs[4]:
+    st.subheader("👤 Compte client")
+    if df_all is None or df_all.empty:
+        st.info("Aucun client chargé.")
+    else:
+        left, right = st.columns(2)
+        ids = sorted(df_all["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_all.columns else []
+        noms = sorted(df_all["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_all.columns else []
+
+        sel_id = left.selectbox("ID_Client", [""] + ids, index=0, key=skey("acct", "id"))
+        sel_nom = right.selectbox("Nom", [""] + noms, index=0, key=skey("acct", "nm"))
+
+        subset = df_all.copy()
+        if sel_id:
+            subset = subset[subset["ID_Client"].astype(str) == sel_id]
+        elif sel_nom:
+            subset = subset[subset["Nom"].astype(str) == sel_nom]
+
+        if subset.empty:
+            st.warning("Sélectionnez un client pour afficher le compte.")
+        else:
+            row = subset.iloc[0].to_dict()
+
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Dossier N", _safe_str(row.get("Dossier N", "")))
+            total = float(_to_num(row.get("Montant honoraires (US $)", 0)) + _to_num(row.get("Autres frais (US $)", 0)))
+            r2.metric("Total", _fmt_money(total))
+            r3.metric("Payé", _fmt_money(_to_num(row.get("Payé", 0))))
+            r4.metric("Solde", _fmt_money(_to_num(row.get("Solde", 0))))
+
+            d1, d2, d3 = st.columns(3)
+            d1.write(f"**Catégorie :** {_safe_str(row.get('Categories', ''))}")
+            d1.write(f"**Sous-catégorie :** {_safe_str(row.get('Sous-categorie', ''))}")
+            d1.write(f"**Visa :** {_safe_str(row.get('Visa', ''))}")
+            d2.write(f"**Date :** {_safe_str(row.get('Date', ''))}")
+            d2.write(f"**Mois (MM) :** {_safe_str(row.get('Mois', ''))}")
+            d3.write(f"**Commentaires :** {_safe_str(row.get('Commentaires', ''))}")
+
+            s1, s2 = st.columns(2)
+            def sdate(label):
+                val = row.get(label, "")
+                if isinstance(val, (date, datetime)):
+                    return val.strftime("%Y-%m-%d")
+                try:
+                    d = pd.to_datetime(val, errors="coerce")
+                    return d.date().strftime("%Y-%m-%d") if pd.notna(d) else ""
+                except Exception:
+                    return _safe_str(val)
+            s1.write(f"- **Dossier envoyé** : {'Oui' if sdate('Date denvoi') else 'Non'} | Date : {sdate('Date denvoi')}")
+            s1.write(f"- **Dossier approuvé** : {'Oui' if sdate('Date dacceptation') else 'Non'} | Date : {sdate('Date dacceptation')}")
+            s2.write(f"- **Dossier refusé** : {'Oui' if sdate('Date de refus') else 'Non'} | Date : {sdate('Date de refus')}")
+            s2.write(f"- **Dossier annulé** : {'Oui' if sdate('Date dannulation') else 'Non'} | Date : {sdate('Date dannulation')}")
+            rfeflag = int(_to_num(row.get("RFE", 0)) or 0)
+            st.write(f"- **RFE** : {'Oui' if rfeflag else 'Non'}")
+
+            mvts = []
+            if "Acompte 1" in row and _to_num(row["Acompte 1"]) > 0:
+                mvts.append({"Libellé": "Acompte 1", "Montant": float(_to_num(row["Acompte 1"]))})
+            if "Acompte 2" in row and _to_num(row["Acompte 2"]) > 0:
+                mvts.append({"Libellé": "Acompte 2", "Montant": float(_to_num(row["Acompte 2"]))})
+            if mvts:
+                dfm = pd.DataFrame(mvts)
+                dfm["Montant"] = dfm["Montant"].map(_fmt_money)
+                st.dataframe(dfm, use_container_width=True, hide_index=True, key=skey("acct", "mvts"))
+            else:
+                st.caption("Aucun acompte enregistré dans le fichier (colonnes « Acompte 1 » / « Acompte 2 »).")
+
 # --- ONGLET 5 : Compte client
 with tabs[4]:
     st.subheader("👤 Compte client")
