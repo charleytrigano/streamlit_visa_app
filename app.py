@@ -560,6 +560,201 @@ with tabs[4]:
                 st.dataframe(dfm, use_container_width=True, hide_index=True, key=skey("acct", "mvts"))
             else:
                 st.caption("Aucun acompte enregistré dans le fichier (colonnes « Acompte 1 » / « Acompte 2 »).")
+ 
+
+with tabs[5]:
+    st.subheader("🧾 Gestion (Ajouter / Modifier / Supprimer)")
+    df_live = df_all.copy() if df_all is not None else pd.DataFrame()
+
+    if df_live.empty:
+        st.info("Aucun client à gérer (chargez un fichier Clients).")
+    else:
+        op = st.radio("Action", ["Ajouter", "Modifier", "Supprimer"], horizontal=True, key=skey("crud", "op"))
+        cats = sorted(df_live["Categories"].dropna().astype(str).unique().tolist()) if "Categories" in df_live.columns else []
+
+        def subs_for(cat):
+            return sorted(df_live[df_live["Categories"].astype(str) == cat]["Sous-categorie"].dropna().astype(str).unique().tolist())
+
+        if op == "Ajouter":
+            st.markdown("### ➕ Ajouter")
+            c1, c2, c3 = st.columns(3)
+            nom = c1.text_input("Nom", "", key=skey("add", "nom"))
+            dval = _date_for_widget(date.today())
+            dt = c2.date_input("Date de création", value=dval, key=skey("add", "date"))
+            mois = c3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1, 13)], index=int(dval.month) - 1, key=skey("add", "mois"))
+
+            v1, v2, v3 = st.columns(3)
+            cat = v1.selectbox("Catégorie", [""] + cats, index=0, key=skey("add", "cat"))
+            sub = ""
+            subs = []
+            if cat:
+                subs = subs_for(cat)
+            sub = v2.selectbox("Sous-catégorie", [""] + subs, index=0, key=skey("add", "sub"))
+            visa_val = v3.text_input("Visa (libre ou dérivé)", sub if sub else "", key=skey("add", "visa"))
+
+            f1, f2 = st.columns(2)
+            honor = f1.number_input("Montant honoraires (US $)", min_value=0.0, value=0.0, step=50.0, format="%.2f", key=skey("add", "h"))
+            other = f2.number_input("Autres frais (US $)", min_value=0.0, value=0.0, step=20.0, format="%.2f", key=skey("add", "o"))
+            acomp1 = st.number_input("Acompte 1", min_value=0.0, value=0.0, step=10.0, format="%.2f", key=skey("add", "a1"))
+            acomp2 = st.number_input("Acompte 2", min_value=0.0, value=0.0, step=10.0, format="%.2f", key=skey("add", "a2"))
+            comm = st.text_area("Commentaires", "", key=skey("add", "com"))
+
+            s1, s2 = st.columns(2)
+            sent_d = s1.date_input("Date denvoi", value=None, key=skey("add", "sentd"))
+            acc_d = s1.date_input("Date dacceptation", value=None, key=skey("add", "accd"))
+            ref_d = s2.date_input("Date de refus", value=None, key=skey("add", "refd"))
+            ann_d = s2.date_input("Date dannulation", value=None, key=skey("add", "annd"))
+            rfe = st.checkbox("RFE", value=False, key=skey("add", "rfe"))
+            escrow_val = st.checkbox("Escrow", value=False, key=skey("add", "escrow"))
+
+            if st.button("💾 Enregistrer", key=skey("add", "save")):
+                if not nom or not cat or not sub:
+                    st.warning("Nom, Catégorie et Sous-catégorie sont requis.")
+                    st.stop()
+                total = float(honor) + float(other)
+                paye = float(acomp1) + float(acomp2)
+                solde = max(0.0, total - paye)
+                new_id = f"{_norm(nom)}-{int(datetime.now().timestamp())}"
+                new_dossier = next_dossier(df_live)
+
+                new_row = {
+                    "ID_Client": new_id,
+                    "Dossier N": new_dossier,
+                    "Nom": nom,
+                    "Date": dt,
+                    "Mois": f"{int(mois):02d}",
+                    "Categories": cat,
+                    "Sous-categorie": sub,
+                    "Visa": visa_val,
+                    "Montant honoraires (US $)": float(honor),
+                    "Autres frais (US $)": float(other),
+                    "Payé": paye,
+                    "Solde": solde,
+                    "Acompte 1": float(acomp1),
+                    "Acompte 2": float(acomp2),
+                    "Commentaires": comm,
+                    "Date denvoi": sent_d,
+                    "Date dacceptation": acc_d,
+                    "Date de refus": ref_d,
+                    "Date dannulation": ann_d,
+                    "RFE": 1 if rfe else 0,
+                    "Escrow": 1 if escrow_val else 0
+                }
+                if new_row.get("Escrow",0) == 1 and pd.notna(new_row.get("Date denvoi")) and new_row.get("Date denvoi"):
+                    montant_escrow = _to_num(new_row.get("Acompte 1",0))
+                    st.info(f"⚠️ Escrow activé : Dossier {new_row.get('Dossier N','')} / Client {new_row.get('Nom','')} — Montant à réclamer : {_fmt_money(montant_escrow)}")
+                df_new = pd.concat([df_live, pd.DataFrame([new_row])], ignore_index=True)
+                st.success("Client ajouté (en mémoire). Utilisez l’onglet Export pour sauvegarder.")
+                st.cache_data.clear()
+                st.rerun()
+
+        elif op == "Modifier":
+            st.markdown("### ✏️ Modifier")
+            names = sorted(df_live["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_live.columns else []
+            ids = sorted(df_live["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_live.columns else []
+            m1, m2 = st.columns(2)
+            target_name = m1.selectbox("Nom", [""] + names, index=0, key=skey("mod", "nom"))
+            target_id = m2.selectbox("ID_Client", [""] + ids, index=0, key=skey("mod", "id"))
+
+            mask = None
+            if target_id:
+                mask = (df_live["ID_Client"].astype(str) == target_id)
+            elif target_name:
+                mask = (df_live["Nom"].astype(str) == target_name)
+
+            if not (mask is not None and mask.any()):
+                st.stop()
+
+            idx = df_live[mask].index[0]
+            row = df_live.loc[idx].copy()
+
+            d1, d2, d3 = st.columns(3)
+            nom = d1.text_input("Nom", _safe_str(row.get("Nom", "")), key=skey("mod", "nomv"))
+            dval = _date_for_widget(row.get("Date"))
+            dt = d2.date_input("Date de création", value=dval, key=skey("mod", "date"))
+            mois = d3.selectbox("Mois (MM)", [f"{m:02d}" for m in range(1, 13)], index=max(0, int(_safe_str(row.get("Mois", "01"))) - 1), key=skey("mod", "mois"))
+
+            v1, v2, v3 = st.columns(3)
+            preset_cat = _safe_str(row.get("Categories", ""))
+            cat = v1.selectbox("Catégorie", [""] + cats, index=(cats.index(preset_cat) + 1 if preset_cat in cats else 0), key=skey("mod", "cat"))
+            sub = _safe_str(row.get("Sous-categorie", ""))
+            subs = subs_for(cat) if cat else []
+            sub = v2.selectbox("Sous-catégorie", [""] + subs, index=(subs.index(sub) + 1 if sub in subs else 0), key=skey("mod", "sub"))
+            visa_val = v3.text_input("Visa (libre ou dérivé)", _safe_str(row.get("Visa", "")), key=skey("mod", "visa"))
+
+            f1, f2 = st.columns(2)
+            honor = f1.number_input("Montant honoraires (US $)", min_value=0.0, value=_to_num(row.get("Montant honoraires (US $)", 0)), step=50.0, format="%.2f", key=skey("mod", "h"))
+            other = f2.number_input("Autres frais (US $)", min_value=0.0, value=_to_num(row.get("Autres frais (US $)", 0)), step=20.0, format="%.2f", key=skey("mod", "o"))
+            acomp1 = st.number_input("Acompte 1", min_value=0.0, value=_to_num(row.get("Acompte 1", 0)), step=10.0, format="%.2f", key=skey("mod", "a1"))
+            acomp2 = st.number_input("Acompte 2", min_value=0.0, value=_to_num(row.get("Acompte 2", 0)), step=10.0, format="%.2f", key=skey("mod", "a2"))
+            comm = st.text_area("Commentaires", _safe_str(row.get("Commentaires", "")), key=skey("mod", "com"))
+
+            s1, s2 = st.columns(2)
+            sent_d = s1.date_input("Date denvoi", value=_date_for_widget(row.get("Date denvoi")), key=skey("mod", "sentd"))
+            acc_d = s1.date_input("Date dacceptation", value=_date_for_widget(row.get("Date dacceptation")), key=skey("mod", "accd"))
+            ref_d = s2.date_input("Date de refus", value=_date_for_widget(row.get("Date de refus")), key=skey("mod", "refd"))
+            ann_d = s2.date_input("Date dannulation", value=_date_for_widget(row.get("Date dannulation")), key=skey("mod", "annd"))
+            rfe = st.checkbox("RFE", value=bool(int(_to_num(row.get("RFE", 0)) or 0)), key=skey("mod", "rfe"))
+            escrow_val = st.checkbox("Escrow", value=bool(row.get("Escrow",0)), key=skey("mod", "escrow"))
+
+            if st.button("💾 Enregistrer les modifications", key=skey("mod", "save")):
+                if not nom or not cat or not sub:
+                    st.warning("Nom, Catégorie et Sous-catégorie sont requis.")
+                    st.stop()
+                total = float(honor) + float(other)
+                paye = float(acomp1) + float(acomp2)
+                solde = max(0.0, total - paye)
+
+                df_live.at[idx, "Nom"] = nom
+                df_live.at[idx, "Date"] = dt
+                df_live.at[idx, "Mois"] = f"{int(mois):02d}"
+                df_live.at[idx, "Categories"] = cat
+                df_live.at[idx, "Sous-categorie"] = sub
+                df_live.at[idx, "Visa"] = visa_val
+                df_live.at[idx, "Montant honoraires (US $)"] = float(honor)
+                df_live.at[idx, "Autres frais (US $)"] = float(other)
+                df_live.at[idx, "Acompte 1"] = float(acomp1)
+                df_live.at[idx, "Acompte 2"] = float(acomp2)
+                df_live.at[idx, "Payé"] = float(paye)
+                df_live.at[idx, "Solde"] = float(solde)
+                df_live.at[idx, "Commentaires"] = comm
+                df_live.at[idx, "Date denvoi"] = sent_d
+                df_live.at[idx, "Date dacceptation"] = acc_d
+                df_live.at[idx, "Date de refus"] = ref_d
+                df_live.at[idx, "Date dannulation"] = ann_d
+                df_live.at[idx, "RFE"] = 1 if rfe else 0
+                df_live.at[idx, "Escrow"] = 1 if escrow_val else 0
+
+                if df_live.at[idx, "Escrow"] == 1 and pd.notna(df_live.at[idx, "Date denvoi"]) and df_live.at[idx, "Date denvoi"]:
+                    montant_escrow = _to_num(df_live.at[idx, "Acompte 1"])
+                    st.info(f"⚠️ Escrow activé : Dossier {df_live.at[idx,'Dossier N']} / Client {df_live.at[idx,'Nom']} — Montant à réclamer : {_fmt_money(montant_escrow)}")
+
+                st.success("Modifié (en mémoire). Utilisez Export pour sauvegarder.")
+                st.cache_data.clear()
+                st.rerun()
+
+        elif op == "Supprimer":
+            st.markdown("### 🗑️ Supprimer")
+            names = sorted(df_live["Nom"].dropna().astype(str).unique().tolist()) if "Nom" in df_live.columns else []
+            ids = sorted(df_live["ID_Client"].dropna().astype(str).unique().tolist()) if "ID_Client" in df_live.columns else []
+            d1, d2 = st.columns(2)
+            target_name = d1.selectbox("Nom", [""] + names, index=0, key=skey("del", "nom"))
+            target_id = d2.selectbox("ID_Client", [""] + ids, index=0, key=skey("del", "id"))
+
+            mask = None
+            if target_id:
+                mask = (df_live["ID_Client"].astype(str) == target_id)
+            elif target_name:
+                mask = (df_live["Nom"].astype(str) == target_name)
+
+            if mask is not None and mask.any():
+                row = df_live[mask].iloc[0]
+                st.write({"Dossier N": row.get("Dossier N", ""), "Nom": row.get("Nom", ""), "Visa": row.get("Visa", "")})
+                if st.button("❗ Confirmer la suppression", key=skey("del", "btn")):
+                    df_new = df_live[~mask].copy()
+                    st.success("Client supprimé (en mémoire). Utilisez Export pour sauvegarder.")
+                    st.cache_data.clear()
+                    st.rerun()
 
 # --- ONGLET 6 : Gestion CRUD
 with tabs[5]:
