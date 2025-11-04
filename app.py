@@ -1804,6 +1804,56 @@ with tabs[5]:
                         except Exception as e:
                             st.error(f"Erreur export XLSX: {e}")
 
+
+# ... [Tout le code ci-dessus inchangé] ...
+
+# ---- Onglet Escrow ----
+tabs.append("🛡️ Escrow")  # Ajoute un onglet si ce n'est pas déjà un list dynamique
+with st.tabs(tabs)[-1]:  # Ou st.tab("🛡️ Escrow") si tabs défini statiquement
+    st.subheader("🛡️ Synthèse des dossiers Escrow")
+
+    df_live = _get_df_live_safe()
+    if df_live is None or df_live.empty or "Escrow" not in df_live.columns:
+        st.info("Aucun dossier Escrow détecté.")
+    else:
+        # Filtrer les dossiers Escrow
+        escrow_df = df_live[df_live["Escrow"] == 1].copy()
+
+        # Colonnes à afficher
+        colonnes_affichage = [
+            "Dossier N",
+            "Nom",
+            "Date",                    # Date de création
+            "Acompte 1",               # = montant Escrow
+            "Date d'envoi"             # Peut être "Date denvoi" ou "Date d'envoi" ou à créer
+        ]
+        # Handle colonne "Date d'envoi"
+        if "Date d'envoi" not in escrow_df.columns and "Date denvoi" in escrow_df.columns:
+            escrow_df = escrow_df.rename(columns={"Date denvoi": "Date d'envoi"})
+        if "Date d'envoi" not in escrow_df.columns:
+            escrow_df["Date d'envoi"] = pd.NaT
+
+        # Ne garder que les colonnes existantes
+        colonnes_existantes = [col for col in colonnes_affichage if col in escrow_df.columns]
+
+        # Affichage tableau
+        st.markdown(f"**Nombre de dossiers Escrow : {len(escrow_df)}**")
+        st.dataframe(escrow_df[colonnes_existantes].reset_index(drop=True), use_container_width=True)
+
+        # Option export Excel
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            escrow_df[colonnes_existantes].to_excel(writer, index=False, sheet_name="Escrow")
+        buf.seek(0)
+        st.download_button(
+            "Télécharger XLSX (Escrow)",
+            data=buf.getvalue(),
+            file_name="Synthese_Escrow.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+
+
 # ---- Export tab ----
 with tabs[6]:
     st.header("💾 Export")
