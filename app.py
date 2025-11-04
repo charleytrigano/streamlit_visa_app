@@ -1807,9 +1807,19 @@ with tabs[5]:
 
 
 # ---- Onglet Escrow ----
-tabs.append("🛡️ Escrow")  # Ajoute un onglet si ce n'est pas déjà un list dynamique
-with st.tabs(tabs)[-1]:  # Ou st.tab("🛡️ Escrow") si tabs défini statiquement
-    st.subheader("🛡️ Synthèse des dossiers Escrow")
+tabs = st.tabs([
+    "📄 Fichiers",
+    "📊 Dashboard",
+    "📈 Analyses",
+    "➕ Ajouter",
+    "✏️ / 🗑️ Gestion",
+    "💳 Compta Client",
+    "💾 Export",
+    "🛡️ Escrow"
+])
+
+with tabs[-1]:  # onglet Escrow
+    # contenu de l'onglet Escrow
 
     df_live = _get_df_live_safe()
     if df_live is None or df_live.empty or "Escrow" not in df_live.columns:
