@@ -1805,7 +1805,6 @@ with tabs[5]:
                             st.error(f"Erreur export XLSX: {e}")
 
 
-# ... [Tout le code ci-dessus inchangé] ...
 
 # ---- Onglet Escrow ----
 tabs.append("🛡️ Escrow")  # Ajoute un onglet si ce n'est pas déjà un list dynamique
