@@ -1854,35 +1854,41 @@ tabs = st.tabs([
 
 # ---- Files tab ----
 with tabs[0]:
+    st.header("📂 Fichiers")    
     # ... [bloc fichiers original inchangé] ...
 
 # ---- Dashboard tab ----
 with tabs[1]:
+    st.subheader("📊 Dashboard")
     # ... [bloc dashboard original inchangé] ...
 
 # ---- Analyses tab ----
-with tabs[2]:
+with tabs[2]:st.subheader("📈 Analyses")    
     # ... [bloc analyses original inchangé] ...
 
 # ---- Ajouter tab ----
 with tabs[3]:
+    st.header("➕ Ajouter")
     # ... [bloc ajouter original inchangé] ...
 
 # ---- Gestion tab ----
 with tabs[4]:
+    st.header("✏️ / 🗑️ Gestion")
     # ... [bloc gestion original inchangé] ...
 
 # ---- Compta Client tab ----
 with tabs[5]:
+    st.header("💳 Compta Client")
     # ... [bloc compta client original inchangé] ...
 
 # ---- Export tab ----
 with tabs[6]:
+    st.header("💾 Export")
     # ... [bloc export original inchangé] ...
 
 # --- NOUVEAU ONGLET Escrow ---
 with tabs[7]:
-    st.subheader("🛡️ Synthèse des dossiers Escrow")
+    st.subheader("🛡️ Escrow")
     df_live = _get_df_live_safe()
     if df_live is None or df_live.empty or "Escrow" not in df_live.columns:
         st.info("Aucun dossier Escrow détecté.")
@@ -1918,7 +1924,6 @@ with tabs[7]:
         )
 
 # ... [fin du script inchangé]
-
 
 # ---- Export tab ----
 with tabs[6]:
