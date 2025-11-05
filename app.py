@@ -728,7 +728,7 @@ def parse_fiche_from_sheet(df_sheet: pd.DataFrame) -> Optional[pd.DataFrame]:
                     out["Commentaires"] = m[1].strip()
         paye = sum([out.get("Acompte 1",0.0), out.get("Acompte 2",0.0), out.get("Acompte 3",0.0), out.get("Acompte 4",0.0)])
         out["Paye"] = paye
-        out["Solde"] = out.get("Montant honoraires (US $)",0.0) + out.get("Autres frais (US $)",0.0) - payÃ©
+        out["Solde"] = out.get("Montant honoraires (US $)",0.0) + out.get("Autres frais (US $)",0.0) - paye
         out["Solde Ã  percevoir (US $)"] = out["Solde"]
         df_out = pd.DataFrame([out])
         for c in df_out.columns:
