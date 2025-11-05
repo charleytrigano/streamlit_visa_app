@@ -30,7 +30,7 @@ except Exception:
 # -------------------------
 # Configuration & constants
 # -------------------------
-APP_TITLE = "🛂 Visa Manager"
+APP_TITLE = "ðŸ›‚ Visa Manager"
 COLS_CLIENTS = [
     "ID_Client",
     "Dossier N",
@@ -41,19 +41,19 @@ COLS_CLIENTS = [
     "Visa",
     "Montant honoraires (US $)",
     "Autres frais (US $)",
-    "Payé",
+    "PayÃ©",
     "Solde",
-    "Solde à percevoir (US $)",
+    "Solde Ã  percevoir (US $)",
     "Acompte 1", "Date Acompte 1",
     "Acompte 2", "Date Acompte 2",
     "Acompte 3", "Date Acompte 3",
     "Acompte 4", "Date Acompte 4",
     "Escrow",
     "RFE",
-    "Dossiers envoyé",
-    "Dossier approuvé",
-    "Dossier refusé",
-    "Dossier Annulé",
+    "Dossiers envoyÃ©",
+    "Dossier approuvÃ©",
+    "Dossier refusÃ©",
+    "Dossier AnnulÃ©",
     "Commentaires",
     "ModeReglement",
     "ModeReglement_Ac1", "ModeReglement_Ac2", "ModeReglement_Ac3", "ModeReglement_Ac4"
@@ -66,7 +66,7 @@ SHEET_VISA = "Visa"
 SHEET_COMPTACLI = "ComptaCli"
 SID = "vmgr"
 DEFAULT_START_CLIENT_ID = 13057
-DEFAULT_FLAGS = ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]
+DEFAULT_FLAGS = ["RFE", "Dossiers envoyÃ©", "Dossier approuvÃ©", "Dossier refusÃ©", "Dossier AnnulÃ©"]
 
 def skey(*parts: str) -> str:
     return f"{SID}_" + "_".join([p for p in parts if p])
@@ -85,7 +85,7 @@ def remove_accents(s: Any) -> str:
     if s is None:
         return ""
     s2 = str(s)
-    replace_map = {"é":"e","è":"e","ê":"e","ë":"e","à":"a","â":"a","î":"i","ï":"i","ô":"o","ö":"o","ù":"u","û":"u","ü":"u","ç":"c"}
+    replace_map = {"Ã©":"e","Ã¨":"e","Ãª":"e","Ã«":"e","Ã ":"a","Ã¢":"a","Ã®":"i","Ã¯":"i","Ã´":"o","Ã¶":"o","Ã¹":"u","Ã»":"u","Ã¼":"u","Ã§":"c"}
     for k,v in replace_map.items():
         s2 = s2.replace(k, v)
     return s2
@@ -175,7 +175,7 @@ COL_CANDIDATES = {
     "visa": "Visa",
     "montant": "Montant honoraires (US $)", "montant honoraires": "Montant honoraires (US $)",
     "autres frais": "Autres frais (US $)", "autre frais": "Autres frais (US $)",
-    "payé": "Payé", "paye": "Payé",
+    "payÃ©": "PayÃ©", "paye": "PayÃ©",
     "solde": "Solde",
     "mode reglement": "ModeReglement",
     "rfe": "RFE"
@@ -202,9 +202,9 @@ COL_CANDIDATES.update({
 NUMERIC_TARGETS = [
     "Montant honoraires (US $)",
     "Autres frais (US $)",
-    "Payé",
+    "PayÃ©",
     "Solde",
-    "Solde à percevoir (US $)",
+    "Solde Ã  percevoir (US $)",
     "Acompte 1",
     "Acompte 2",
     "Acompte 3",
@@ -388,7 +388,7 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
                 out[c] = 0.0
             elif c == "Escrow":
                 out[c] = 0
-            elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
+            elif c in ["RFE", "Dossiers envoyÃ©", "Dossier approuvÃ©", "Dossier refusÃ©", "Dossier AnnulÃ©"]:
                 out[c] = 0
             elif "Date" in c:
                 out[c] = pd.NaT
@@ -406,7 +406,7 @@ def _ensure_columns(df: Any, cols: List[str]) -> pd.DataFrame:
                     safe[c] = 0.0
                 elif c == "Escrow":
                     safe[c] = 0
-                elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
+                elif c in ["RFE", "Dossiers envoyÃ©", "Dossier approuvÃ©", "Dossier refusÃ©", "Dossier AnnulÃ©"]:
                     safe[c] = 0
                 elif "Date" in c:
                     safe[c] = pd.NaT
@@ -440,21 +440,21 @@ def normalize_clients_for_live(raw: Any) -> pd.DataFrame:
     acomptes_cols = detect_acompte_columns(df)
     if acomptes_cols:
         try:
-            df["Payé"] = df[acomptes_cols].fillna(0).apply(lambda row: sum([_to_num(row[c]) for c in acomptes_cols]), axis=1)
+            df["PayÃ©"] = df[acomptes_cols].fillna(0).apply(lambda row: sum([_to_num(row[c]) for c in acomptes_cols]), axis=1)
         except Exception:
-            df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x))
+            df["PayÃ©"] = df.get("PayÃ©", 0).apply(lambda x: _to_num(x))
     else:
-        df["Payé"] = df.get("Payé", 0).apply(lambda x: _to_num(x))
+        df["PayÃ©"] = df.get("PayÃ©", 0).apply(lambda x: _to_num(x))
     try:
         montant_col = detect_montant_column(df) or "Montant honoraires (US $)"
         autres_col = detect_autres_column(df) or "Autres frais (US $)"
         df[montant_col] = df.get(montant_col, 0).apply(lambda x: _to_num(x))
         df[autres_col] = df.get(autres_col, 0).apply(lambda x: _to_num(x))
-        df["Solde"] = df[montant_col] + df[autres_col] - df["Payé"]
-        df["Solde à percevoir (US $)"] = df["Solde"].copy()
+        df["Solde"] = df[montant_col] + df[autres_col] - df["PayÃ©"]
+        df["Solde Ã  percevoir (US $)"] = df["Solde"].copy()
     except Exception:
         df["Solde"] = df.get("Solde", 0).apply(lambda x: _to_num(x))
-        df["Solde à percevoir (US $)"] = df.get("Solde à percevoir (US $)", 0).apply(lambda x: _to_num(x))
+        df["Solde Ã  percevoir (US $)"] = df.get("Solde Ã  percevoir (US $)", 0).apply(lambda x: _to_num(x))
     for c in ["Nom","Categories","Sous-categorie","Visa","Commentaires","ModeReglement","ModeReglement_Ac1","ModeReglement_Ac2","ModeReglement_Ac3","ModeReglement_Ac4"]:
         if c in df.columns:
             df[c] = df[c].fillna("").astype(str)
@@ -488,12 +488,12 @@ def recalc_payments_and_solde(df: pd.DataFrame) -> pd.DataFrame:
             except Exception:
                 out[c] = out[c].apply(lambda x: 0.0)
     try:
-        out["Payé"] = out[acomptes].sum(axis=1).astype(float) if acomptes else out.get("Payé",0).apply(lambda x: _to_num(x))
+        out["PayÃ©"] = out[acomptes].sum(axis=1).astype(float) if acomptes else out.get("PayÃ©",0).apply(lambda x: _to_num(x))
     except Exception:
-        out["Payé"] = out.get("Payé",0).apply(lambda x: _to_num(x))
+        out["PayÃ©"] = out.get("PayÃ©",0).apply(lambda x: _to_num(x))
     try:
-        out["Solde"] = out[montant_col] + out[autres_col] - out["Payé"]
-        out["Solde à percevoir (US $)"] = out["Solde"].copy()
+        out["Solde"] = out[montant_col] + out[autres_col] - out["PayÃ©"]
+        out["Solde Ã  percevoir (US $)"] = out["Solde"].copy()
         out["Solde"] = out["Solde"].astype(float)
     except Exception:
         out["Solde"] = out.get("Solde",0).apply(lambda x: _to_num(x))
@@ -726,10 +726,10 @@ def parse_fiche_from_sheet(df_sheet: pd.DataFrame) -> Optional[pd.DataFrame]:
                 m = re.split(r"commentaires?:", line, flags=re.I)
                 if len(m) > 1:
                     out["Commentaires"] = m[1].strip()
-        payé = sum([out.get("Acompte 1",0.0), out.get("Acompte 2",0.0), out.get("Acompte 3",0.0), out.get("Acompte 4",0.0)])
-        out["Payé"] = payé
-        out["Solde"] = out.get("Montant honoraires (US $)",0.0) + out.get("Autres frais (US $)",0.0) - payé
-        out["Solde à percevoir (US $)"] = out["Solde"]
+        payÃ© = sum([out.get("Acompte 1",0.0), out.get("Acompte 2",0.0), out.get("Acompte 3",0.0), out.get("Acompte 4",0.0)])
+        out["PayÃ©"] = payÃ©
+        out["Solde"] = out.get("Montant honoraires (US $)",0.0) + out.get("Autres frais (US $)",0.0) - payÃ©
+        out["Solde Ã  percevoir (US $)"] = out["Solde"]
         df_out = pd.DataFrame([out])
         for c in df_out.columns:
             if "Date" in c:
@@ -782,13 +782,7 @@ def _persist_clients_cache(df: pd.DataFrame) -> None:
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
-
-# --- Escrow badge computation ---
-escrow_pending = esc.a_reclamer(st.session_state.get("df_escrow", esc.load_data()[1]))
-n_escrow = len(escrow_pending)
-escrow_label = "🛡️ Escrow 🔴" if n_escrow > 0 else "🛡️ Escrow"
-# --- end badge compute ---
-st.sidebar.header("📂 Fichiers")
+st.sidebar.header("ðŸ“‚ Fichiers")
 last_clients_path = ""
 last_visa_path = ""
 try:
@@ -800,16 +794,16 @@ try:
 except Exception:
     pass
 
-up_clients = st.sidebar.file_uploader("Clients (xlsx/xls/xlsm/csv) — inclure feuille ComptaCli pour fiche", type=["xlsx","xls","xlsm","csv"], key=skey("up_clients"))
+up_clients = st.sidebar.file_uploader("Clients (xlsx/xls/xlsm/csv) â€” inclure feuille ComptaCli pour fiche", type=["xlsx","xls","xlsm","csv"], key=skey("up_clients"))
 up_visa = st.sidebar.file_uploader("Visa (xlsx/xls/xlsm/csv)", type=["xlsx","xls","xlsm","csv"], key=skey("up_visa"))
 clients_path_in = st.sidebar.text_input("ou chemin local Clients (optionnel)", value=last_clients_path or "", key=skey("cli_path"))
 visa_path_in = st.sidebar.text_input("ou chemin local Visa (optionnel)", value=last_visa_path or "", key=skey("vis_path"))
 
-if st.sidebar.button("📥 Sauvegarder chemins", key=skey("btn_save_paths")):
+if st.sidebar.button("ðŸ“¥ Sauvegarder chemins", key=skey("btn_save_paths")):
     try:
         with open(MEMO_FILE, "w", encoding="utf-8") as f:
             json.dump({"clients": clients_path_in or "", "visa": visa_path_in or ""}, f, ensure_ascii=False, indent=2)
-        st.sidebar.success("Chemins sauvegardés.")
+        st.sidebar.success("Chemins sauvegardÃ©s.")
     except Exception:
         st.sidebar.error("Impossible de sauvegarder les chemins.")
 
@@ -1017,22 +1011,22 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
 # -------------------------
 # Tabs UI
 # -------------------------
-tabs = ((lambda: (tab_labels := ["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export", escrow_label]) and st.tabs(tab_labels))())
+tabs = st.tabs(["ðŸ“„ Fichiers","ðŸ“Š Dashboard","ðŸ“ˆ Analyses","âž• Ajouter","âœï¸ / ðŸ—‘ï¸ Gestion","ðŸ’³ Compta Client","ðŸ’¾ Export"])
 
 # ---- Files tab ----
 with tabs[0]:
-    st.header("📂 Fichiers")
+    st.header("ðŸ“‚ Fichiers")
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Clients")
         if up_clients is not None:
             st.text(f"Upload: {getattr(up_clients,'name','')}")
         elif isinstance(clients_src_for_read, str) and clients_src_for_read:
-            st.text(f"Chargé depuis: {clients_src_for_read}")
+            st.text(f"ChargÃ© depuis: {clients_src_for_read}")
         elif os.path.exists(CACHE_CLIENTS):
-            st.text("Chargé depuis le cache local")
+            st.text("ChargÃ© depuis le cache local")
         if df_clients_raw is None or (isinstance(df_clients_raw, pd.DataFrame) and df_clients_raw.empty):
-            st.warning("Aucun fichier Clients detecté.")
+            st.warning("Aucun fichier Clients detectÃ©.")
         else:
             st.success(f"Clients lus: {df_clients_raw.shape[0]} lignes")
             try:
@@ -1044,11 +1038,11 @@ with tabs[0]:
         if up_visa is not None:
             st.text(f"Upload: {getattr(up_visa,'name','')}")
         elif isinstance(visa_src_for_read, str) and visa_src_for_read:
-            st.text(f"Chargé depuis: {visa_src_for_read}")
+            st.text(f"ChargÃ© depuis: {visa_src_for_read}")
         elif os.path.exists(CACHE_VISA):
-            st.text("Chargé depuis le cache local")
+            st.text("ChargÃ© depuis le cache local")
         if df_visa_raw is None or (isinstance(df_visa_raw, pd.DataFrame) and df_visa_raw.empty):
-            st.warning("Aucun fichier Visa detecté.")
+            st.warning("Aucun fichier Visa detectÃ©.")
         else:
             st.success(f"Visa lu: {df_visa_raw.shape[0]} lignes")
             try:
@@ -1058,7 +1052,7 @@ with tabs[0]:
     st.markdown("---")
     col_a, col_b = st.columns([1,1])
     with col_a:
-        if st.button("Réinitialiser mémoire (recharger)"):
+        if st.button("RÃ©initialiser mÃ©moire (recharger)"):
             df_all2 = normalize_clients_for_live(df_clients_raw)
             df_all2 = recalc_payments_and_solde(df_all2)
             _set_df_live(df_all2)
@@ -1066,7 +1060,7 @@ with tabs[0]:
                 _persist_clients_cache(df_all2)
             except Exception:
                 pass
-            st.success("Mémoire réinitialisée.")
+            st.success("MÃ©moire rÃ©initialisÃ©e.")
             try:
                 st.experimental_rerun()
             except Exception:
@@ -1080,8 +1074,8 @@ with tabs[0]:
     # If a ComptaCli was parsed on upload, offer import (and persist)
     if uploaded_comptacli_df is not None:
         st.markdown("---")
-        st.info("Fiche ComptaCli détectée dans l'xlsx uploadé.")
-        if st.button("Importer la fiche ComptaCli détectée"):
+        st.info("Fiche ComptaCli dÃ©tectÃ©e dans l'xlsx uploadÃ©.")
+        if st.button("Importer la fiche ComptaCli dÃ©tectÃ©e"):
             try:
                 df_live = _get_df_live_safe()
                 df_new = normalize_clients_for_live(uploaded_comptacli_df)
@@ -1090,23 +1084,23 @@ with tabs[0]:
                 df_live = recalc_payments_and_solde(df_live)
                 _set_df_live(df_live)
                 _persist_clients_cache(df_live)
-                st.success("Fiche ComptaCli importée en mémoire et persistée.")
+                st.success("Fiche ComptaCli importÃ©e en mÃ©moire et persistÃ©e.")
                 st.experimental_rerun()
             except Exception as e:
                 st.error(f"Erreur import fiche: {e}")
 
 # ---- Dashboard tab ----
 with tabs[1]:
-    st.subheader("📊 Dashboard")
+    st.subheader("ðŸ“Š Dashboard")
     df_live_view = recalc_payments_and_solde(_get_df_live_safe())
     if df_live_view is None or df_live_view.empty:
-        st.info("Aucune donnée en mémoire.")
+        st.info("Aucune donnÃ©e en mÃ©moire.")
     else:
         # derive years and months from Date column
         date_col_candidates = [c for c in df_live_view.columns if "date" in canonical_key(c)]
         date_col = "Date" if "Date" in df_live_view.columns else (date_col_candidates[0] if date_col_candidates else None)
         if date_col is None:
-            st.warning("Aucune colonne Date détectée — les filtres par année/mois et graphiques temporels sont désactivés.")
+            st.warning("Aucune colonne Date dÃ©tectÃ©e â€” les filtres par annÃ©e/mois et graphiques temporels sont dÃ©sactivÃ©s.")
             years = []
         else:
             df_live_view[date_col] = pd.to_datetime(df_live_view[date_col], errors="coerce")
@@ -1118,18 +1112,18 @@ with tabs[1]:
         fcol1, fcol2, fcol3 = st.columns([1.2,1.2,1.6])
         with fcol1:
             cats = [""] + (unique_nonempty(df_live_view["Categories"]) if "Categories" in df_live_view.columns else [])
-            sel_cat = st.selectbox("Catégorie", options=cats, index=0, key=skey("dash","cat"))
+            sel_cat = st.selectbox("CatÃ©gorie", options=cats, index=0, key=skey("dash","cat"))
         with fcol2:
             subs = [""] + (unique_nonempty(df_live_view["Sous-categorie"]) if "Sous-categorie" in df_live_view.columns else [])
-            sel_sub = st.selectbox("Sous-catégorie", options=subs, index=0, key=skey("dash","sub"))
+            sel_sub = st.selectbox("Sous-catÃ©gorie", options=subs, index=0, key=skey("dash","sub"))
         with fcol3:
             st.markdown("Filtrage temporel")
-            timeframe_mode = st.selectbox("Mode temporel", options=["Année+Mois (rapide)","Plage libre (from/to)","Comparer deux périodes"], index=0, key=skey("dash","tmode"))
+            timeframe_mode = st.selectbox("Mode temporel", options=["AnnÃ©e+Mois (rapide)","Plage libre (from/to)","Comparer deux pÃ©riodes"], index=0, key=skey("dash","tmode"))
 
         # helper to filter by year+month or range
-        def apply_time_filter(df, mode="Année+Mois (rapide)", year=None, month=None, start=None, end=None):
+        def apply_time_filter(df, mode="AnnÃ©e+Mois (rapide)", year=None, month=None, start=None, end=None):
             out = df.copy()
-            if mode == "Année+Mois (rapide)":
+            if mode == "AnnÃ©e+Mois (rapide)":
                 if year:
                     out = out[out["_year_"] == int(year)]
                     if month and month != "Tous":
@@ -1142,11 +1136,11 @@ with tabs[1]:
             return out
 
         # UI for each mode
-        if timeframe_mode == "Année+Mois (rapide)":
+        if timeframe_mode == "AnnÃ©e+Mois (rapide)":
             c1, c2 = st.columns([1,1])
             with c1:
                 yrs = [""] + [str(y) for y in years]
-                sel_year = st.selectbox("Année", options=yrs, index=0, key=skey("dash","year"))
+                sel_year = st.selectbox("AnnÃ©e", options=yrs, index=0, key=skey("dash","year"))
             with c2:
                 months = ["Tous"] + [str(i) for i in range(1,13)]
                 sel_month = st.selectbox("Mois", options=months, index=0, key=skey("dash","month"))
@@ -1157,11 +1151,11 @@ with tabs[1]:
             if sel_sub:
                 view = view[view["Sous-categorie"].astype(str) == sel_sub]
             if sel_year:
-                view = apply_time_filter(view, mode="Année+Mois (rapide)", year=int(sel_year), month=(None if sel_month=="Tous" else int(sel_month)))
+                view = apply_time_filter(view, mode="AnnÃ©e+Mois (rapide)", year=int(sel_year), month=(None if sel_month=="Tous" else int(sel_month)))
         elif timeframe_mode == "Plage libre (from/to)":
             c1, c2 = st.columns([1,1])
             with c1:
-                start_date = st.date_input("Date début", value=None, key=skey("dash","start"))
+                start_date = st.date_input("Date dÃ©but", value=None, key=skey("dash","start"))
             with c2:
                 end_date = st.date_input("Date fin", value=None, key=skey("dash","end"))
             view = df_live_view.copy()
@@ -1171,18 +1165,18 @@ with tabs[1]:
                 view = view[view["Sous-categorie"].astype(str) == sel_sub]
             view = apply_time_filter(view, mode="Plage libre (from/to)", start=start_date, end=end_date)
         else:  # Compare two periods
-            st.markdown("Période A")
+            st.markdown("PÃ©riode A")
             a_col1, a_col2 = st.columns([1,1])
             with a_col1:
                 yrs = [""] + [str(y) for y in years]
-                a_year = st.selectbox("Année A", options=yrs, index=0, key=skey("dash","ayear"))
+                a_year = st.selectbox("AnnÃ©e A", options=yrs, index=0, key=skey("dash","ayear"))
             with a_col2:
                 a_months = ["Tous"] + [str(i) for i in range(1,13)]
                 a_month = st.selectbox("Mois A", options=a_months, index=0, key=skey("dash","amonth"))
-            st.markdown("Période B")
+            st.markdown("PÃ©riode B")
             b_col1, b_col2 = st.columns([1,1])
             with b_col1:
-                b_year = st.selectbox("Année B", options=yrs, index=0, key=skey("dash","byear"))
+                b_year = st.selectbox("AnnÃ©e B", options=yrs, index=0, key=skey("dash","byear"))
             with b_col2:
                 b_month = st.selectbox("Mois B", options=a_months, index=0, key=skey("dash","bmonth"))
             # build views for A and B
@@ -1194,9 +1188,9 @@ with tabs[1]:
             viewA = base.copy()
             viewB = base.copy()
             if a_year:
-                viewA = apply_time_filter(viewA, mode="Année+Mois (rapide)", year=int(a_year), month=(None if a_month=="Tous" else int(a_month)))
+                viewA = apply_time_filter(viewA, mode="AnnÃ©e+Mois (rapide)", year=int(a_year), month=(None if a_month=="Tous" else int(a_month)))
             if b_year:
-                viewB = apply_time_filter(viewB, mode="Année+Mois (rapide)", year=int(b_year), month=(None if b_month=="Tous" else int(b_month)))
+                viewB = apply_time_filter(viewB, mode="AnnÃ©e+Mois (rapide)", year=int(b_year), month=(None if b_month=="Tous" else int(b_month)))
             # compute KPIs side-by-side
             def compute_kpis(df):
                 montant_col = detect_montant_column(df) or "Montant honoraires (US $)"
@@ -1211,16 +1205,16 @@ with tabs[1]:
                 return {"count":count,"hon":total_honoraires,"autres":total_autres,"acomptes":acomptes_sum,"solde":solde}
             kpiA = compute_kpis(viewA)
             kpiB = compute_kpis(viewB)
-            st.markdown("### Comparaison Période A vs B")
+            st.markdown("### Comparaison PÃ©riode A vs B")
             cA, cB = st.columns(2)
             with cA:
-                st.markdown(f"**Période A** — {a_year or '—'} / {a_month or 'Tous'}")
+                st.markdown(f"**PÃ©riode A** â€” {a_year or 'â€”'} / {a_month or 'Tous'}")
                 st.markdown(f"- Dossiers: {kpiA['count']}")
                 st.markdown(f"- Honoraires: {_fmt_money(kpiA['hon'])}")
                 st.markdown(f"- Acomptes: {_fmt_money(kpiA['acomptes'])}")
                 st.markdown(f"- Solde: {_fmt_money(kpiA['solde'])}")
             with cB:
-                st.markdown(f"**Période B** — {b_year or '—'} / {b_month or 'Tous'}")
+                st.markdown(f"**PÃ©riode B** â€” {b_year or 'â€”'} / {b_month or 'Tous'}")
                 st.markdown(f"- Dossiers: {kpiB['count']}")
                 st.markdown(f"- Honoraires: {_fmt_money(kpiB['hon'])}")
                 st.markdown(f"- Acomptes: {_fmt_money(kpiB['acomptes'])}")
@@ -1234,18 +1228,18 @@ with tabs[1]:
             ])
             if PLOTLY_AVAILABLE:
                 fig = go.Figure(data=[
-                    go.Bar(name='Période A', x=comp_df['metric'], y=comp_df['A']),
-                    go.Bar(name='Période B', x=comp_df['metric'], y=comp_df['B'])
+                    go.Bar(name='PÃ©riode A', x=comp_df['metric'], y=comp_df['A']),
+                    go.Bar(name='PÃ©riode B', x=comp_df['metric'], y=comp_df['B'])
                 ])
-                fig.update_layout(barmode='group', height=360, title="Comparaison métriques")
+                fig.update_layout(barmode='group', height=360, title="Comparaison mÃ©triques")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.write(comp_df)
             # show small tables of raw viewA/viewB if requested
-            if st.checkbox("Voir listes Période A / B", value=False):
-                st.markdown("Période A (extrait)")
+            if st.checkbox("Voir listes PÃ©riode A / B", value=False):
+                st.markdown("PÃ©riode A (extrait)")
                 st.dataframe(viewA.reset_index(drop=True), use_container_width=True, height=200)
-                st.markdown("Période B (extrait)")
+                st.markdown("PÃ©riode B (extrait)")
                 st.dataframe(viewB.reset_index(drop=True), use_container_width=True, height=200)
             # skip default charts for compare mode
           
@@ -1265,10 +1259,10 @@ with tabs[1]:
         cols_k[1].markdown(kpi_html("Montant honoraires", _fmt_money(total_honoraires)), unsafe_allow_html=True)
         cols_k[2].markdown(kpi_html("Solde total", _fmt_money(total_honoraires + total_autres - total_acomptes)), unsafe_allow_html=True)
 
-        st.markdown("### Aperçu clients (filtré)")
+        st.markdown("### AperÃ§u clients (filtrÃ©)")
         try:
             display_df = view.copy()
-            for mc in [montant_col, autres_col, "Payé", "Solde"]:
+            for mc in [montant_col, autres_col, "PayÃ©", "Solde"]:
                 if mc in display_df.columns:
                     display_df[mc] = display_df[mc].apply(lambda x: _fmt_money(_to_num(x)))
             st.dataframe(display_df.reset_index(drop=True), use_container_width=True, height=360)
@@ -1277,16 +1271,16 @@ with tabs[1]:
 
 # ---- Analyses tab ----
 with tabs[2]:
-    st.subheader("📈 Analyses")
+    st.subheader("ðŸ“ˆ Analyses")
     df_ = recalc_payments_and_solde(_get_df_live_safe())
     if df_ is None or df_.empty:
-        st.info("Aucune donnée pour analyser.")
+        st.info("Aucune donnÃ©e pour analyser.")
     else:
         # ensure date
         date_col_candidates = [c for c in df_.columns if "date" in canonical_key(c)]
         date_col = "Date" if "Date" in df_.columns else (date_col_candidates[0] if date_col_candidates else None)
         if date_col is None:
-            st.warning("Aucune colonne 'Date' détectée - analyses temporelles désactivées.")
+            st.warning("Aucune colonne 'Date' dÃ©tectÃ©e - analyses temporelles dÃ©sactivÃ©es.")
         else:
             df_[date_col] = pd.to_datetime(df_[date_col], errors="coerce")
             df_["_year_"] = df_[date_col].dt.year
@@ -1295,14 +1289,14 @@ with tabs[2]:
             monto = detect_montant_column(df_) or "Montant honoraires (US $)"
             ts = df_.groupby([df_[date_col].dt.to_period("M")])[monto].sum().reset_index()
             ts[date_col] = ts[date_col].dt.to_timestamp()
-            st.markdown("#### Série temporelle mensuelle - Montant honoraires")
+            st.markdown("#### SÃ©rie temporelle mensuelle - Montant honoraires")
             if PLOTLY_AVAILABLE:
                 fig = px.line(ts, x=date_col, y=monto, markers=True, title="Montant honoraires par mois")
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.line_chart(ts.set_index(date_col)[monto])
             # Heatmap year x month
-            st.markdown("#### Heatmap Année x Mois (Montant honoraires)")
+            st.markdown("#### Heatmap AnnÃ©e x Mois (Montant honoraires)")
             pivot = df_.groupby([df_["_year_"], df_["_month_"]])[monto].sum().unstack(fill_value=0)
             if PLOTLY_AVAILABLE:
                 fig = go.Figure(data=go.Heatmap(
@@ -1311,17 +1305,17 @@ with tabs[2]:
                     y=[str(y) for y in pivot.index],
                     colorscale="Viridis"
                 ))
-                fig.update_layout(title="Heatmap Montants par Mois/Année", xaxis_title="Mois", yaxis_title="Année", height=420)
+                fig.update_layout(title="Heatmap Montants par Mois/AnnÃ©e", xaxis_title="Mois", yaxis_title="AnnÃ©e", height=420)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.dataframe(pivot)
             # Category treemap
-            st.markdown("#### Répartition par Catégorie")
+            st.markdown("#### RÃ©partition par CatÃ©gorie")
             cat_col = "Categories" if "Categories" in df_.columns else None
             if cat_col:
                 cat_agg = df_.groupby(cat_col)[monto].sum().reset_index().sort_values(monto, ascending=False)
                 if PLOTLY_AVAILABLE:
-                    fig = px.treemap(cat_agg, path=[cat_col], values=monto, title="Montant par Catégorie")
+                    fig = px.treemap(cat_agg, path=[cat_col], values=monto, title="Montant par CatÃ©gorie")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.bar_chart(cat_agg.set_index(cat_col)[monto])
@@ -1339,15 +1333,15 @@ with tabs[2]:
             else:
                 st.dataframe(top_clients)
             # Comparison A vs B quick UI (reuse dashboard choices)
-            st.markdown("#### Comparaison rapide de deux périodes (Année+Mois)")
+            st.markdown("#### Comparaison rapide de deux pÃ©riodes (AnnÃ©e+Mois)")
             colA1, colA2, colB1, colB2 = st.columns([1,1,1,1])
             with colA1:
                 years = sorted(df_["_year_"].dropna().unique().astype(int).tolist())
-                a_year = st.selectbox("Année A", options=[""]+ [str(y) for y in years], index=0, key=skey("anal","ayear"))
+                a_year = st.selectbox("AnnÃ©e A", options=[""]+ [str(y) for y in years], index=0, key=skey("anal","ayear"))
             with colA2:
                 a_month = st.selectbox("Mois A", options=["Tous"] + [str(i) for i in range(1,13)], index=0, key=skey("anal","amonth"))
             with colB1:
-                b_year = st.selectbox("Année B", options=[""]+ [str(y) for y in years], index=0, key=skey("anal","byear"))
+                b_year = st.selectbox("AnnÃ©e B", options=[""]+ [str(y) for y in years], index=0, key=skey("anal","byear"))
             with colB2:
                 b_month = st.selectbox("Mois B", options=["Tous"] + [str(i) for i in range(1,13)], index=0, key=skey("anal","bmonth"))
             if st.button("Comparer maintenant", key=skey("anal","compare_btn")):
@@ -1368,7 +1362,7 @@ with tabs[2]:
                         acom += float(d.get(ac,0).apply(lambda x: _to_num(x)).sum())
                     return {"count":len(d),"hon":hon,"acom":acom,"solde":hon - acom}
                 ka = kpis(A); kb = kpis(B)
-                st.markdown(f"Période A: {a_year or '—'} / {a_month or 'Tous'} — Période B: {b_year or '—'} / {b_month or 'Tous'}")
+                st.markdown(f"PÃ©riode A: {a_year or 'â€”'} / {a_month or 'Tous'} â€” PÃ©riode B: {b_year or 'â€”'} / {b_month or 'Tous'}")
                 c1,c2 = st.columns(2)
                 with c1:
                     st.write(ka)
@@ -1389,7 +1383,7 @@ with tabs[2]:
 
 # ---- Add tab ----
 with tabs[3]:
-    st.subheader("➕ Ajouter un nouveau client")
+    st.subheader("âž• Ajouter un nouveau client")
     df_live = _get_df_live_safe()
     next_dossier_num = get_next_dossier_numeric(df_live)
     next_dossier = str(next_dossier_num)
@@ -1397,13 +1391,13 @@ with tabs[3]:
     st.markdown(f"**ID_Client (auto)**: {next_id_client}")
     st.markdown(f"**Dossier N (auto)**: {next_dossier}")
 
-    add_date = st.date_input("Date (événement)", value=date.today(), key=skey("addtab","date"))
+    add_date = st.date_input("Date (Ã©vÃ©nement)", value=date.today(), key=skey("addtab","date"))
     add_nom = st.text_input("Nom du client", value="", placeholder="Nom complet du client", key=skey("addtab","nom"))
 
     categories_options = visa_categories if visa_categories else (unique_nonempty(df_live["Categories"]) if "Categories" in df_live.columns else [])
     r3c1, r3c2, r3c3 = st.columns([1.2,1.6,1.6])
     with r3c1:
-        add_cat = st.selectbox("Catégorie", options=[""] + categories_options, index=0, key=skey("addtab","cat"))
+        add_cat = st.selectbox("CatÃ©gorie", options=[""] + categories_options, index=0, key=skey("addtab","cat"))
     with r3c2:
         add_sub_options = []
         if isinstance(add_cat, str) and add_cat.strip():
@@ -1418,7 +1412,7 @@ with tabs[3]:
                 add_sub_options = sorted({str(x).strip() for x in df_live["Sous-categorie"].dropna().astype(str).tolist()})
             except Exception:
                 add_sub_options = []
-        add_sub = st.selectbox("Sous-catégorie", options=[""] + add_sub_options, index=0, key=skey("addtab","sub"))
+        add_sub = st.selectbox("Sous-catÃ©gorie", options=[""] + add_sub_options, index=0, key=skey("addtab","sub"))
     with r3c3:
         specific_options = get_visa_options(add_cat, add_sub)
         if specific_options:
@@ -1435,7 +1429,7 @@ with tabs[3]:
     with r5c1:
         a1_date = st.date_input("Date Acompte 1", value=None, key=skey("addtab","ac1_date"))
     with r5c2:
-        st.caption("Mode de règlement")
+        st.caption("Mode de rÃ¨glement")
         pay_cb = st.checkbox("CB", value=False, key=skey("addtab","pay_cb"))
         pay_cheque = st.checkbox("Cheque", value=False, key=skey("addtab","pay_cheque"))
         pay_virement = st.checkbox("Virement", value=False, key=skey("addtab","pay_virement"))
@@ -1471,9 +1465,9 @@ with tabs[3]:
             new_row["ModeReglement_Ac2"] = ""
             new_row["ModeReglement_Ac3"] = ""
             new_row["ModeReglement_Ac4"] = ""
-            new_row["Payé"] = new_row["Acompte 1"]
-            new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - new_row["Payé"]
-            new_row["Solde à percevoir (US $)"] = new_row["Solde"]
+            new_row["PayÃ©"] = new_row["Acompte 1"]
+            new_row["Solde"] = new_row["Montant honoraires (US $)"] + new_row["Autres frais (US $)"] - new_row["PayÃ©"]
+            new_row["Solde Ã  percevoir (US $)"] = new_row["Solde"]
             new_row["Escrow"] = 1 if st.session_state.get(skey("addtab","escrow"), False) else 0
             new_row["Commentaires"] = add_comments
             ensure_flag_columns(new_row, DEFAULT_FLAGS)
@@ -1484,13 +1478,13 @@ with tabs[3]:
             df_live = recalc_payments_and_solde(df_live)
             _set_df_live(df_live)
             _persist_clients_cache(df_live)
-            st.success(f"Dossier ajouté : ID_Client {next_id_client} — Dossier N {next_dossier}")
+            st.success(f"Dossier ajoutÃ© : ID_Client {next_id_client} â€” Dossier N {next_dossier}")
         except Exception as e:
             st.error(f"Erreur ajout: {e}")
 
 # ---- Gestion tab ----
 with tabs[4]:
-    st.subheader("✏️ / 🗑️ Gestion — Modifier / Supprimer")
+    st.subheader("âœï¸ / ðŸ—‘ï¸ Gestion â€” Modifier / Supprimer")
     df_live = _get_df_live_safe()
     # defensive ensure columns exist
     for c in COLS_CLIENTS:
@@ -1501,15 +1495,15 @@ with tabs[4]:
                 df_live[c] = 0.0
             elif c == "Escrow":
                 df_live[c] = 0
-            elif c in ["RFE", "Dossiers envoyé", "Dossier approuvé", "Dossier refusé", "Dossier Annulé"]:
+            elif c in ["RFE", "Dossiers envoyÃ©", "Dossier approuvÃ©", "Dossier refusÃ©", "Dossier AnnulÃ©"]:
                 df_live[c] = 0
             else:
                 df_live[c] = ""
     if df_live is None or df_live.empty:
-        st.info("Aucun dossier à modifier ou supprimer.")
+        st.info("Aucun dossier Ã  modifier ou supprimer.")
     else:
         choices = [f"{i} | {df_live.at[i,'Dossier N']} | {df_live.at[i,'Nom']}" for i in range(len(df_live))]
-        sel = st.selectbox("Sélectionner ligne à modifier", options=[""] + choices, key=skey("edit","select"))
+        sel = st.selectbox("SÃ©lectionner ligne Ã  modifier", options=[""] + choices, key=skey("edit","select"))
         if sel:
             idx = int(sel.split("|")[0].strip())
             df_live = recalc_payments_and_solde(df_live)
@@ -1553,10 +1547,10 @@ with tabs[4]:
                     st.markdown(f"### {txt(row.get('Nom',''))}")
                 with c_solde:
                     try:
-                        sol_due_num = _to_num(row.get("Solde à percevoir (US $)", row.get("Solde",0)))
-                        st.markdown(f"**Solde dû**: {_fmt_money(sol_due_num)}")
+                        sol_due_num = _to_num(row.get("Solde Ã  percevoir (US $)", row.get("Solde",0)))
+                        st.markdown(f"**Solde dÃ»**: {_fmt_money(sol_due_num)}")
                     except Exception:
-                        st.markdown("**Solde dû**: $0.00")
+                        st.markdown("**Solde dÃ»**: $0.00")
 
                 r1c1, r1c2, r1c3 = st.columns([1.4,1.0,1.2])
                 with r1c1:
@@ -1564,16 +1558,16 @@ with tabs[4]:
                 with r1c2:
                     e_dossier = st.text_input("Dossier N", value=txt(row.get("Dossier N","")), key=skey("edit","dossier", str(idx)))
                 with r1c3:
-                    e_date = st.date_input("Date (événement)", value=_safe_row_date_local("Date"), key=skey("edit","date", str(idx)))
+                    e_date = st.date_input("Date (Ã©vÃ©nement)", value=_safe_row_date_local("Date"), key=skey("edit","date", str(idx)))
 
                 # Category / Sous-categorie / Visa
                 c_cat, c_sub, c_visa = st.columns([1.4,1.6,1.6])
                 with c_cat:
                     cur_cat = txt(row.get("Categories",""))
-                    edit_cat = st.text_input("Catégorie", value=cur_cat, key=skey("edit","cat", str(idx)))
+                    edit_cat = st.text_input("CatÃ©gorie", value=cur_cat, key=skey("edit","cat", str(idx)))
                 with c_sub:
                     cur_sub = txt(row.get("Sous-categorie",""))
-                    edit_sub = st.text_input("Sous-catégorie", value=cur_sub, key=skey("edit","sub", str(idx)))
+                    edit_sub = st.text_input("Sous-catÃ©gorie", value=cur_sub, key=skey("edit","sub", str(idx)))
                 with c_visa:
                     cur_visa = txt(row.get("Visa",""))
                     visa_opts = get_visa_options(edit_cat if 'edit_cat' in locals() else cur_cat, edit_sub if 'edit_sub' in locals() else cur_sub)
@@ -1627,19 +1621,19 @@ with tabs[4]:
                 # Flags + RFE constraint
                 f1, f2, f3, f4 = st.columns([1.0,1.0,1.0,1.0])
                 with f1:
-                    e_flag_envoye = st.checkbox("Dossiers envoyé", value=bool(int(row.get("Dossiers envoyé", 0))) if not pd.isna(row.get("Dossiers envoyé", 0)) else False, key=skey("edit","flag_envoye", str(idx)))
+                    e_flag_envoye = st.checkbox("Dossiers envoyÃ©", value=bool(int(row.get("Dossiers envoyÃ©", 0))) if not pd.isna(row.get("Dossiers envoyÃ©", 0)) else False, key=skey("edit","flag_envoye", str(idx)))
                 with f2:
-                    e_flag_approuve = st.checkbox("Dossier approuvé", value=bool(int(row.get("Dossier approuvé", 0))) if not pd.isna(row.get("Dossier approuvé", 0)) else False, key=skey("edit","flag_approuve", str(idx)))
+                    e_flag_approuve = st.checkbox("Dossier approuvÃ©", value=bool(int(row.get("Dossier approuvÃ©", 0))) if not pd.isna(row.get("Dossier approuvÃ©", 0)) else False, key=skey("edit","flag_approuve", str(idx)))
                 with f3:
-                    e_flag_refuse = st.checkbox("Dossier refusé", value=bool(int(row.get("Dossier refusé", 0))) if not pd.isna(row.get("Dossier refusé", 0)) else False, key=skey("edit","flag_refuse", str(idx)))
+                    e_flag_refuse = st.checkbox("Dossier refusÃ©", value=bool(int(row.get("Dossier refusÃ©", 0))) if not pd.isna(row.get("Dossier refusÃ©", 0)) else False, key=skey("edit","flag_refuse", str(idx)))
                 with f4:
-                    e_flag_annule = st.checkbox("Dossier Annulé", value=bool(int(row.get("Dossier Annulé", 0))) if not pd.isna(row.get("Dossier Annulé", 0)) else False, key=skey("edit","flag_annule", str(idx)))
+                    e_flag_annule = st.checkbox("Dossier AnnulÃ©", value=bool(int(row.get("Dossier AnnulÃ©", 0))) if not pd.isna(row.get("Dossier AnnulÃ©", 0)) else False, key=skey("edit","flag_annule", str(idx)))
 
                 e_escrow = st.checkbox("Escrow", value=bool(int(row.get("Escrow", 0))) if not pd.isna(row.get("Escrow", 0)) else False, key=skey("edit","escrow", str(idx)))
 
                 other_flag_set = any([e_flag_envoye, e_flag_approuve, e_flag_refuse, e_flag_annule])
                 if not other_flag_set:
-                    st.markdown("**RFE** (active uniquement si un des états est coché)")
+                    st.markdown("**RFE** (active uniquement si un des Ã©tats est cochÃ©)")
                     e_flag_rfe = st.checkbox("RFE", value=bool(int(row.get("RFE", 0))) if not pd.isna(row.get("RFE", 0)) else False, key=skey("edit","flag_rfe", str(idx)), disabled=True)
                 else:
                     e_flag_rfe = st.checkbox("RFE", value=bool(int(row.get("RFE", 0))) if not pd.isna(row.get("RFE", 0)) else False, key=skey("edit","flag_rfe", str(idx)))
@@ -1669,12 +1663,12 @@ with tabs[4]:
                         old_general = parse_modes_global(row.get("ModeReglement",""))
                         combined = set(old_general + list(e_mode_ac1))
                         df_live.at[idx, "ModeReglement"] = ",".join(sorted(list(combined)))
-                        df_live.at[idx, "Dossiers envoyé"] = 1 if e_flag_envoye else 0
-                        df_live.at[idx, "Dossier approuvé"] = 1 if e_flag_approuve else 0
-                        df_live.at[idx, "Dossier refusé"] = 1 if e_flag_refuse else 0
-                        df_live.at[idx, "Dossier Annulé"] = 1 if e_flag_annule else 0
+                        df_live.at[idx, "Dossiers envoyÃ©"] = 1 if e_flag_envoye else 0
+                        df_live.at[idx, "Dossier approuvÃ©"] = 1 if e_flag_approuve else 0
+                        df_live.at[idx, "Dossier refusÃ©"] = 1 if e_flag_refuse else 0
+                        df_live.at[idx, "Dossier AnnulÃ©"] = 1 if e_flag_annule else 0
                         if e_flag_rfe and not any([e_flag_envoye, e_flag_approuve, e_flag_refuse, e_flag_annule]):
-                            st.warning("RFE n'a pas été activé car aucun état (envoyé/approuvé/refusé/annulé) n'est coché.")
+                            st.warning("RFE n'a pas Ã©tÃ© activÃ© car aucun Ã©tat (envoyÃ©/approuvÃ©/refusÃ©/annulÃ©) n'est cochÃ©.")
                             df_live.at[idx, "RFE"] = 0
                         else:
                             df_live.at[idx, "RFE"] = 1 if e_flag_rfe else 0
@@ -1684,21 +1678,21 @@ with tabs[4]:
                         df_live.at[idx, "Visa"] = edit_visa if 'edit_visa' in locals() else cur_visa
                         df_live.at[idx, "Commentaires"] = e_comments
                         df_live = recalc_payments_and_solde(df_live)
-                        df_live.at[idx, "Solde à percevoir (US $)"] = df_live.at[idx, "Solde"]
+                        df_live.at[idx, "Solde Ã  percevoir (US $)"] = df_live.at[idx, "Solde"]
                         _set_df_live(df_live)
                         _persist_clients_cache(df_live)
-                        st.success("Modifications enregistrées.")
+                        st.success("Modifications enregistrÃ©es.")
                     except Exception as e:
                         st.error(f"Erreur enregistrement: {e}")
 
     st.markdown("---")
     st.markdown("### Supprimer des dossiers")
     if df_live is None or df_live.empty:
-        st.info("Aucun dossier à supprimer.")
+        st.info("Aucun dossier Ã  supprimer.")
     else:
         choices_del = [f"{i} | {df_live.at[i,'Dossier N']} | {df_live.at[i,'Nom']}" for i in range(len(df_live))]
-        selected_to_del = st.multiselect("Sélectionnez les lignes à supprimer", options=choices_del, key=skey("del","select"))
-        if st.button("Supprimer sélection"):
+        selected_to_del = st.multiselect("SÃ©lectionnez les lignes Ã  supprimer", options=choices_del, key=skey("del","select"))
+        if st.button("Supprimer sÃ©lection"):
             if selected_to_del:
                 idxs = [int(s.split("|")[0].strip()) for s in selected_to_del]
                 try:
@@ -1706,18 +1700,18 @@ with tabs[4]:
                     df_live = recalc_payments_and_solde(df_live)
                     _set_df_live(df_live)
                     _persist_clients_cache(df_live)
-                    st.success(f"{len(idxs)} ligne(s) supprimée(s).")
+                    st.success(f"{len(idxs)} ligne(s) supprimÃ©e(s).")
                 except Exception as e:
                     st.error(f"Erreur suppression: {e}")
             else:
-                st.warning("Aucune sélection pour suppression.")
+                st.warning("Aucune sÃ©lection pour suppression.")
 
 # ---- Compta Client tab ----
 with tabs[5]:
-    st.subheader("💳 Compta Client")
+    st.subheader("ðŸ’³ Compta Client")
     df_live = recalc_payments_and_solde(_get_df_live_safe())
     if df_live is None or df_live.empty:
-        st.info("Aucune donnée en mémoire.")
+        st.info("Aucune donnÃ©e en mÃ©moire.")
     else:
         # detect Nom and Dossier columns
         col_nom = None
@@ -1725,7 +1719,7 @@ with tabs[5]:
         for c in df_live.columns:
             if c.strip().lower() == "nom":
                 col_nom = c
-            if c.strip().lower() in ("dossier n", "dossier", "dossier numéro", "dossier no", "dossier n°"):
+            if c.strip().lower() in ("dossier n", "dossier", "dossier numÃ©ro", "dossier no", "dossier nÂ°"):
                 col_dossier = c
         if col_nom is None:
             for c in df_live.columns:
@@ -1744,27 +1738,27 @@ with tabs[5]:
                 dn = str(df_live.at[i, col_dossier]) if col_dossier in df_live.columns else ""
                 nm = str(df_live.at[i, col_nom]) if col_nom in df_live.columns else ""
                 choices.append(f"{i} | {dn} | {nm}")
-            sel = st.selectbox("Sélectionner un client (par index | Dossier N | Nom)", options=[""] + choices, key=skey("compta","select"))
+            sel = st.selectbox("SÃ©lectionner un client (par index | Dossier N | Nom)", options=[""] + choices, key=skey("compta","select"))
             if not sel:
-                st.info("Sélectionne une ligne pour afficher le relevé.")
+                st.info("SÃ©lectionne une ligne pour afficher le relevÃ©.")
             else:
                 idx = int(sel.split("|")[0].strip())
                 df_live = recalc_payments_and_solde(df_live)
                 if idx < 0 or idx >= len(df_live):
-                    st.error("Index sélectionné invalide.")
+                    st.error("Index sÃ©lectionnÃ© invalide.")
                 else:
                     row = df_live.loc[idx]
                     montant_col = detect_montant_column(df_live) or "Montant honoraires (US $)"
                     autres_col = detect_autres_column(df_live) or "Autres frais (US $)"
                     honoraires = _to_num(row.get(montant_col, 0))
                     autres = _to_num(row.get(autres_col, 0))
-                    total_paye = _to_num(row.get("Payé", 0))
+                    total_paye = _to_num(row.get("PayÃ©", 0))
                     solde = _to_num(row.get("Solde", honoraires + autres - total_paye))
-                    st.markdown(f"### Fiche: {row.get(col_nom,'')} — Dossier {row.get(col_dossier,'')}")
+                    st.markdown(f"### Fiche: {row.get(col_nom,'')} â€” Dossier {row.get(col_dossier,'')}")
                     st.markdown(f"- Montant honoraires : {_fmt_money(honoraires)}")
                     st.markdown(f"- Autres frais : {_fmt_money(autres)}")
-                    st.markdown(f"- Total payé : {_fmt_money(total_paye)}")
-                    st.markdown(f"**Solde dû : {_fmt_money(solde)}**")
+                    st.markdown(f"- Total payÃ© : {_fmt_money(total_paye)}")
+                    st.markdown(f"**Solde dÃ» : {_fmt_money(solde)}**")
                     st.markdown("---")
                     acomptes_cols = detect_acompte_columns(df_live)
                     data_ac = []
@@ -1784,9 +1778,9 @@ with tabs[5]:
                     if data_ac:
                         st.table(data_ac)
                     else:
-                        st.write("Aucun acompte enregistré.")
+                        st.write("Aucun acompte enregistrÃ©.")
                     st.markdown("---")
-                    if st.button("Exporter relevé client (.xlsx)"):
+                    if st.button("Exporter relevÃ© client (.xlsx)"):
                         try:
                             out_df = pd.DataFrame([{
                                 "ID_Client": row.get("ID_Client",""),
@@ -1794,7 +1788,7 @@ with tabs[5]:
                                 "Nom": row.get(col_nom,""),
                                 "Montant honoraires": honoraires,
                                 "Autres frais": autres,
-                                "Total payé": total_paye,
+                                "Total payÃ©": total_paye,
                                 "Solde": solde
                             }])
                             buf = BytesIO()
@@ -1802,7 +1796,7 @@ with tabs[5]:
                                 out_df.to_excel(writer, index=False, sheet_name="Releve")
                             buf.seek(0)
                             st.download_button(
-                                "Télécharger XLSX",
+                                "TÃ©lÃ©charger XLSX",
                                 data=buf.getvalue(),
                                 file_name=f"releve_client_{str(row.get(col_dossier,'')).replace('/','-')}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1841,63 +1835,63 @@ try:
 except Exception:
     PLOTLY_AVAILABLE = False
 
-# [--- Reste des helpers, configs, mapping, etc. inchangé ---]
-# ... [aucune modification jusqu'à la création des tabs]
+# [--- Reste des helpers, configs, mapping, etc. inchangÃ© ---]
+# ... [aucune modification jusqu'Ã  la crÃ©ation des tabs]
 
 # -------------------------
 # Tabs UI (AJOUT DE L'ONGLET ESCROW)
 # -------------------------
 tabs = st.tabs([
-    "📄 Fichiers",
-    "📊 Dashboard",
-    "📈 Analyses",
-    "➕ Ajouter",
-    "✏️ / 🗑️ Gestion",
-    "💳 Compta Client",
-    "💾 Export",
-    "🛡️ Escrow" # <-- AJOUT Escrow ici !
+    "ðŸ“„ Fichiers",
+    "ðŸ“Š Dashboard",
+    "ðŸ“ˆ Analyses",
+    "âž• Ajouter",
+    "âœï¸ / ðŸ—‘ï¸ Gestion",
+    "ðŸ’³ Compta Client",
+    "ðŸ’¾ Export",
+    "ðŸ›¡ï¸ Escrow" # <-- AJOUT Escrow ici !
 ])
 
 # ---- Files tab ----
 with tabs[0]:
-    st.header("📂 Fichiers")    
-    # ... [bloc fichiers original inchangé] ...
+    st.header("ðŸ“‚ Fichiers")    
+    # ... [bloc fichiers original inchangÃ©] ...
 
 # ---- Dashboard tab ----
 with tabs[1]:
-    st.subheader("📊 Dashboard")
-    # ... [bloc dashboard original inchangé] ...
+    st.subheader("ðŸ“Š Dashboard")
+    # ... [bloc dashboard original inchangÃ©] ...
 
 # ---- Analyses tab ----
-with tabs[2]:st.subheader("📈 Analyses")    
-    # ... [bloc analyses original inchangé] ...
+with tabs[2]:st.subheader("ðŸ“ˆ Analyses")    
+    # ... [bloc analyses original inchangÃ©] ...
 
 # ---- Ajouter tab ----
 with tabs[3]:
-    st.header("➕ Ajouter")
-    # ... [bloc ajouter original inchangé] ...
+    st.header("âž• Ajouter")
+    # ... [bloc ajouter original inchangÃ©] ...
 
 # ---- Gestion tab ----
 with tabs[4]:
-    st.header("✏️ / 🗑️ Gestion")
-    # ... [bloc gestion original inchangé] ...
+    st.header("âœï¸ / ðŸ—‘ï¸ Gestion")
+    # ... [bloc gestion original inchangÃ©] ...
 
 # ---- Compta Client tab ----
 with tabs[5]:
-    st.header("💳 Compta Client")
-    # ... [bloc compta client original inchangé] ...
+    st.header("ðŸ’³ Compta Client")
+    # ... [bloc compta client original inchangÃ©] ...
 
 # ---- Export tab ----
 with tabs[6]:
-    st.header("💾 Export")
-    # ... [bloc export original inchangé] ...
+    st.header("ðŸ’¾ Export")
+    # ... [bloc export original inchangÃ©] ...
 
 # --- NOUVEAU ONGLET Escrow ---
 with tabs[7]:
-    st.subheader("🛡️ Escrow")
+    st.subheader("ðŸ›¡ï¸ Escrow")
     df_live = _get_df_live_safe()
     if df_live is None or df_live.empty or "Escrow" not in df_live.columns:
-        st.info("Aucun dossier Escrow détecté.")
+        st.info("Aucun dossier Escrow dÃ©tectÃ©.")
     else:
         escrow_df = df_live[df_live["Escrow"] == 1].copy()
         colonnes_affichage = [
@@ -1923,26 +1917,26 @@ with tabs[7]:
             escrow_df[colonnes_existantes].to_excel(writer, index=False, sheet_name="Escrow")
         buf.seek(0)
         st.download_button(
-            "Télécharger XLSX (Escrow)",
+            "TÃ©lÃ©charger XLSX (Escrow)",
             data=buf.getvalue(),
             file_name="Synthese_Escrow.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-# ... [fin du script inchangé]
+# ... [fin du script inchangÃ©]
 
 # ---- Export tab ----
 with tabs[6]:
-    st.header("💾 Export")
+    st.header("ðŸ’¾ Export")
     df_live = _get_df_live_safe()
     if df_live is None or df_live.empty:
-        st.info("Aucune donnée à exporter.")
+        st.info("Aucune donnÃ©e Ã  exporter.")
     else:
-        st.write(f"Vue en mémoire: {df_live.shape[0]} lignes, {df_live.shape[1]} colonnes")
+        st.write(f"Vue en mÃ©moire: {df_live.shape[0]} lignes, {df_live.shape[1]} colonnes")
         col1, col2 = st.columns(2)
         with col1:
             csv_bytes = df_live.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
+            st.download_button("â¬‡ï¸ Export CSV", data=csv_bytes, file_name="Clients_export.csv", mime="text/csv")
         with col2:
             df_for_export = df_live.copy()
             try:
@@ -1958,10 +1952,10 @@ with tabs[6]:
                 else:
                     df_for_export["_Acomptes_sum_"] = 0.0
                 df_for_export["Solde_formule"] = df_for_export["_Montant_num_"] + df_for_export["_Autres_num_"] - df_for_export["_Acomptes_sum_"]
-                df_for_export["Solde à percevoir (US $)"] = df_for_export["Solde_formule"]
+                df_for_export["Solde Ã  percevoir (US $)"] = df_for_export["Solde_formule"]
             except Exception:
                 df_for_export["Solde_formule"] = df_for_export.get("Solde",0).apply(lambda x: _to_num(x))
-                df_for_export["Solde à percevoir (US $)"] = df_for_export.get("Solde à percevoir (US $)",0).apply(lambda x: _to_num(x))
+                df_for_export["Solde Ã  percevoir (US $)"] = df_for_export.get("Solde Ã  percevoir (US $)",0).apply(lambda x: _to_num(x))
             drop_cols = [c for c in df_for_export.columns if c.startswith("_num_") or c in ["_Montant_num_","_Autres_num_","_Acomptes_sum_"]]
             try:
                 df_export_final = df_for_export.drop(columns=drop_cols)
@@ -1971,7 +1965,6 @@ with tabs[6]:
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 df_export_final.to_excel(writer, index=False, sheet_name="Clients")
             out_bytes = buf.getvalue()
-            st.download_button("⬇️ Export XLSX (avec colonne Solde_formule)", data=out_bytes, file_name="Clients_export_with_Solde_formule.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button("â¬‡ï¸ Export XLSX (avec colonne Solde_formule)", data=out_bytes, file_name="Clients_export_with_Solde_formule.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # End of file
-import escrow_manager as esc
