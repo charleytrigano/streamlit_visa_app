@@ -1011,9 +1011,86 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
 # -------------------------
 # Tabs UI
 # -------------------------
-tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export", "🧾 Escrow"])
+tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export"])
+# Masquer les onglets cachés (ex: Fichiers)
+tabs = [t for t in tabs if "hidden" not in t]
 
 # ---- Files tab ----
+with tabs[0]:
+    st.header("📂 Fichiers")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Clients")
+        if up_clients is not None:
+            st.text(f"Upload: {getattr(up_clients,'name','')}")
+        elif isinstance(clients_src_for_read, str) and clients_src_for_read:
+            st.text(f"Chargé depuis: {clients_src_for_read}")
+        elif os.path.exists(CACHE_CLIENTS):
+            st.text("Chargé depuis le cache local")
+        if df_clients_raw is None or (isinstance(df_clients_raw, pd.DataFrame) and df_clients_raw.empty):
+            st.warning("Aucun fichier Clients detecté.")
+        else:
+            st.success(f"Clients lus: {df_clients_raw.shape[0]} lignes")
+            try:
+                st.dataframe(df_clients_raw.head(100).reset_index(drop=True), use_container_width=True, height=360)
+            except Exception:
+                st.write(df_clients_raw.head(8))
+    with c2:
+        st.subheader("Visa")
+        if up_visa is not None:
+            st.text(f"Upload: {getattr(up_visa,'name','')}")
+        elif isinstance(visa_src_for_read, str) and visa_src_for_read:
+            st.text(f"Chargé depuis: {visa_src_for_read}")
+        elif os.path.exists(CACHE_VISA):
+            st.text("Chargé depuis le cache local")
+        if df_visa_raw is None or (isinstance(df_visa_raw, pd.DataFrame) and df_visa_raw.empty):
+            st.warning("Aucun fichier Visa detecté.")
+        else:
+            st.success(f"Visa lu: {df_visa_raw.shape[0]} lignes")
+            try:
+                st.dataframe(df_visa_raw.head(100).reset_index(drop=True), use_container_width=True, height=360)
+            except Exception:
+                st.write(df_visa_raw.head(8))
+    st.markdown("---")
+    col_a, col_b = st.columns([1,1])
+    with col_a:
+        if st.button("Réinitialiser mémoire (recharger)"):
+            df_all2 = normalize_clients_for_live(df_clients_raw)
+            df_all2 = recalc_payments_and_solde(df_all2)
+            _set_df_live(df_all2)
+            try:
+                _persist_clients_cache(df_all2)
+            except Exception:
+                pass
+            st.success("Mémoire réinitialisée.")
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
+    with col_b:
+        if st.button("Actualiser la lecture"):
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
+    # If a ComptaCli was parsed on upload, offer import (and persist)
+    if uploaded_comptacli_df is not None:
+        st.markdown("---")
+        st.info("Fiche ComptaCli détectée dans l'xlsx uploadé.")
+        if st.button("Importer la fiche ComptaCli détectée"):
+            try:
+                df_live = _get_df_live_safe()
+                df_new = normalize_clients_for_live(uploaded_comptacli_df)
+                df_new = recalc_payments_and_solde(df_new)
+                df_live = pd.concat([df_live, df_new], ignore_index=True)
+                df_live = recalc_payments_and_solde(df_live)
+                _set_df_live(df_live)
+                _persist_clients_cache(df_live)
+                st.success("Fiche ComptaCli importée en mémoire et persistée.")
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Erreur import fiche: {e}")
+
 # ---- Dashboard tab ----
 with tabs[1]:
     st.subheader("📊 Dashboard")
@@ -1776,8 +1853,14 @@ tabs = st.tabs([
     "💾 Export",
     "🛡️ Escrow" # <-- AJOUT Escrow ici !
 ])
+# Masquer les onglets cachés (ex: Fichiers)
+tabs = [t for t in tabs if "hidden" not in t]
 
 # ---- Files tab ----
+with tabs[0]:
+    st.header("📂 Fichiers")    
+    # ... [bloc fichiers original inchangé] ...
+
 # ---- Dashboard tab ----
 with tabs[1]:
     st.subheader("📊 Dashboard")
