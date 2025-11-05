@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 escrow_manager.py
-Module de gestion des dossiers et des escrows
+Gestion des dossiers et des escrows
 Lecture du fichier Excel depuis Dropbox (ou localement si échec)
 Détection automatique des onglets "Dossiers" et "Escrow"
 """
@@ -51,7 +51,7 @@ def load_data():
 
     print("📄 Feuilles trouvées :", xls.sheet_names)
 
-    # Détection automatique (ignore les majuscules et espaces)
+    # Détection automatique (ignore majuscules/espaces)
     def find_sheet(name_hint):
         for sheet in xls.sheet_names:
             if sheet.strip().lower() == name_hint.lower():
