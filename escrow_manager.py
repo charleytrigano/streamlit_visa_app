@@ -8,7 +8,6 @@ SHEET_DOSSIERS = "Dossiers"
 SHEET_ESCROW = "Escrow"
 
 def _init_workbook_if_needed():
-    """Crée le fichier Excel s'il n'existe pas encore."""
     path = Path(EXCEL_FILE)
     if not path.exists():
         df_dossiers = pd.DataFrame(columns=[
@@ -23,7 +22,6 @@ def _init_workbook_if_needed():
             df_escrow.to_excel(w, index=False, sheet_name=SHEET_ESCROW)
 
 def load_data():
-    """Charge les deux feuilles du fichier Excel."""
     _init_workbook_if_needed()
     xls = pd.ExcelFile(EXCEL_FILE)
     df_dossiers = pd.read_excel(xls, SHEET_DOSSIERS)
@@ -31,13 +29,11 @@ def load_data():
     return df_dossiers, df_escrow
 
 def save_data(df_dossiers, df_escrow):
-    """Sauvegarde les deux DataFrames dans le fichier Excel."""
     with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl") as w:
         df_dossiers.to_excel(w, index=False, sheet_name=SHEET_DOSSIERS)
         df_escrow.to_excel(w, index=False, sheet_name=SHEET_ESCROW)
 
 def add_dossier(df_dossiers, df_escrow, dossier):
-    """Ajoute un dossier et, si Escrow, ajoute une ligne dans l’onglet Escrow."""
     df_dossiers = pd.concat([df_dossiers, pd.DataFrame([dossier])], ignore_index=True)
     if int(dossier.get("Escrow", 0)) == 1:
         new_esc = {
@@ -53,7 +49,6 @@ def add_dossier(df_dossiers, df_escrow, dossier):
     return df_dossiers, df_escrow
 
 def update_dossier(df_dossiers, df_escrow, dossier_num, updates):
-    """Met à jour un dossier et met à jour Escrow si applicable."""
     idx = df_dossiers.index[df_dossiers["Dossier N"].astype(str) == str(dossier_num)]
     if len(idx) == 0:
         return df_dossiers, df_escrow, False
@@ -84,7 +79,6 @@ def update_dossier(df_dossiers, df_escrow, dossier_num, updates):
     return df_dossiers, df_escrow, True
 
 def mark_reclaimed(df_escrow, dossier_num):
-    """Marque un dossier Escrow comme réclamé."""
     idx = df_escrow.index[df_escrow["Dossier N"].astype(str) == str(dossier_num)]
     if len(idx):
         j = idx[0]
@@ -93,13 +87,11 @@ def mark_reclaimed(df_escrow, dossier_num):
     return df_escrow
 
 def a_reclamer(df_escrow):
-    """Retourne les dossiers Escrow à réclamer."""
     if "État" not in df_escrow.columns:
         return df_escrow.iloc[0:0]
     return df_escrow[df_escrow["État"].fillna("") == "À réclamer"]
 
 def reclames(df_escrow):
-    """Retourne les dossiers Escrow déjà réclamés."""
     if "État" not in df_escrow.columns:
         return df_escrow.iloc[0:0]
     return df_escrow[df_escrow["État"].fillna("") == "Réclamé"]
