@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 
-EXCEL_FILE = "Clients BL.xlsx"
+EXCEL_FILE = r"C:\Users\charl\OneDrive\Estelle\Clients BL.xlsx"
 SHEET_DOSSIERS = "Dossiers"
 SHEET_ESCROW = "Escrow"
 
