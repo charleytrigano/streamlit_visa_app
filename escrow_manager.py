@@ -1,39 +1,86 @@
 # -*- coding: utf-8 -*-
+"""
+escrow_manager.py
+Module de gestion des dossiers et des escrows
+Lecture du fichier Excel depuis Dropbox (ou localement si échec)
+Détection automatique des onglets "Dossiers" et "Escrow"
+"""
+
 from datetime import datetime
 from pathlib import Path
+from io import BytesIO
 import pandas as pd
+import requests
 
-EXCEL_FILE = "https://www.dropbox.com/scl/fi/2j7czthz1u8kvwcj4a411/Clients-BL.xlsx?rlkey=ziivmkj4jler3m49hl21hbj5n&st=ww48qmyy&dl=1
-"
+# === CONFIGURATION ===
+EXCEL_URL = "https://www.dropbox.com/scl/fi/2j7czthz1u8kvwcj4a411/Clients-BL.xlsx?rlkey=ziivmkj4jler3m49hl21hbj5n&st=x7wtd6gh&dl=1"
+EXCEL_PATH = Path("Clients_BL_local.xlsx")
+
 SHEET_DOSSIERS = "Dossiers"
 SHEET_ESCROW = "Escrow"
 
-def _init_workbook_if_needed():
-    path = Path(EXCEL_FILE)
-    if not path.exists():
+
+# === INITIALISATION ===
+def _init_local_if_needed():
+    """Crée un fichier local vide si Dropbox est inaccessible."""
+    if not EXCEL_PATH.exists():
         df_dossiers = pd.DataFrame(columns=[
-            "Dossier N", "Nom", "Date", "Montant total", "Acompte 1",
-            "Date Acompte 1", "Dossier envoyé", "Date envoi", "Escrow"
+            "Dossier N", "Nom", "Date", "Montant total", "Acompte 1", "Date Acompte 1",
+            "Dossier envoyé", "Date envoi", "Escrow"
         ])
         df_escrow = pd.DataFrame(columns=[
             "Dossier N", "Nom", "Montant", "Date envoi", "État", "Date réclamation"
         ])
-        with pd.ExcelWriter(path, engine="openpyxl") as w:
-            df_dossiers.to_excel(w, index=False, sheet_name=SHEET_DOSSIERS)
-            df_escrow.to_excel(w, index=False, sheet_name=SHEET_ESCROW)
+        with pd.ExcelWriter(EXCEL_PATH, engine="openpyxl") as writer:
+            df_dossiers.to_excel(writer, index=False, sheet_name=SHEET_DOSSIERS)
+            df_escrow.to_excel(writer, index=False, sheet_name=SHEET_ESCROW)
 
+
+# === LECTURE DU FICHIER ===
 def load_data():
-    _init_workbook_if_needed()
-    xls = pd.ExcelFile(EXCEL_FILE)
-    df_dossiers = pd.read_excel(xls, SHEET_DOSSIERS)
-    df_escrow = pd.read_excel(xls, SHEET_ESCROW)
+    """Lit le fichier Excel (Dropbox ou local) et détecte automatiquement les feuilles."""
+    try:
+        r = requests.get(EXCEL_URL, timeout=30)
+        r.raise_for_status()
+        xls = pd.ExcelFile(BytesIO(r.content))
+        print("✅ Lecture Dropbox OK")
+    except Exception as e:
+        print("⚠️ Lecture Dropbox échouée :", e)
+        _init_local_if_needed()
+        xls = pd.ExcelFile(EXCEL_PATH)
+
+    print("📄 Feuilles trouvées :", xls.sheet_names)
+
+    # Détection automatique (ignore les majuscules et espaces)
+    def find_sheet(name_hint):
+        for sheet in xls.sheet_names:
+            if sheet.strip().lower() == name_hint.lower():
+                return sheet
+        raise ValueError(f"Feuille '{name_hint}' introuvable. Feuilles disponibles : {xls.sheet_names}")
+
+    sheet_dossiers = find_sheet("Dossiers")
+    sheet_escrow = find_sheet("Escrow")
+
+    df_dossiers = pd.read_excel(xls, sheet_dossiers)
+    df_escrow = pd.read_excel(xls, sheet_escrow)
     return df_dossiers, df_escrow
 
-def save_data(df_dossiers, df_escrow):
-    with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl") as w:
-        df_dossiers.to_excel(w, index=False, sheet_name=SHEET_DOSSIERS)
-        df_escrow.to_excel(w, index=False, sheet_name=SHEET_ESCROW)
 
+# === SAUVEGARDE ===
+def save_data(df_dossiers, df_escrow):
+    """
+    Sauvegarde les données localement (Dropbox ne permet pas l’écriture directe).
+    Le fichier est sauvegardé sous Clients_BL_local_save.xlsx
+    """
+    local_out = Path("Clients_BL_local_save.xlsx")
+    with pd.ExcelWriter(local_out, engine="openpyxl") as writer:
+        df_dossiers.to_excel(writer, index=False, sheet_name=SHEET_DOSSIERS)
+        df_escrow.to_excel(writer, index=False, sheet_name=SHEET_ESCROW)
+    print("💾 Sauvegarde locale :", local_out)
+    return str(local_out)
+
+
+# === GESTION DES DOSSIERS ===
 def add_dossier(df_dossiers, df_escrow, dossier):
     df_dossiers = pd.concat([df_dossiers, pd.DataFrame([dossier])], ignore_index=True)
     if int(dossier.get("Escrow", 0)) == 1:
@@ -48,6 +95,7 @@ def add_dossier(df_dossiers, df_escrow, dossier):
         df_escrow = pd.concat([df_escrow, pd.DataFrame([new_esc])], ignore_index=True)
     save_data(df_dossiers, df_escrow)
     return df_dossiers, df_escrow
+
 
 def update_dossier(df_dossiers, df_escrow, dossier_num, updates):
     idx = df_dossiers.index[df_dossiers["Dossier N"].astype(str) == str(dossier_num)]
@@ -79,6 +127,8 @@ def update_dossier(df_dossiers, df_escrow, dossier_num, updates):
     save_data(df_dossiers, df_escrow)
     return df_dossiers, df_escrow, True
 
+
+# === GESTION ESCROW ===
 def mark_reclaimed(df_escrow, dossier_num):
     idx = df_escrow.index[df_escrow["Dossier N"].astype(str) == str(dossier_num)]
     if len(idx):
@@ -87,10 +137,12 @@ def mark_reclaimed(df_escrow, dossier_num):
         df_escrow.at[j, "Date réclamation"] = datetime.now().strftime("%Y-%m-%d")
     return df_escrow
 
+
 def a_reclamer(df_escrow):
     if "État" not in df_escrow.columns:
         return df_escrow.iloc[0:0]
     return df_escrow[df_escrow["État"].fillna("") == "À réclamer"]
+
 
 def reclames(df_escrow):
     if "État" not in df_escrow.columns:
