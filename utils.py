@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 # ... le reste inchangé ...
 from __future__ import annotations
 
@@ -33,5 +35,6 @@ def validate_rfe_row(row: pd.Series) -> Tuple[bool, str]:
     if canceled and (sent or refused or approved):
         return False, "Un dossier annulé ne peut pas être marqué Envoyé/Refusé/Approuvé"
     return True, ""
+
 
 
