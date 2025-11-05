@@ -3,7 +3,8 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 
-EXCEL_FILE = "https://onedrive.live.com/download?resid=EA844A03BF6B2E0D!scadf2120cdf24e4ebabcb2d74454348b&cid=ea844a03bf6b2e0d"
+EXCEL_FILE = "https://www.dropbox.com/scl/fi/2j7czthz1u8kvwcj4a411/Clients-BL.xlsx?rlkey=ziivmkj4jler3m49hl21hbj5n&st=x7wtd6gh&dl=1
+"
 SHEET_DOSSIERS = "Dossiers"
 SHEET_ESCROW = "Escrow"
 
