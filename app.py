@@ -1011,9 +1011,7 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
 # -------------------------
 # Tabs UI
 # -------------------------
-tabs = st.tabs(["📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export"])
-# Masquer les onglets cachés (ex: Fichiers)
-
+tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export", "🛡️ Escrow"])
 
 # ---- Files tab ----
 with tabs[0]:
@@ -1844,6 +1842,7 @@ except Exception:
 # Tabs UI (AJOUT DE L'ONGLET ESCROW)
 # -------------------------
 tabs = st.tabs([
+    "📄 Fichiers",
     "📊 Dashboard",
     "📈 Analyses",
     "➕ Ajouter",
@@ -1852,8 +1851,6 @@ tabs = st.tabs([
     "💾 Export",
     "🛡️ Escrow" # <-- AJOUT Escrow ici !
 ])
-# Masquer les onglets cachés (ex: Fichiers)
-
 
 # ---- Files tab ----
 with tabs[0]:
@@ -1890,7 +1887,7 @@ with tabs[6]:
     # ... [bloc export original inchangé] ...
 
 # --- NOUVEAU ONGLET Escrow ---
-with tabs[7]:
+with tabs[-1]:
     st.subheader("🛡️ Escrow")
     df_live = _get_df_live_safe()
     if df_live is None or df_live.empty or "Escrow" not in df_live.columns:
