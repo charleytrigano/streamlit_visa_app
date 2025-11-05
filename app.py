@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+
 # app.py - Visa Manager (complete)
 # - Features:
 #   * Import Clients/Visa (xlsx/csv), normalize columns, heuristic mapping
