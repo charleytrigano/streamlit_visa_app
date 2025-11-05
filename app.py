@@ -1974,5 +1974,4 @@ with tabs[6]:
             st.download_button("⬇️ Export XLSX (avec colonne Solde_formule)", data=out_bytes, file_name="Clients_export_with_Solde_formule.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # End of file
-
 import escrow_manager as esc
