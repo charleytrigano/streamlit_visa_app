@@ -1011,9 +1011,9 @@ def kpi_html(label: str, value: str, sub: str = "") -> str:
 # -------------------------
 # Tabs UI
 # -------------------------
-tabs = st.tabs(["📄 Fichiers","📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export"])
+tabs = st.tabs(["📊 Dashboard","📈 Analyses","➕ Ajouter","✏️ / 🗑️ Gestion","💳 Compta Client","💾 Export"])
 # Masquer les onglets cachés (ex: Fichiers)
-tabs = [t for t in tabs if "hidden" not in t]
+
 
 # ---- Files tab ----
 with tabs[0]:
@@ -1844,7 +1844,6 @@ except Exception:
 # Tabs UI (AJOUT DE L'ONGLET ESCROW)
 # -------------------------
 tabs = st.tabs([
-    "📄 Fichiers",
     "📊 Dashboard",
     "📈 Analyses",
     "➕ Ajouter",
@@ -1854,7 +1853,7 @@ tabs = st.tabs([
     "🛡️ Escrow" # <-- AJOUT Escrow ici !
 ])
 # Masquer les onglets cachés (ex: Fichiers)
-tabs = [t for t in tabs if "hidden" not in t]
+
 
 # ---- Files tab ----
 with tabs[0]:
